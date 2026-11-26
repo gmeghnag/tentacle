@@ -115,7 +115,7 @@ Conclusion: the fix is presentation + one pure presentation rule; §7 "single br
 4. **Compact capsule = AskCard's metrics through one `size.capsule` token; font `subheadStrong`** (the drawn pixels), not AskCard's `headline`. — Three capsules per row at 15 pt are the calmer row the owner chose; the height/radius/padding are shared so the app keeps one capsule.
 5. **Offline: one top banner, no per-item reason.** — Repeating it under every item was part of «ammassato»; the gate (`blockedWhy`) still refuses to send.
 6. **The broken file's path line goes; the confirm names the basename** (`deploy.yaml`, not `.tentacle/workflows/deploy.yaml`). — As drawn; the folder line at the bottom gives the directory.
-7. **Evidence for the two states flow 46 cannot reach in its gate path** (A·+1, A·offline) comes from a shots-only flow `46b-workflow-landing-shots.yaml` with its own seeded file and session: Approve, then Start of the same file → the run is «Needs you» and the banner says `+1`; both asks denied after the shots; offline via a hook that stops/restarts that flow's serve (reuse the flow-37 stop/start hooks, `e2e/hooks.ts:156-158`, if they can target it; else add one beside them). The executor checks how `40-mascot-shots.yaml` is run and runs 46b the same way (not in the gate if 40 is not). A state that cannot be reached is reported «pixels unverified», never faked.
+7. **Evidence for the two states flow 46 cannot reach in its gate path** (A·+1, A·offline) comes from a shots-only flow `46b-workflow-landing-shots.yaml` with its own seeded file and session: Approve, then Start of the same file → the run is «Needs you» and the banner says `+1`; both asks denied after the shots; offline via a hook that stops/restarts that flow's serve (reuse the flow-37 stop/start hooks, `e2e/hooks.ts:156-158`, if they can target it; else add one beside them). The executor checks how `40-mascot-shots.yaml` is run and runs 46b the same way (not in the gate if 40 is not). A state that cannot be reached is reported «pixels unverified», never faked. **Executor correction (2026-11-26):** the `+1` cannot be reached (see the «Two asks» failure mode); 46b shoots «a run waits, one banner» and does not assert `+1`.
 
 ### Files
 
@@ -143,7 +143,7 @@ Dependency order (pure → wiring → render → e2e):
 | Banner tapped | `unpark()` → `reviewed: true` → `askPresented` → the standard sheet over the landing; answer on it (ONE broker). |
 | Sheet swiped down over the landing | `park()` → banner again; a second tap unparks. |
 | Answered / denied / withdrawn (`budget.wait`) | Ask leaves the sheet → falling edge → «Asking…» ends, ONE re-read (unchanged); banner shows the next queued ask, if any, or goes. |
-| Two asks (Approve + a run's) | Banner shows the current with `+1`; after the first is answered the next is born by `present()` with `reviewed: false` → banner, never a surprise sheet. |
+| Two asks (Approve + a run's) | Banner shows the current; after the first is answered the next is born by `present()` with `reviewed: false` → banner, never a surprise sheet. **Executor correction (2026-11-26):** no `+1` for daemon asks — the client's router prompts ONE at a time (`packages/client/src/permission-router.ts:419-427`, one router per `RemoteClient`), so the second never reaches the sheet while the first is open and `sheet.queued` stays 0. `+N` is drawn only when the sheet itself queues. |
 | Landing comes back on top (a run screen popped) with an unparked, not-reviewed foreign ask | Not presentable (`reviewed: false`) → banner. No flash. |
 | Ask reviewed over the landing, then the person goes back to the Session screen | `askPresentable` off the landing ignores `reviewed` → as today (presented unless parked). |
 | A queued ask arrives while the sheet is up over the landing | It queues behind (sheet unchanged); when it becomes current it is born `reviewed: false` → banner. |
@@ -170,7 +170,64 @@ Red first on the unchanged code for each (§9); the narrow files are `apps/mobil
 
 ## Execution
 
-*— (executor), (date)*
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Repro / load-bearing check (before any edit):** the three Context greps printed the same lines (`sheet-plan.ts:853-855`, `WorkflowStart.tsx:251,266`, `SessionScreen.tsx:1952-1953`, flow 46 `:52`). `unpark()` only committed sheet state; the landing's source had no `unpark`; one `askPresentable` call decided the push. Holds.
+
+**As built, in order** (red = on the unchanged code, on assertions):
+
+| Slice | Change | Red |
+|---|---|---|
+| 1 | `permission-sheet.ts`: `reviewed`, `unpark()` | 4 fail |
+| 2 | `sheet-plan.ts`: `askPresentable(…, reviewed)` | 2 fail |
+| 3 | `ask-park.ts`: `landingAskBanner` | 4 fail (against a stub returning null) |
+| 4 | `workflow-run-controller.ts`: `banner?`, `queued?` | 1 fail |
+| 5 | `workflow-landing.ts`: D6 | 6 fail |
+| 6 | `workflow-start-controller.ts`: `ask`, `reviewAsk()`, busy | 6 fail |
+| 7 | `theme.ts` `size.capsule`, `PillButton` compact/quiet, `AskCard` | no red run first; mutation M10 |
+| 8–10 | `ui/AskBanner.tsx`, `SessionScreen`, `WorkflowStart`, `App.tsx` | 6 wiring fail |
+| 11 | flow 46, new flow 46b, `run.ts` (seed, list, `LANDINGSHOTS_ID`) | not run on a simulator |
+| 12–13 | changelog fragment; dated line under D8 | — |
+
+**Mutations** (each exit 1, source restored; script `.tentacle/tmp/mobile-workflows-landing-v2/mutate.ts`, gitignored):
+
+| # | Mutation | Failed |
+|---|---|---|
+| M1 | over the landing ignore `reviewed` (`return true`) | sheet-plan 1 («arrives as a banner») |
+| M2 | `SessionScreen` drops `state.sheet.reviewed` | wiring 1 |
+| M3 | `unpark()` does not set `reviewed` | permission-sheet 3 |
+| M4 | `unpark()` keeps the old parked-only guard | permission-sheet 1 |
+| M5 | `landingAskBanner` ignores `reviewed` | ask-park 2 |
+| M6 | «Asking…» blocks every action | landing 1 |
+| M7 | `reviewAsk` does nothing | landing-controller 1 |
+| M8 | a read keeps a gone row's action in flight | landing-controller 1 |
+| M9 | a Start forgets the open approval | landing-controller 1 |
+| M10 | `AskCard` back to `minHeight: 34` | wiring 1 |
+
+**Drift from Implementation**
+
+1. **`+1` is not reachable** (corrected above). The Session screen's banner has the same limit. A possible follow-up, not built: count `RemoteClient.pendingPermissionsOf(sessionId)` (`remote-client.ts:2276`).
+2. The controller keeps «Asking…» as its own set beside the start/delete in flight: with one `busy` record, a Start or a refused Delete erased it while the ask was still open (D6, «label «Asking…» while its ask is open»).
+3. The confirm's Delete is dimmed when delete is unusable (offline) and a tap gives the light haptic (D5 «every capsule dimmed»).
+4. Controller tests are in `workflow-landing-controller.test.ts` (it has the fake sheet), plus one `banner()` case in `workflow-run-controller.test.ts`.
+5. The wiring case «never line-capped» now checks the `Detail` block only: D3 caps the item's name and summary.
+6. 46b reuses `16-stop-serve.js` / `16-start-serve.js` (main `serve`), so `hooks.ts` is unchanged; it is in `FLOWS` as flow 40 is.
+7. `LandingItem` keeps `path`, `status`, `description`; the Recent runs row is unchanged.
+
+**Evidence** (from `apps/mobile`): `bun test test/permission-sheet*.test.ts test/sheet-plan.test.ts test/ask-park.test.ts test/workflow-*.test.ts test/native-sheets-wiring.test.ts test/e2e-*.test.ts test/theme*.test.ts test/session-screen.test.ts` → 1311 pass, **1 fail**; `tsc -p tsconfig.json --noEmit` clean; `biome check` on the changed files clean. No protocol or schema change.
+
+- The 1 fail is `e2e-gate.test.ts` «every quarantined or known-bug flow has a TODO.md line naming it» (`19-lock-unlock-button`). Neither that flow nor `TODO.md` is touched here; `TODO.md` has no such line since `84d8ac64` (base of this branch). It will fail the full gate until that line is restored.
+
+**Unverified**
+
+- **Pixels:** none of the screenshots exist and flows 46 / 46b were never run. The mockup files were outside this session's allowed directories, so layout follows the plan's text only. Verify with the e2e gate (`--only 46-workflow-landing,46b-workflow-landing-shots`) beside mockup A.
+- Full `bun run check`: the orchestrator's.
+
+**Left as is (for Review)**
+
+- The landing's `unpark` does not spend the `ASK_PARKS` note (as planned; same as the run screen): a parked ask reviewed here re-delivers parked.
+- The 34 pt capsules have no `hitSlop` (the old words had 8 pt).
+- The unreleased `changelog.d/mobile-workflows-landing.added.md` still says «permission sheet over the list».
 
 ## Review
 

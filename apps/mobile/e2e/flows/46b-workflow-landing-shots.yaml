@@ -1,0 +1,130 @@
+appId: so.tentacle.app
+---
+# 46b-workflow-landing-shots (docs/fix/mobile-workflows-landing-v2.md, Orchestrator
+# decision 7): the two landing states flow 46 does not pass through, light and
+# dark. TWO ASKS: Approve, then Start of the same file, so the run waits («Needs
+# you») behind the same banner. The phone's client prompts ONE daemon ask at a
+# time, so no «+1» is asserted here. Both are denied after the shots, one banner
+# tap each. OFFLINE: `serve` stopped (flow 16's hooks) and started again. Its own
+# workflow file (`landing-shots.yaml`, seeded by `e2e/run.ts`) and session.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${LANDINGSHOTS_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${LANDINGSHOTS_ID}"
+- assertVisible:
+    id: "session-view"
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 30000
+- runFlow:
+    file: _hub-fan.yaml
+    env:
+      ITEM: "workflows"
+- tapOn:
+    id: "hub-item-workflows"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-landing-recent"
+    timeout: 15000
+- scrollUntilVisible:
+    element:
+      id: "workflow-item-approve-landing-shots"
+    direction: DOWN
+- tapOn:
+    id: "workflow-item-approve-landing-shots"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-landing-ask"
+    timeout: 20000
+- scrollUntilVisible:
+    element:
+      id: "workflow-item-start-landing-shots"
+    direction: DOWN
+# Start raises the run's own hash ask and opens the run: back to the landing.
+- tapOn:
+    id: "workflow-item-start-landing-shots"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-run"
+    timeout: 20000
+- tapOn:
+    id: "workflow-run-back"
+- scrollUntilVisible:
+    element:
+      id: "workflow-landing-needs-you"
+    direction: UP
+    timeout: 20000
+- assertVisible:
+    id: "workflow-landing-ask"
+- assertNotVisible:
+    id: "perm-sheet"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "46b-landing-two-asks"
+# Deny the first (the file's approval).
+- tapOn:
+    id: "workflow-landing-ask"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-reject_once"
+# The next ask (the run's) arrives as the banner again, never as a sheet.
+- extendedWaitUntil:
+    notVisible:
+      id: "perm-sheet"
+    timeout: 20000
+- extendedWaitUntil:
+    visible:
+      id: "workflow-landing-ask"
+    timeout: 20000
+- tapOn:
+    id: "workflow-landing-ask"
+- extendedWaitUntil:
+    visible:
+      id: "perm-sheet"
+    timeout: 20000
+- tapOn:
+    id: "perm-reject_once"
+- extendedWaitUntil:
+    notVisible:
+      id: "workflow-landing-ask"
+    timeout: 20000
+# Offline: one banner says why, the buttons stay where they are, dimmed.
+- runScript: "16-stop-serve.js"
+- extendedWaitUntil:
+    visible:
+      id: "workflow-landing-offline"
+    timeout: 60000
+- scrollUntilVisible:
+    element:
+      id: "workflow-item-delete-landing-shots"
+    direction: DOWN
+# A dimmed tap sends nothing and asks nothing.
+- tapOn:
+    id: "workflow-item-delete-landing-shots"
+- assertNotVisible:
+    id: "workflow-delete-question-landing-shots"
+- scrollUntilVisible:
+    element:
+      id: "workflow-landing-offline"
+    direction: UP
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "46b-landing-offline"
+- runScript: "16-start-serve.js"
+- extendedWaitUntil:
+    notVisible:
+      id: "workflow-landing-offline"
+    timeout: 60000

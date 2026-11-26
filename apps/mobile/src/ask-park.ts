@@ -7,7 +7,8 @@
  *   re-attach, a session switch, the lock drain's `idle → asking`) comes back
  *   parked, never as a surprise sheet. `forget` when answered here (the sheet's
  *   `onSettled`), never on a withdrawal: the replay needs the note.
- * - `askBanner` is what the parked ask shows under the header.
+ * - `askBanner` is what the parked ask shows under the header;
+ *   `landingAskBanner` is the Workflows landing's (any ask not up there).
  * - `askPresented` / `askSurface` decide whether the sheet is up and which form
  *   it draws (the peek detent never draws buttons).
  */
@@ -79,11 +80,32 @@ export function askBanner(
   if (state.kind !== "asking" || !state.parked) {
     return null;
   }
+  return bannerOf(state.request.title, queued, origin);
+}
+
+function bannerOf(title: string, queued: number, origin: AskOrigin): AskBannerView {
   return {
-    title: state.request.title,
+    title,
     originShort: originWords(origin).lead,
     more: Math.max(0, Math.floor(queued)),
   };
+}
+
+/**
+ * The banner the Workflows LANDING shows (docs/fix/mobile-workflows-landing-v2.md
+ * D1): an ask that is not presented there — parked, or never brought up
+ * (`!reviewed`, `askPresentable`'s rule over the landing). Null when idle,
+ * returned, or the sheet is up.
+ */
+export function landingAskBanner(
+  state: SheetState,
+  queued: number,
+  origin: AskOrigin,
+): AskBannerView | null {
+  if (state.kind !== "asking" || (!state.parked && state.reviewed)) {
+    return null;
+  }
+  return bannerOf(state.request.title, queued, origin);
 }
 
 export interface AskPresentedInput {

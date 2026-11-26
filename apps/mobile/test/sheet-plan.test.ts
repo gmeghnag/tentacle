@@ -564,7 +564,7 @@ describe("S8 — the run screen over a session (docs/fix/mobile-ask-surfaces.md 
   });
 });
 
-describe("the Workflows landing over a session (docs/feat/mobile-workflows-landing.md D8)", () => {
+describe("the Workflows landing over a session (docs/fix/mobile-workflows-landing-v2.md D1)", () => {
   const owner = { computerId: "c", sessionId: "s" };
   const session = { key: "k0", name: "Session", params: { computerId: "c", sessionId: "s" } };
   const landing = (sessionId: string, computerId = "c") => ({
@@ -601,13 +601,35 @@ describe("the Workflows landing over a session (docs/feat/mobile-workflows-landi
     expect(ownWorkflowsTop([], owner)).toBe(false);
   });
 
-  test("over the landing ONLY a file's approval (a workflow ask with no run) is a sheet", () => {
-    expect(askPresentable(wf(null), null, true)).toBe(true);
-    expect(askPresentable(wf("wf-1"), null, true)).toBe(false);
-    expect(askPresentable({ kind: "main" }, null, true)).toBe(false);
-    expect(askPresentable({ kind: "subagent", type: "x", task: "y" }, null, true)).toBe(false);
-    // Off the landing and off a run, everything is presented as before.
-    expect(askPresentable({ kind: "main" }, null, false)).toBe(true);
+  const everyOrigin = [
+    wf(null),
+    wf("wf-1"),
+    { kind: "main" as const },
+    { kind: "subagent" as const, type: "x", task: "y" },
+  ];
+
+  test("over the landing an ask arrives as a banner: nothing is a sheet unreviewed", () => {
+    // Mutation: ignore `reviewed` over the landing (return true) → red.
+    for (const origin of everyOrigin) {
+      expect(askPresentable(origin, null, true)).toBe(false);
+      expect(askPresentable(origin, null, true, false)).toBe(false);
+    }
+  });
+
+  test("over the landing a REVIEWED ask is a sheet, whoever asks", () => {
+    for (const origin of everyOrigin) {
+      expect(askPresentable(origin, null, true, true)).toBe(true);
+    }
+  });
+
+  test("off the landing `reviewed` changes nothing, over a run or elsewhere", () => {
+    for (const reviewed of [false, true]) {
+      expect(askPresentable({ kind: "main" }, null, false, reviewed)).toBe(true);
+      expect(askPresentable(wf(null), null, false, reviewed)).toBe(true);
+      expect(askPresentable(wf("wf-1"), "wf-1", false, reviewed)).toBe(true);
+      expect(askPresentable(wf("wf-2"), "wf-1", false, reviewed)).toBe(false);
+      expect(askPresentable({ kind: "main" }, "wf-1", false, reviewed)).toBe(false);
+    }
   });
 });
 

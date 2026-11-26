@@ -191,7 +191,7 @@ import { type ToolsSegmentId, toolsSummary, toolsView } from "../tools-view.ts";
 import type { Row } from "../transcript-rows.ts";
 import { ActionSheet } from "../ui/ActionSheet.tsx";
 import { ActivityBadge } from "../ui/ActivityBadge.tsx";
-import { AskSlim } from "../ui/AskSlim.tsx";
+import { AskBanner } from "../ui/AskBanner.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { Composer } from "../ui/Composer.tsx";
 import { ContextRing } from "../ui/ContextRing.tsx";
@@ -1426,7 +1426,8 @@ export function SessionScreen({
     outbox: decision !== null,
     // The sheet is up while the ask is on screen and NOT parked (a swipe parks it:
     // the banner shows instead) and the drawer is closed; a `returned` reply still
-    // has words to read, and is swipe-dismissible. `idle` → nothing to show.
+    // has words to read, and is swipe-dismissible. `idle` → nothing to show. Over
+    // the Workflows landing only an ask brought up from its banner (`reviewed`).
     permission:
       state.sheet.kind === "returned" ||
       askPresented({
@@ -1435,7 +1436,12 @@ export function SessionScreen({
         drawerOpen,
         presentable:
           state.sheet.kind !== "asking" ||
-          askPresentable(state.sheet.origin ?? { kind: "main" }, topRunId, workflowsTop),
+          askPresentable(
+            state.sheet.origin ?? { kind: "main" },
+            topRunId,
+            workflowsTop,
+            state.sheet.reviewed,
+          ),
       }),
   });
   // Only the kinds this build presents natively are pushed: the other three
@@ -1949,22 +1955,17 @@ export function SessionScreen({
         {banner_ask === null ? null : (
           // The parked ask (docs/fix/mobile-ask-surfaces.md): the sheet is down, the
           // ask is still pending. A tap brings it back (the person's intent).
-          <View style={styles.askBanner}>
-            <AskSlim
-              testID="ask-banner"
-              palette={palette}
-              title={banner_ask.title}
-              originShort={banner_ask.originShort}
-              more={banner_ask.more}
-              actionLabel="Review"
-              onPress={() => {
-                if (parkedKey !== null) {
-                  ASK_PARKS.forget(parkedKey);
-                }
-                sheet.unpark();
-              }}
-            />
-          </View>
+          <AskBanner
+            testID="ask-banner"
+            palette={palette}
+            view={banner_ask}
+            onPress={() => {
+              if (parkedKey !== null) {
+                ASK_PARKS.forget(parkedKey);
+              }
+              sheet.unpark();
+            }}
+          />
         )}
         {banner === null ? null : (
           <View testID={`banner-${banner.kind}`}>
@@ -2541,7 +2542,6 @@ export function SessionScreen({
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
-  askBanner: { paddingHorizontal: 12, paddingTop: 6 },
   /** Laid out (and scrolled) but not yet shown: the opening landing. */
   hidden: { flex: 1, opacity: 0 },
   list: { paddingTop: 8, paddingBottom: 16 },

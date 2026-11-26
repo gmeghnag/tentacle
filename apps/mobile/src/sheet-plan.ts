@@ -841,17 +841,20 @@ export function ownWorkflowsTop(
  * Whether the ask may be presented as a SHEET on the screen in front (Q1, owner
  * «only the slim row»): over a run (`topRunId`) only that run's own ask; anything
  * else (main agent, a sub-agent, another run, a run id the daemon did not send)
- * stays a slim row. Over the Workflows landing (`workflowsTop`) only a workflow
- * ask with NO run — a file's approval, what its Approve raises. Everywhere else,
- * always.
+ * stays a slim row. Over the Workflows landing (`workflowsTop`) nothing pops up
+ * by itself: any ask arrives as the banner under the header, and is a sheet only
+ * once the person brought it up (`reviewed`,
+ * docs/fix/mobile-workflows-landing-v2.md D1). Everywhere else, always —
+ * `reviewed` is not read there.
  */
 export function askPresentable(
   origin: AskOrigin,
   topRunId: string | null,
   workflowsTop = false,
+  reviewed = false,
 ): boolean {
   if (workflowsTop) {
-    return origin.kind === "workflow" && origin.runId === null;
+    return reviewed;
   }
   if (topRunId === null) {
     return true;

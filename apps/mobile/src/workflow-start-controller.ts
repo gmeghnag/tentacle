@@ -31,7 +31,10 @@
  *   it watches the Session screen's sheet, and when that file's approval ask
  *   leaves it (answered, denied, withdrawn) «Asking…» ends and the catalogue is
  *   re-read — the read is the truth. An approved read, a pull or a reconnect end
- *   it too (an answer given elsewhere; tapping again raises no second ask).
+ *   it too (an answer given elsewhere; tapping again raises no second ask). A
+ *   Start or Delete of the same file meanwhile only covers «Asking…».
+ * - **The ask is a banner here** (docs/fix/mobile-workflows-landing-v2.md D1):
+ *   `ask` is what the sheet is not showing, and `reviewAsk` brings it up.
  * - **Delete is two steps**, and sends the hash seen when it was ASKED.
  */
 import type { WorkflowAction } from "@tentacle/client";
@@ -41,6 +44,7 @@ import type {
   WorkflowDeleteResult,
   WorkflowResult,
 } from "@tentacle/protocol";
+import type { AskBannerView } from "./ask-park.ts";
 import type { SessionOpenFailure } from "./session-controller.ts";
 import {
   type LandingAct,
@@ -121,6 +125,8 @@ export interface StartState {
   readonly starting: boolean;
   /** Actions in flight, by row key (`asking` lasts until the ask leaves the sheet). */
   readonly busy: Readonly<Record<string, LandingBusy>>;
+  /** The banner of the session's pending ask that is not up here, or null. */
+  readonly ask: AskBannerView | null;
   /** The row whose delete is being asked, or null. */
   readonly confirm: string | null;
   /** The daemon answered `unsupported` to an approve or a delete. */
@@ -147,11 +153,11 @@ export interface WorkflowStartDeps {
   readonly onOpenRun: (runId: string, name: string) => void;
   readonly onChange?: () => void;
   /**
-   * This session's permission sheet, WATCHED only (never answered): its edge
-   * says an approval ask left the screen. Absent/null = no Session screen, so
-   * Approve is off.
+   * This session's permission sheet, WATCHED and brought up, never answered: its
+   * edge says an approval ask left the screen, `banner` is the ask not up here,
+   * `unpark` brings its sheet. Absent/null = no Session screen, so Approve is off.
    */
-  readonly asks?: Pick<AskSource, "current" | "subscribe"> | null;
+  readonly asks?: Pick<AskSource, "current" | "subscribe" | "unpark" | "banner"> | null;
 }
 
 export interface WorkflowStartController {
@@ -176,6 +182,8 @@ export interface WorkflowStartController {
   cancelDelete(): void;
   /** The second step: send the delete that was asked about. */
   confirmDelete(key: string): void;
+  /** The banner was tapped: bring the ask's sheet up. Sends the session nothing. */
+  reviewAsk(): void;
   /** The link went down / came back; coming back re-reads. */
   setOffline(offline: boolean): void;
   dispose(): void;
@@ -205,7 +213,12 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
   /** One read in flight; a trigger during it is ONE more read after it. */
   let reading = false;
   let again = false;
-  let busy: Record<string, LandingBusy> = {};
+  /** Rows whose approval is being asked: «Asking…» until that ask leaves the sheet. */
+  const asked = new Set<string>();
+  /** A start or delete in flight, by row key; it covers «Asking…» while it lasts. */
+  let flight: Record<string, "starting" | "deleting"> = {};
+  /** The ask the banner shows (`asks.banner`). */
+  let askView: AskBannerView | null = null;
   /** The delete being asked: its row, and the hash SEEN when it was asked. */
   let asking: { readonly key: string; readonly name: string; readonly hash?: string } | null = null;
   let actUnsupported = false;
@@ -217,21 +230,26 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
 
   const changed = () => deps.onChange?.();
 
-  function setBusy(key: string, value: LandingBusy | null): void {
-    const next = { ...busy };
+  function setFlight(key: string, value: "starting" | "deleting" | null): void {
+    const next = { ...flight };
     if (value === null) {
       delete next[key];
     } else {
       next[key] = value;
     }
-    busy = next;
+    flight = next;
+  }
+
+  function busy(): Record<string, LandingBusy> {
+    const asking = [...asked].map((key) => [key, "asking"] as const);
+    return { ...Object.fromEntries<LandingBusy>(asking), ...flight };
   }
 
   /** End every «Asking…» the predicate names. */
   function endAsking(match: (key: string) => boolean): void {
-    for (const [key, value] of Object.entries(busy)) {
-      if (value === "asking" && match(key)) {
-        setBusy(key, null);
+    for (const key of [...asked]) {
+      if (match(key)) {
+        asked.delete(key);
       }
     }
   }
@@ -253,13 +271,23 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
       canAnswer: asks !== null,
       actUnsupported,
       starting,
-      busy,
+      busy: busy(),
     });
     return blocked === null ? def : null;
   }
 
-  /** The sheet changed: an approval ask that LEFT it is that file's falling edge. */
+  /**
+   * The sheet changed: the banner follows it, and an approval ask that LEFT it is
+   * that file's falling edge. Only a change redraws (a streaming turn calls this
+   * for every delta).
+   */
   function sheetChanged(): void {
+    const next = asks?.banner?.() ?? null;
+    const redraw =
+      next?.title !== askView?.title ||
+      next?.originShort !== askView?.originShort ||
+      next?.more !== askView?.more;
+    askView = next;
     const ask = asks?.current() ?? null;
     const left = onSheet !== null && ask?.requestId !== onSheet.requestId ? onSheet : null;
     // A file's approval has no run (`approval:<name>`): exactly what Approve raises.
@@ -274,6 +302,9 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
     if (left !== null) {
       endAsking((key) => rowAt(key)?.name === left.name);
       read();
+    }
+    if (redraw) {
+      changed();
     }
   }
 
@@ -293,7 +324,8 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
       banner,
       notice,
       starting,
-      busy,
+      busy: busy(),
+      ask: askView,
       confirm: asking?.key ?? null,
       actUnsupported,
       offline,
@@ -367,6 +399,12 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
           const row = rowAt(key);
           return row === null || row.approved === true;
         });
+        // A row that left takes its action in flight too (a re-created file is clean).
+        for (const key of Object.keys(flight)) {
+          if (rowAt(key) === null) {
+            setFlight(key, null);
+          }
+        }
         changed();
       })
       .catch((err: unknown) => {
@@ -432,7 +470,7 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
       return;
     }
     starting = true;
-    setBusy(def.key, "starting");
+    setFlight(def.key, "starting");
     banner = null;
     notice = null;
     changed();
@@ -443,7 +481,7 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
           return;
         }
         starting = false;
-        setBusy(def.key, null);
+        setFlight(def.key, null);
         if (result.ok) {
           if (result.runId === undefined) {
             notice = "The workflow was started, but the run's id did not arrive";
@@ -473,7 +511,7 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
           return;
         }
         starting = false;
-        setBusy(def.key, null);
+        setFlight(def.key, null);
         notice = `The start failed (${err instanceof Error ? err.message : String(err)})`;
         changed();
       });
@@ -485,7 +523,7 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
       return;
     }
     // Marked BEFORE the send: the ask may arrive, and be answered, before the reply.
-    setBusy(key, "asking");
+    asked.add(key);
     asking = null;
     banner = null;
     notice = null;
@@ -497,7 +535,7 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
           return;
         }
         if ("unsupported" in result) {
-          setBusy(key, null);
+          asked.delete(key);
           actUnsupported = true;
           changed();
           return;
@@ -506,7 +544,7 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
           // Asked: the sheet's edge ends it (it may have already).
           return;
         }
-        setBusy(key, null);
+        asked.delete(key);
         if (result.ok) {
           read();
           return;
@@ -529,7 +567,7 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
         if (disposed) {
           return;
         }
-        setBusy(key, null);
+        asked.delete(key);
         notice = `The approval failed (${err instanceof Error ? err.message : String(err)})`;
         read();
       });
@@ -545,7 +583,7 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
       return;
     }
     asking = null;
-    setBusy(key, "deleting");
+    setFlight(key, "deleting");
     banner = null;
     notice = null;
     changed();
@@ -555,7 +593,7 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
         if (disposed) {
           return;
         }
-        setBusy(key, null);
+        setFlight(key, null);
         if ("unsupported" in result) {
           actUnsupported = true;
           changed();
@@ -571,7 +609,7 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
         if (disposed) {
           return;
         }
-        setBusy(key, null);
+        setFlight(key, null);
         notice = `The delete failed (${err instanceof Error ? err.message : String(err)})`;
         read();
       });
@@ -657,6 +695,11 @@ export function createWorkflowStartController(deps: WorkflowStartDeps): Workflow
       changed();
     },
     confirmDelete,
+    reviewAsk() {
+      if (!disposed) {
+        asks?.unpark?.();
+      }
+    },
     setOffline(next) {
       if (next === offline) {
         return;

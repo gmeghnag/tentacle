@@ -110,6 +110,8 @@ All of 1–7 is decided in a NEW pure module `apps/mobile/src/workflow-landing.t
 
 **D8 — The approval sheet over the landing.** Extend S8's rule in `sheet-plan.ts` (`:770-822`): `ownWorkflowsTop(routes, owner)` = the top non-`Sheet` route is `WorkflowStart` with this `computerId`/`sessionId`; `sessionInFront(focused, sheets, ownRun || ownWorkflows)`; `askPresentable(origin, topRunId, workflowsTop)`: over the landing ONLY an ask whose origin is `workflow` with `runId === null` (a file's approval — exactly what Approve raises; agent id `approval:<name>`). Every other ask keeps today's behaviour (slim row / park). The answer goes through the sheet's own path on the ONE broker — no second resolve path (the run screen's rule, `workflow-run-controller.ts:13-17`). The landing reads the sheet through `askSourceFromSheet` on `SESSION_SCREENS` (`App.tsx:2147-2169` pattern) only to watch the falling edge; it never answers.
 
+*2026-11-26: replaced by `docs/fix/mobile-workflows-landing-v2.md` D1 (owner).*
+
 #### Orchestrator decisions
 
 1. **Variant A ★** (one list: live runs on top, `Recent runs ›`, workflows below). — A run that needs you is never hidden behind a tab (B puts it one extra tap away).

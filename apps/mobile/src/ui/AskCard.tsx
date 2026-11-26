@@ -11,7 +11,7 @@
 import { type JSX, type ReactNode, useState } from "react";
 import { Pressable, ScrollView, StyleSheet, View } from "react-native";
 import type { AskAction, AskCardView, AskMenuItem } from "../ask-card.ts";
-import { DENSE_FONT_SCALE, type Palette, radius, typography } from "../theme.ts";
+import { DENSE_FONT_SCALE, type Palette, size as SIZE, radius, typography } from "../theme.ts";
 import { Icon } from "./Icon.tsx";
 import { PolpettoGlyph } from "./PolpettoGlyph.tsx";
 import { Text } from "./Text.tsx";
@@ -184,8 +184,8 @@ const styles = StyleSheet.create({
     marginRight: "auto",
   },
   capsule: {
-    minHeight: 34,
-    borderRadius: 17,
+    minHeight: SIZE.capsule,
+    borderRadius: SIZE.capsule / 2,
     paddingHorizontal: 18,
     alignItems: "center",
     justifyContent: "center",

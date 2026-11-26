@@ -481,3 +481,86 @@ describe("answerFor: a workflow card answers ONE named ask (docs/feat/workflows-
     expect(sheet.answerFor("ask-1", "reject_once")).toBe("sent");
   });
 });
+
+describe("`reviewed`: the person brought the ask up from a banner (mobile-workflows-landing-v2 D1)", () => {
+  /** A sheet whose broker answers are observable (a tap on a banner sends nothing). */
+  function watched() {
+    const h = sheetAt();
+    const answers: PermissionResponse[] = [];
+    const raise = (requestId?: string) => {
+      void h.sheet
+        .requester(ask(), requestId === undefined ? undefined : { requestId })
+        .then((r) => answers.push(r));
+    };
+    return { ...h, answers, raise };
+  }
+
+  test("a new ask is born unreviewed, with the daemon's id or without one", () => {
+    const named = watched();
+    named.raise("ask-1");
+    expect(named.sheet.view()).toMatchObject({ kind: "asking", reviewed: false });
+    const local = watched();
+    local.raise();
+    expect(local.sheet.view()).toMatchObject({ kind: "asking", reviewed: false });
+  });
+
+  test("unpark() on an unparked, unreviewed ask marks it reviewed and sends NOTHING", async () => {
+    const h = watched();
+    h.raise("ask-1");
+    h.sheet.unpark();
+    expect(h.sheet.view()).toMatchObject({ kind: "asking", parked: false, reviewed: true });
+    await Promise.resolve();
+    expect(h.answers).toEqual([]);
+    expect(h.sheet.asking).toBe(true);
+  });
+
+  test("unpark() on a parked ask sets both; a swipe keeps `reviewed`", async () => {
+    const h = watched();
+    h.raise("ask-1");
+    h.sheet.park();
+    expect(h.sheet.view()).toMatchObject({ parked: true, reviewed: false });
+    h.sheet.unpark();
+    expect(h.sheet.view()).toMatchObject({ parked: false, reviewed: true });
+    h.sheet.park();
+    expect(h.sheet.view()).toMatchObject({ parked: true, reviewed: true });
+    h.sheet.unpark();
+    expect(h.sheet.view()).toMatchObject({ parked: false, reviewed: true });
+    await Promise.resolve();
+    expect(h.answers).toEqual([]);
+  });
+
+  test("the NEXT ask after an answer is born unreviewed", () => {
+    const h = watched();
+    h.raise("ask-1");
+    h.raise("ask-2");
+    h.sheet.unpark();
+    h.clock.at += ARM_MS;
+    expect(h.sheet.answer("allow_once")).toBe("sent");
+    expect(h.sheet.view()).toMatchObject({ requestId: "ask-2", reviewed: false });
+  });
+
+  test("unpark() changes nothing on idle, or on an ask already up and reviewed", () => {
+    const { sheet, seen } = sheetAt();
+    sheet.unpark();
+    expect(seen).toEqual([]);
+    request(sheet);
+    sheet.unpark();
+    const changes = seen.length;
+    sheet.unpark();
+    expect(seen.length).toBe(changes);
+  });
+
+  test("unpark() leaves a returned reply alone", async () => {
+    const { sheet, clock, seen } = sheetAt();
+    const { answer } = request(sheet);
+    clock.at += ARM_MS;
+    sheet.answer("reply");
+    sheet.setReplyText("not that");
+    sheet.sendReply();
+    (await answer).onAnswerLost?.("settled");
+    const changes = seen.length;
+    sheet.unpark();
+    expect(seen.length).toBe(changes);
+    expect(sheet.view().kind).toBe("returned");
+  });
+});

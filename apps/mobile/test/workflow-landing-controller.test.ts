@@ -13,6 +13,7 @@ import type {
   WorkflowDeleteResult,
   WorkflowResult,
 } from "@tentacle/protocol";
+import type { AskBannerView } from "../src/ask-park.ts";
 import type { CardAsk } from "../src/workflow-run-controller.ts";
 import {
   type StartSessionHandle,
@@ -54,10 +55,13 @@ async function harness(
     reads?: WorkflowCatalogueResult[];
     approve?: Reply<WorkflowApproveResult>;
     remove?: Reply<WorkflowDeleteResult>;
-    start?: WorkflowResult;
+    start?: WorkflowResult | Promise<WorkflowResult>;
     noSheet?: boolean;
   } = {},
 ) {
+  let askView: AskBannerView | null = null;
+  let unparked = 0;
+  let changes = 0;
   const reads = [...(opts.reads ?? [catalogue()])];
   let readCount = 0;
   const sent: unknown[][] = [];
@@ -89,6 +93,9 @@ async function harness(
     leave: () => {},
     borrowed: true,
     onOpenRun: (runId) => runs.push(runId),
+    onChange: () => {
+      changes += 1;
+    },
     asks:
       opts.noSheet === true
         ? null
@@ -97,6 +104,10 @@ async function harness(
             subscribe: (listener: () => void) => {
               listeners.add(listener);
               return () => listeners.delete(listener);
+            },
+            banner: () => askView,
+            unpark: () => {
+              unparked += 1;
             },
           },
   });
@@ -110,17 +121,140 @@ async function harness(
     for (const listener of [...listeners]) listener();
     await flush();
   };
+  /** The sheet's banner changed (the sheet's own state; no ask edge). */
+  const banner = async (next: AskBannerView | null) => {
+    askView = next;
+    for (const listener of [...listeners]) listener();
+    await flush();
+  };
   return {
     controller,
     flush,
     sheet,
+    banner,
     sent,
     runs,
     listeners,
     reads: () => readCount,
+    unparked: () => unparked,
+    changes: () => changes,
     state: () => controller.state(),
   };
 }
+
+describe("the ask banner on the landing (mobile-workflows-landing-v2 D1)", () => {
+  const view = (more = 0): AskBannerView => ({
+    title: "Approve workflow demo",
+    originShort: "Workflow demo",
+    more,
+  });
+
+  test("`ask` follows the source's banner, and only a CHANGE re-renders", async () => {
+    const h = await harness();
+    expect(h.state().ask).toBeNull();
+    await h.banner(view());
+    expect(h.state().ask).toEqual(view());
+    const after = h.changes();
+    await h.banner(view()); // a streaming session: same banner, no redraw
+    expect(h.changes()).toBe(after);
+    await h.banner(view(1));
+    expect(h.state().ask).toEqual(view(1));
+    expect(h.changes()).toBe(after + 1);
+    await h.banner(null);
+    expect(h.state().ask).toBeNull();
+  });
+
+  test("reviewAsk brings the sheet up once and sends the session NOTHING", async () => {
+    const h = await harness();
+    await h.banner(view());
+    const reads = h.reads();
+    h.controller.reviewAsk();
+    await h.flush();
+    expect(h.unparked()).toBe(1);
+    expect(h.sent).toEqual([]);
+    expect(h.reads()).toBe(reads);
+  });
+
+  test("no Session screen: no banner and a tap does nothing; disposed too", async () => {
+    const none = await harness({ noSheet: true });
+    expect(none.state().ask).toBeNull();
+    none.controller.reviewAsk();
+    const gone = await harness();
+    gone.controller.dispose();
+    gone.controller.reviewAsk();
+    expect(gone.unparked()).toBe(0);
+  });
+
+  test("a Start while «Asking…»: Asking… comes back, and the ask's edge ends it", async () => {
+    const h = await harness();
+    h.controller.approve(KEY);
+    await h.flush();
+    await h.sheet(approvalAsk("r1"));
+    h.controller.startNow(KEY);
+    expect(h.state().busy).toEqual({ [KEY]: "starting" });
+    await h.flush();
+    expect(h.sent.map((s) => s[0])).toEqual(["approve", "workflow"]);
+    expect(h.state().busy).toEqual({ [KEY]: "asking" });
+    await h.sheet(null);
+    expect(h.state().busy).toEqual({});
+  });
+
+  test("the ask answered DURING that start leaves no stale «Asking…»", async () => {
+    let answer: (result: WorkflowResult) => void = () => {};
+    const h = await harness({
+      start: new Promise<WorkflowResult>((resolve) => {
+        answer = resolve;
+      }),
+    });
+    h.controller.approve(KEY);
+    await h.flush();
+    await h.sheet(approvalAsk("r1"));
+    h.controller.startNow(KEY);
+    await h.sheet(null);
+    answer({ ok: true, runId: "wf-1" });
+    await h.flush();
+    expect(h.state().busy).toEqual({});
+  });
+
+  test("a refused Delete while «Asking…» leaves Approve asking", async () => {
+    const h = await harness({ remove: { ok: false, refusal: "running", reason: "running" } });
+    h.controller.approve(KEY);
+    await h.flush();
+    h.controller.askDelete(KEY);
+    h.controller.confirmDelete(KEY);
+    expect(h.state().busy).toEqual({ [KEY]: "deleting" });
+    await h.flush();
+    expect(h.state().busy).toEqual({ [KEY]: "asking" });
+  });
+
+  test("a read that drops a row drops its busy entry; the file re-created is clean", async () => {
+    const h = await harness({
+      reads: [catalogue(), catalogue([brokenRow]), catalogue()],
+    });
+    h.controller.approve(KEY);
+    await h.flush();
+    h.controller.askDelete(KEY);
+    h.controller.confirmDelete(KEY);
+    await h.flush();
+    expect(h.state().busy).toEqual({});
+    h.controller.pull();
+    await h.flush();
+    expect(h.state().busy).toEqual({});
+  });
+
+  test("a read that drops a row with an action still in flight drops it too", async () => {
+    const h = await harness({
+      reads: [catalogue(), catalogue([brokenRow])],
+      remove: new Promise<WorkflowDeleteResult>(() => {}),
+    });
+    h.controller.askDelete(KEY);
+    h.controller.confirmDelete(KEY);
+    expect(h.state().busy).toEqual({ [KEY]: "deleting" });
+    h.controller.pull();
+    await h.flush();
+    expect(h.state().busy).toEqual({});
+  });
+});
 
 describe("Start from the list", () => {
   test("no input needs a value: starts at once, pinned to the hash, and opens the run", async () => {

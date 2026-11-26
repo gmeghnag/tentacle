@@ -2271,8 +2271,9 @@ function WorkflowStartRoute({
       const screen = SESSION_SCREENS.get(sessionKey(computerId, sessionId));
       created = createWorkflowStartController({
         sessionId,
-        // The Session screen's sheet is where an approval is answered; this screen
-        // only watches it leave (mobile-workflows-landing D8).
+        // The Session screen's sheet is where an ask is answered; this screen shows
+        // its banner, brings the sheet up and watches an approval leave it
+        // (mobile-workflows-landing-v2 D1). It answers nothing itself.
         asks:
           screen === undefined
             ? null
@@ -2280,6 +2281,8 @@ function WorkflowStartRoute({
                 view: () => screen.sheet().view(),
                 answerFor: (requestId, optionId) => screen.sheet().answerFor(requestId, optionId),
                 subscribe: (listener) => screen.subscribe(() => listener()),
+                unpark: () => screen.sheet().unpark(),
+                queued: () => screen.sheet().queued,
               }),
         // The Session screen underneath follows it: never detach it from there.
         borrowed: runtime.follows(sessionId),
@@ -2357,6 +2360,7 @@ function WorkflowStartRoute({
       onDimmed={() => playHaptic("light")}
       onCancelDelete={() => controller.cancelDelete()}
       onConfirmDelete={(key) => controller.confirmDelete(key)}
+      onReviewAsk={() => controller.reviewAsk()}
       onCloseRow={() => controller.closeRow()}
       onValue={(name, value) => controller.setValue(name, value)}
       onStart={() => void controller.beginStart()}

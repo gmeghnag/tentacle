@@ -11,11 +11,14 @@
  * - **a `run` step's command VERBATIM**, never cut to a line count: it is what an
  *   approval will ask about, and the ask's own detail is capped at 2000 chars;
  * - **every word with its glyph** (the owner is colour-blind: never meaning by hue
- *   alone) — "✓ Approved" / "? Needs approval", and Delete is red AND says Delete.
+ *   alone) — "✓ Approved" / "? Needs approval"; the buttons are words, Start the
+ *   only filled one, and red is only the confirm's Delete
+ *   (docs/fix/mobile-workflows-landing-v2.md).
  */
-import type { JSX } from "react";
+import { Fragment, type JSX } from "react";
 import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from "react-native";
 import { type Palette, space, typography } from "../theme.ts";
+import { AskBanner } from "../ui/AskBanner.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
 import { Icon } from "../ui/Icon.tsx";
@@ -59,6 +62,8 @@ export interface WorkflowStartScreenProps {
   readonly onDimmed: () => void;
   readonly onCancelDelete: () => void;
   readonly onConfirmDelete: (key: string) => void;
+  /** The ask banner's tap: bring the ask's sheet up. */
+  readonly onReviewAsk: () => void;
   readonly onCloseRow: () => void;
   readonly onValue: (name: string, value: string) => void;
   /** The form's Start. */
@@ -147,7 +152,10 @@ function RunBand({
   );
 }
 
-/** The inline delete question, in the action row's place (never a native alert). */
+/**
+ * The inline delete question, in the button row's place (never a native alert):
+ * Cancel left, Delete right — the only red on the screen.
+ */
 function Confirm({
   palette,
   item,
@@ -168,25 +176,24 @@ function Confirm({
         {item.confirm}
       </Text>
       <View style={styles.actions}>
-        <Pressable
+        <PillButton
+          palette={palette}
+          size="compact"
+          kind="neutral"
           testID={`workflow-delete-cancel-${item.name}`}
-          accessibilityRole="button"
-          hitSlop={8}
+          label="Cancel"
           onPress={onCancel}
-          style={styles.action}
-        >
-          <Text style={[typography.subhead, { color: palette.label }]}>Cancel</Text>
-        </Pressable>
-        <Pressable
+        />
+        <View style={styles.spacer} />
+        <PillButton
+          palette={palette}
+          size="compact"
+          kind="destructive"
           testID={`workflow-delete-confirm-${item.name}`}
-          accessibilityRole="button"
-          hitSlop={8}
+          label="Delete"
+          disabled={item.actions.some((a) => a.id === "delete" && !a.enabled)}
           onPress={onConfirm}
-          style={styles.action}
-        >
-          <Icon name="trash" color={palette.red} size={15} />
-          <Text style={[typography.subhead, { color: palette.red }]}>Delete</Text>
-        </Pressable>
+        />
       </View>
     </View>
   );
@@ -203,8 +210,16 @@ function Item({
   readonly screen: WorkflowStartScreenProps;
 }): JSX.Element {
   const word = item.status?.word ?? "approval unknown";
+  // «Asking…» is drawn quiet: it is not a button to press while the ask is open.
+  const asking = screen.state.busy[item.key] === "asking";
+  const kinds = {
+    start: "primary",
+    approve: asking ? "quiet" : "neutral",
+    delete: "quiet",
+  } as const;
+  const canDelete = item.actions.some((a) => a.id === "delete" && a.enabled);
   return (
-    <View style={[styles.band, { borderColor: palette.sep }]}>
+    <View style={[styles.band, styles.item, { borderColor: palette.sep }]}>
       <Pressable
         testID={item.ok ? `workflow-start-row-${item.name}` : `workflow-start-broken-${item.name}`}
         accessibilityRole="button"
@@ -214,19 +229,15 @@ function Item({
         style={styles.body}
       >
         <View style={styles.rowHead}>
-          <Text style={[styles.name, { color: palette.label }]}>{item.name}</Text>
-          {item.status === null ? null : (
-            <Text style={[typography.footnote, { color: palette.sec }]}>
-              {`${item.status.glyph} ${item.status.word}`}
-            </Text>
-          )}
+          <Text numberOfLines={1} style={[styles.itemName, { color: palette.label }]}>
+            {item.name}
+          </Text>
           <Icon name="chevron.right" color={palette.sec} size={14} />
         </View>
-        {item.description === null ? null : (
-          <Text style={[typography.subhead, { color: palette.sec }]}>{item.description}</Text>
-        )}
-        {item.ok ? null : (
-          <Text style={[typography.mono, { color: palette.sec }]}>{item.path}</Text>
+        {item.summary === "" ? null : (
+          <Text numberOfLines={1} style={[typography.footnote, { color: palette.sec }]}>
+            {item.summary}
+          </Text>
         )}
       </Pressable>
       {item.errors.length === 0 ? null : (
@@ -243,31 +254,29 @@ function Item({
           palette={palette}
           item={item}
           onCancel={screen.onCancelDelete}
-          onConfirm={() => screen.onConfirmDelete(item.key)}
+          onConfirm={() => (canDelete ? screen.onConfirmDelete(item.key) : screen.onDimmed())}
         />
       ) : (
         <View style={styles.actions}>
-          {item.actions.map((action) => {
-            const color = action.destructive ? palette.red : palette.label;
-            return (
-              <Pressable
-                key={action.id}
+          {item.actions.map((action) => (
+            <Fragment key={action.id}>
+              {/* Delete alone on the right. */}
+              {action.id === "delete" ? <View style={styles.spacer} /> : null}
+              <PillButton
+                palette={palette}
+                size="compact"
+                kind={kinds[action.id]}
                 testID={`workflow-item-${action.id}-${item.name}`}
-                accessibilityRole="button"
+                label={action.label}
                 accessibilityLabel={`${action.label} ${item.name}`}
-                accessibilityState={{ disabled: !action.enabled }}
-                hitSlop={8}
-                // Not `disabled`: a dimmed tap still answers with a light haptic.
+                disabled={!action.enabled}
+                // A dimmed button still takes the tap: it answers with a light haptic.
                 onPress={() =>
                   action.enabled ? screen.onAct(action.id, item.key) : screen.onDimmed()
                 }
-                style={[styles.action, action.enabled ? null : styles.dimmed]}
-              >
-                <Icon name={action.icon} color={color} size={15} />
-                <Text style={[typography.subhead, { color }]}>{action.label}</Text>
-              </Pressable>
-            );
-          })}
+              />
+            </Fragment>
+          ))}
         </View>
       )}
       {item.why === null ? null : (
@@ -289,6 +298,15 @@ function Landing({ screen }: { readonly screen: WorkflowStartScreenProps }): JSX
   const items = landingItems(view, landingContext(state), state.confirm);
   return (
     <>
+      {/* ONE banner says why every button is dimmed (landing-v2 D5). */}
+      {state.offline ? (
+        <Banner
+          palette={palette}
+          body={LANDING_OFFLINE}
+          tone="warn"
+          testID="workflow-landing-offline"
+        />
+      ) : null}
       <RunBand
         palette={palette}
         testID="workflow-landing-needs-you"
@@ -496,11 +514,21 @@ export function WorkflowStartScreen(props: WorkflowStartScreenProps): JSX.Elemen
               hitSlop={8}
               onPress={props.onNew}
             >
-              <Icon name="plus" color={palette.label} size={18} />
+              <Icon name="plus" color={palette.accent} size={18} />
             </Pressable>
           ) : undefined
         }
       />
+      {/* The session's pending ask, fixed under the header: the one place here to
+          answer from (it opens the standard sheet; nothing is answered on it). */}
+      {state.ask === null ? null : (
+        <AskBanner
+          testID="workflow-landing-ask"
+          palette={palette}
+          view={state.ask}
+          onPress={props.onReviewAsk}
+        />
+      )}
       <ScrollView
         contentContainerStyle={styles.content}
         refreshControl={<RefreshControl refreshing={false} onRefresh={props.onPull} />}
@@ -591,9 +619,10 @@ const styles = StyleSheet.create({
   rowHead: { flexDirection: "row", alignItems: "center", gap: 8 },
   glyph: { ...typography.body, width: 18, textAlign: "center" },
   name: { ...typography.body, flex: 1, fontWeight: "600" },
-  actions: { flexDirection: "row", alignItems: "center", gap: 24, paddingTop: 4 },
-  action: { flexDirection: "row", alignItems: "center", gap: 6, minHeight: 32 },
-  dimmed: { opacity: 0.4 },
+  item: { paddingVertical: space.inset },
+  itemName: { ...typography.headline, flex: 1 },
+  actions: { flexDirection: "row", alignItems: "center", gap: 10, paddingTop: 4 },
+  spacer: { flex: 1 },
   confirm: { gap: 4 },
   errors: { gap: 2 },
   detail: { gap: 10, paddingHorizontal: space.inset },
