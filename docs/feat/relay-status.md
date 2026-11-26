@@ -319,3 +319,35 @@ No protocol change, no schema regeneration, no unit or Caddyfile change.
   port path not run on Linux (the start log shows `status on` or `status-off`).
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-26*
+
+**Verdict: REQUEST-CHANGES** (one test-only fix; no product defect found at HIGH/MEDIUM).
+
+1. **MEDIUM — vacuous test**, `apps/apps-host/test/status.test.ts:101-113`. Delete
+   `sample();` from `sweepOnce` (`apps/apps-host/src/server.ts`, before `nonces.prune`):
+   the test still passes. `status()` samples the gauges into the *current* minute and
+   `toContainEqual` matches that entry. Failure: the sweep sampling regresses, the
+   24 h `liveApps` / `storeBytes` history silently has gaps wherever nobody read the
+   status, and the gate stays green. Fix: assert on the publish minute,
+   `expect(body.history[0]).toEqual(expect.objectContaining({ liveApps: 1, storeBytes: BYTES }))`
+   (tried temporarily: green on the code, red on the mutant; reverted).
+
+**Checks:** the 8 touched test files 126 pass, 0 fail; `bun run lint` clean;
+`bun run typecheck` clean. Full `bun run check` and the Repro on `main`: not run.
+
+**Mutations** (script `.tentacle/tmp/relay-status/review-mutate.ts`, restored; tree clean
+before this section): 15 of 16 killed — relay sweep sample, relay body sample, both
+`stop()`s, `refusedPing`, forward byte count, `reports`, `requests`, live-state filter,
+stale-slot reset, age filter, `isLoopback`, push on/off guard, both D4 checks.
+Survivor: finding 1.
+
+**Attacks tried, nothing found:** compiled `--compile` binaries of both services (new
+exports resolve; status 200, public `/__status` 404, `via` → 404; busy port →
+`status-off EADDRINUSE`, clean exit); status read calling `operator.current()` (same
+lazy re-read as a public request); `refusedPing` close effect has one source
+(`RelayCore.ping`); held dials counted once; units carry no `SocketBind*` rule; Caddy
+proxies only 4100 / 4200; gate against rebinding / foreign `Host` / proxy headers.
+
+**Unverified:** busy port on Linux; 4101 / 4201 on the box. The exec commit says
+`(deepseek)` while Execution is signed `claude-sonnet-5-5`: check the attribution.
