@@ -698,3 +698,9 @@ changes only this doc)
 download, or decide with the owner whether the hand-computed and pngjs
 differential tests are enough to stand in for T1/T2. That is an owner decision,
 not a reviewer waiver.
+
+#### Orchestrator — fixtures unblocked (2026-11-26 ~05:30)
+
+`PngSuite-2017jul19.tgz` fetched by the orchestrator from `http://www.schaik.com/pngsuite/PngSuite-2017jul19.tgz` into `.tentacle/tmp/image-region-png/` (68 521 bytes, sha256 `0294b244c95a8342c01b00010cf34abdcabc7c6a34fd0fe1bd963917537bfdc8`, 178 entries: `.png` + `PngSuite.README` + `PngSuite.LICENSE`; listed, not executed). Next fix round: Execution steps 1–4 (named subset into `packages/core/test/fixtures/png/` + README with source URL, licence line, sha256 per file), then M2 shown red on T1 — Round 3 finding 1.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-26*
