@@ -38,6 +38,7 @@ function mount() {
   const permissions = new PermissionBroker();
   const session = (): SessionController => ({
     ...inertSession(),
+    async *send() {},
     ownsTurn: () => true,
     onApps: (l) => {
       listener = l;

@@ -57,10 +57,19 @@ describe("publishing on a hosted session", () => {
 });
 
 describe("every end of a session takes its apps down", () => {
+  type Rig = ReturnType<typeof appsRig>;
+  type Client = Awaited<ReturnType<Rig["connect"]>>;
   for (const [name, end] of [
-    ["close", (r: ReturnType<typeof appsRig>) => r.host.close("S")],
-    ["archive (the reaper's end)", (r: ReturnType<typeof appsRig>) => r.host.archive("S")],
-    ["delete", (r: ReturnType<typeof appsRig>) => r.host.delete("S")],
+    ["close", async (r: Rig, _client: Client) => void r.host.close("S")],
+    [
+      "the reaper's end",
+      async (r: Rig, client: Client) => {
+        await client.request("session/detach");
+        await r.clock.advance(1);
+        expect(r.host.reapExpired({ idleTtlMs: 1 }).map((e) => e.id)).toEqual(["S"]);
+      },
+    ],
+    ["delete", async (r: Rig, _client: Client) => void r.host.delete("S")],
   ] as const) {
     test(`${name}: one DELETE, the link gone, no timer left`, async () => {
       const store = new SpyDaemonStore();
@@ -70,7 +79,7 @@ describe("every end of a session takes its apps down", () => {
       await client.prompt("t1");
       await settle();
       const row = await r.publish();
-      end(r);
+      await end(r, client);
       await settle();
       await r.persister?.flush("S");
       expect(r.api.calls).toEqual(["create", `remove ${row.app}`]);
