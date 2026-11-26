@@ -57,6 +57,66 @@ describe("findSecrets", () => {
   });
 });
 
+// Fix round 1: the scan runs synchronously, before anyone is asked, on a page
+// the model wrote (≤ 10 MiB). No input may make it super-linear.
+describe("findSecrets on a crafted page", () => {
+  // Sizes at which the backtracking patterns take 5 s or more.
+  const CRAFTED: [name: string, unit: string, kib: number][] = [
+    ["scheme run (url-credentials)", "a.", 256],
+    ["token header run (jwt)", "eyJ-", 256],
+    ["unterminated key headers (private-key)", `-----BEGIN ${"PRIVATE"} KEY-----\n`, 1024],
+  ];
+
+  for (const [name, unit, kib] of CRAFTED) {
+    test(`${name}: ${kib} KiB in well under a second`, () => {
+      const text = unit.repeat(Math.ceil((kib * 1024) / unit.length));
+      const began = performance.now();
+      expect(findSecrets(text)).toEqual([]);
+      expect(performance.now() - began).toBeLessThan(1000);
+    });
+  }
+
+  // `findSecrets` and output redaction share one rule table (D5): a rule scanned
+  // its own way must still find exactly what its pattern replaces.
+  test("every rule's scan finds exactly what its pattern matches", () => {
+    const pieces = [
+      ...["a", "Z", "7", "_", "-", ".", ":", "/", "@", " ", "\n", '"', "=", "é"],
+      ...["://", "eyJ", "abcdefgh", "-----", "BEGIN ", "END ", "PRIVATE KEY", "RSA "],
+      `-----BEGIN ${"PRIVATE"} KEY-----`,
+      `-----END ${"PRIVATE"} KEY-----`,
+      "eyJabcdefgh.abcdefgh.abcdefgh",
+      ".abcdefgh",
+      "https://",
+      "user:pass@",
+    ];
+    // A seeded generator: a failure reproduces.
+    let seed = 12345;
+    const next = (n: number) => {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return (seed >>> 8) % n;
+    };
+    const matched = new Map<string, number>();
+    for (let round = 0; round < 20_000; round++) {
+      const length = 1 + next(24);
+      let text = "";
+      for (let i = 0; i < length; i++) text += pieces[next(pieces.length)] ?? "";
+      for (const rule of DEFAULT_REDACT_RULES) {
+        if (!rule.starts) continue;
+        const expected = [...text.matchAll(rule.pattern)].map((m) => m.index);
+        expect({ rule: rule.name, text, at: [...rule.starts(text)] }).toEqual({
+          rule: rule.name,
+          text,
+          at: expected,
+        });
+        matched.set(rule.name, (matched.get(rule.name) ?? 0) + expected.length);
+      }
+    }
+    // Not vacuous: each own scan met real matches.
+    expect([...matched.keys()].sort()).toEqual(["jwt", "private-key", "url-credentials"]);
+    for (const count of matched.values()) expect(count).toBeGreaterThan(100);
+  });
+});
+
 describe("redactText", () => {
   test("masks an OpenAI-style key", () => {
     const out = redactText("export KEY=sk-abcdefghijklmnopqrstuvwxyz0123");

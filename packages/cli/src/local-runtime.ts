@@ -380,6 +380,10 @@ export interface PersistingController extends SessionController {
   onSchedules?: RemoteSession["onSchedules"];
   /** `RemoteSession.deleteSchedule`: drop one armed wake. */
   deleteSchedule?: RemoteSession["deleteSchedule"];
+  /** `RemoteSession.onApps`: this session's published pages (docs/feat/session-apps-publish.md). */
+  onApps?: RemoteSession["onApps"];
+  /** `RemoteSession.unpublishApp`: take one published page offline. */
+  unpublishApp?: RemoteSession["unpublishApp"];
   /** `RemoteSession.onWorkflows`: this session's workflow runs (docs/feat/workflows-ui.md D2). */
   onWorkflows?: RemoteSession["onWorkflows"];
   /** `RemoteSession.workflow`: start / stop / resume a run, or re-run one step. */
@@ -982,6 +986,14 @@ export function persistingController(
     },
     deleteSchedule(scheduleId) {
       return inner.deleteSchedule(scheduleId);
+    },
+    // docs/feat/session-apps-publish.md: `/apps`, the status words and the quit
+    // warning read this ONE per-session feed, and Stop is the daemon's own method.
+    onApps(listener) {
+      return inner.onApps(listener);
+    },
+    unpublishApp(app) {
+      return inner.unpublishApp(app);
     },
     // docs/feat/workflows-ui.md D2: the rail, the panel and `/workflow` all read
     // this ONE per-session feed, and every action is the daemon's (its

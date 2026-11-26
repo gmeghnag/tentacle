@@ -656,6 +656,62 @@ test failed once beside the protocol suite and passed on re-run.
 - A real publish against a deployed host, the phone pixels, and a laptop sleep
   with revival (runbook §12).
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-26*
+
+**1 (HIGH): FIXED.** `SessionController` and `persistingController`
+(`packages/cli/src/local-runtime.ts`) forward `onApps` and `unpublishApp`. The
+GUARD list in `subagent-panel-controller.test.ts` names both. New
+`cli/test/apps-runtime.test.ts` drives `createLocalRuntime` with `WORKER_TRUST`
+over a real `Connection`: the rows arrive, Stop reaches the host's `remove`.
+Red before the fix: 2 fail («the runtime's controller has no onApps», GUARD
+`+ "onApps", + "unpublishApp"`).
+
+**2 (MEDIUM): FIXED.** Of the review's options, linear-safe scan-only matchers:
+the scan stays complete (nothing is capped or skipped, so the ask has nothing new
+to say) and synchronous, bounded by the 10 MiB size check. `RedactRule` gains an
+optional `starts` (`packages/agent/src/redact.ts`), set on the three rules whose
+patterns are quadratic (`private-key`, `jwt`, `url-credentials`; the review did
+not name the first). It sits on the same rule table (D5), and a seeded
+differential test (20 000 strings) holds each `starts` to its pattern's
+`matchAll` offsets.
+
+Red before the fix: `a.` × 256 KiB 10.4 s, `eyJ-` × 256 KiB 8.5 s, unterminated
+key headers × 1 MiB 16.5 s (limit 1 s), and the differential (no `starts`).
+After: `findSecrets` over 43 crafted **10 MiB** pages covering all ten rules,
+worst **267 ms** (`.tentacle/tmp/session-apps-publish/cost.ts`):
+
+```
+"a." 7 ms 0 · "eyJ-" 45 ms 0 · "eyJaaaaaaaa.a." 71 ms 0 · "://a:" 53 ms 0
+"-----BEGIN PRIVATE KEY-----\n" 57 ms 0 · "sk-" 185 ms 1 · "(a)*://a:b@" 267 ms 1
+worst 267 ms over 43 pages
+```
+
+**Mutations** (`mutate.ts`, same folder; each applied, run, restored):
+
+| Mutation | Result |
+|---|---|
+| `onApps` not forwarded | 2 fail |
+| `unpublishApp` not forwarded | 2 fail |
+| `url-credentials` back on its pattern | 3 fail |
+| `jwt` back on its pattern | 2 fail |
+| `private-key` back on its pattern | 2 fail |
+| `findSecrets` ignores `starts` | 3 fail |
+| jwt scan: overlap not skipped | 1 fail (differential) |
+| jwt scan: no boundary before `eyJ` | 1 fail (differential) |
+| url scan: no word boundary | 1 fail (differential) |
+| private-key scan: overlap kept | 1 fail (differential) |
+
+**Checks run:** the redact, apps (daemon, tools, client, TUI, CLI),
+`local-runtime` and GUARD test files green; `biome check` on the changed files
+clean. Typecheck and the full gate were not run here (the orchestrator's script
+runs them).
+
+**Left as it was:** output redaction (`redactText`, `tools.redactSecrets`, off by
+default) still runs the same quadratic patterns on tool output; that predates
+this branch and changing it was outside the finding.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner, different from the executor)
