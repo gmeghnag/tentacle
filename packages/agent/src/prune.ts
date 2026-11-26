@@ -10,8 +10,13 @@
  *   covering the same span (same or wider line range; for a PDF the SAME
  *   `pages` window) or a later successful write/edit of that path made stale.
  *   A page window is never "covered" by a line range or vice versa.
- * - R2 `call_payload` — the `content`/`old_string`/`new_string`/`edits[].*`
- *   arguments of a SUCCESSFUL write/edit: the file on disk is the truth.
+ * - R2 `call_payload` — the `content`/`old_string`/`new_string`/`edits`
+ *   arguments of a SUCCESSFUL write/edit are DROPPED (a key that is missing
+ *   cannot be copied as a value, and a call imitating the stripped shape fails
+ *   the tool's own schema), and the note saying where the text went is added to
+ *   the call's RESULT. Exception: the last two payload calls on a path the
+ *   model is still working on keep their arguments (`docs/fix/
+ *   prune-stub-imitation.md` D1/D2).
  * - R3 `long_output` — a `shell`/`shell_output` result past `outputChars`:
  *   keep the header (the exit code), the first `headLines` and the last
  *   `tailLines` (errors live in the tail).
@@ -71,7 +76,10 @@ export interface PruneEntry {
   readonly message: ChatMessage;
   /**
    * Characters the request no longer carries (>= 1, except a `viewed_image`
-   * stub, whose gain is its image: it may be a little LONGER than the line it replaces).
+   * stub, whose gain is its image: it may be a little LONGER than the line it
+   * replaces; and R2's RESULT entry, which only carries the note the arguments'
+   * entry already paid for, so it counts 0 — the arguments entry keeps the NET
+   * saving of the message).
    */
   readonly savedChars: number;
   /** Image refs the stub drops (`viewed_image`): counted by `estimateGain` at `imageTokens` each. */
@@ -131,6 +139,8 @@ export interface StubAbout {
   readonly omittedLines?: number;
   /** R4: where the full output lives. */
   readonly spillPath?: string;
+  /** R2's result note: how many edits of an `fs_multi_edit` were dropped. */
+  readonly edits?: number;
   /** `viewed_image`: the viewed image's id (its first 12 hex are shown) and label. */
   readonly imageId?: string;
   readonly imageLabel?: string;
@@ -205,22 +215,35 @@ export function stubFor(about: StubAbout): ChatMessage {
       };
     }
     case "call_payload":
-      // R2 lives INSIDE the arguments string (a JSON value), never a message.
+      // R2's note rides the call's RESULT, never a string INSIDE its arguments:
+      // a string where a value goes is exactly what a weak model copies into a
+      // write of its own (docs/fix/prune-stub-imitation.md).
       return {
         role: "tool",
-        content: payloadPlaceholder(size, about.path),
+        content: payloadNote({
+          chars: about.chars ?? 0,
+          ...(about.path !== undefined ? { path: about.path } : {}),
+          ...(about.edits !== undefined ? { edits: about.edits } : {}),
+        }),
       };
   }
 }
 
 /**
- * The placeholder R2 puts where a payload string was, inside a call's
- * arguments: a JSON string value, never top-level, always carrying the marker.
+ * R2's note, appended to the call's RESULT: what the arguments no longer carry,
+ * and where it is. Always carries the marker, so a write that copies the note is
+ * still refused by the tools' guard.
  */
-export function payloadPlaceholder(size: string, path: string | undefined): string {
-  const where = path === undefined ? "" : `, already written to ${path}`;
-  const back = path === undefined ? "fs_read it" : `fs_read ${path}`;
-  return `${PRUNE_MARKER}: ${size}${where} — ${back} if you need the text⟫`;
+export function payloadNote(about: {
+  readonly chars: number;
+  readonly path?: string;
+  readonly edits?: number;
+}): string {
+  const where = about.path ?? "the file";
+  const edits = about.edits === undefined || about.edits < 2 ? "" : `${about.edits} edits, `;
+  return `${PRUNE_MARKER}: the text this call sent (${edits}${formatChars(
+    about.chars,
+  )}) is not shown any more — it is in ${where}; fs_read ${where} if you need it⟫`;
 }
 
 /** A resolved read range: `to === undefined` means "to the end of the file". */
@@ -247,6 +270,8 @@ interface CallSite {
   readonly read?: ReadSpan;
   /** The content of the result message answering it, when there is one. */
   readonly result?: string;
+  /** The index of the result message answering it (R2 adds its note there). */
+  readonly resultIndex?: number;
 }
 
 /**
@@ -369,6 +394,9 @@ function succeeded(toolName: string, result: string | undefined): boolean {
 /** The write tools whose arguments carry a payload R2 may replace. */
 const PAYLOAD_TOOLS: ReadonlySet<string> = new Set(["fs_write", "fs_edit", "fs_multi_edit"]);
 
+/** How many payload calls on an ACTIVE path keep their arguments (R2, D2: two). */
+const KEEP_ACTIVE_PAYLOADS = 2;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -382,7 +410,7 @@ function parseObject(args: string): Record<string, unknown> | undefined {
   }
 }
 
-/** Every payload string of an edit spec, in argument order (for the placeholder text). */
+/** The payload keys R2 drops, per tool (the whole `edits` array for a multi-edit). */
 function payloadKeys(toolName: string): readonly string[] {
   if (toolName === "fs_write") {
     return ["content"];
@@ -390,51 +418,60 @@ function payloadKeys(toolName: string): readonly string[] {
   if (toolName === "fs_edit") {
     return ["old_string", "new_string"];
   }
-  return [];
+  return toolName === "fs_multi_edit" ? ["edits"] : [];
 }
 
-/** R2: the arguments with every payload string replaced by a placeholder. */
+/** The payload strings of one `fs_multi_edit` entry. */
+const EDIT_PAYLOAD_KEYS: readonly string[] = ["old_string", "new_string"];
+
+/**
+ * R2: the arguments with every payload key DELETED — never shortened to a
+ * placeholder. A rest of the object (`path`, `replace_all`, the id and name)
+ * stays, so the call is still a readable record of what was done.
+ */
 function pruneArguments(
   call: ToolCall,
-  path: string | undefined,
-): { readonly arguments: string; readonly savedChars: number } | undefined {
+):
+  | { readonly arguments: string; readonly removedChars: number; readonly edits?: number }
+  | undefined {
   const args = parseObject(call.arguments);
   if (args === undefined) {
     return undefined;
   }
-  let saved = 0;
-  const shrink = (value: string): string => {
-    const placeholder = payloadPlaceholder(formatChars(value.length), path);
-    saved += Math.max(0, value.length - placeholder.length);
-    return placeholder;
-  };
   const out: Record<string, unknown> = { ...args };
-  if (call.name === "fs_multi_edit") {
-    const edits = Array.isArray(args.edits) ? args.edits : [];
-    out.edits = edits.map((edit) => {
-      if (!isRecord(edit)) {
-        return edit;
-      }
-      const next: Record<string, unknown> = { ...edit };
-      for (const key of ["old_string", "new_string"]) {
-        const value = next[key];
-        if (typeof value === "string") {
-          next[key] = shrink(value);
-        }
-      }
-      return next;
-    });
-  }
+  let removed = 0;
+  let edits: number | undefined;
   for (const key of payloadKeys(call.name)) {
     const value = out[key];
-    if (typeof value === "string") {
-      out[key] = shrink(value);
+    if (Array.isArray(value)) {
+      // `fs_multi_edit`: the whole array goes; what it carried is what it cost.
+      for (const edit of value) {
+        if (!isRecord(edit)) {
+          continue;
+        }
+        for (const sub of EDIT_PAYLOAD_KEYS) {
+          const text = edit[sub];
+          if (typeof text === "string") {
+            removed += text.length;
+          }
+        }
+      }
+      edits = value.length;
+    } else if (typeof value === "string") {
+      removed += value.length;
+    } else {
+      continue;
     }
+    delete out[key];
   }
-  if (saved <= 0) {
+  if (removed <= 0) {
     return undefined;
   }
-  return { arguments: JSON.stringify(out), savedChars: saved };
+  return {
+    arguments: JSON.stringify(out),
+    removedChars: removed,
+    ...(edits !== undefined ? { edits } : {}),
+  };
 }
 
 /** The lines a long result keeps: its header, the first `head` and last `tail`. */
@@ -511,12 +548,52 @@ export function pruneCandidates(
       const site = callById.get(message.toolCallId);
       if (site !== undefined && site.index < i) {
         // Fill the result in place, so later rules see it.
-        const filled: CallSite = { ...site, result: message.content };
+        const filled: CallSite = { ...site, result: message.content, resultIndex: i };
         sites[sites.indexOf(site)] = filled;
         callById.set(message.toolCallId, filled);
       }
     }
   }
+
+  // A path is ACTIVE while a call naming it (`fs_read` or a write/edit) sits in
+  // the last `2 × keepRecentRounds` assistant rounds: the file the model is
+  // still working on. A batch is final (an entry is never removed), so "still
+  // working on" has to be decided at batch time from what is recent
+  // (docs/fix/prune-stub-imitation.md D2).
+  const activeFrom = assistantIndices.at(-2 * keepRecentRounds) ?? 0;
+  const active = new Set<string>();
+  for (const site of sites) {
+    if (
+      site.index >= activeFrom &&
+      site.path !== undefined &&
+      (site.call.name === "fs_read" || PAYLOAD_TOOLS.has(site.call.name))
+    ) {
+      active.add(site.path);
+    }
+  }
+  // The LAST `KEEP_ACTIVE_PAYLOADS` successful payload calls per active path keep
+  // their arguments: those are the ones a model mirrors into its next call.
+  const keepPayload = new Set<string>();
+  const keptPerPath = new Map<string, number>();
+  for (const site of [...sites].reverse()) {
+    const path = site.path;
+    if (path === undefined || !active.has(path)) {
+      continue;
+    }
+    if (!PAYLOAD_TOOLS.has(site.call.name) || !succeeded(site.call.name, site.result)) {
+      continue;
+    }
+    const kept = keptPerPath.get(path) ?? 0;
+    if (kept >= KEEP_ACTIVE_PAYLOADS) {
+      continue;
+    }
+    keptPerPath.set(path, kept + 1);
+    keepPayload.add(site.call.id);
+  }
+
+  // Result indices R2 owns: a result whose call was R2-pruned carries the note,
+  // never a stub (the success line is what the model needs there).
+  const claimed = new Set<number>();
 
   for (const index of candidates) {
     const message = history[index];
@@ -524,13 +601,14 @@ export function pruneCandidates(
       continue;
     }
     if (message.role === "assistant") {
-      // R2: only a successful write/edit, and only its payload strings.
+      // R2: only a successful write/edit, and only its payload keys.
       const calls = message.toolCalls ?? [];
       const pruned: ToolCall[] = [];
+      const notes: { index: number; note: string }[] = [];
       let saved = 0;
-      let changed = false;
+      let spent = 0;
       for (const call of calls) {
-        if (!PAYLOAD_TOOLS.has(call.name)) {
+        if (!PAYLOAD_TOOLS.has(call.name) || keepPayload.has(call.id)) {
           pruned.push(call);
           continue;
         }
@@ -539,27 +617,56 @@ export function pruneCandidates(
           pruned.push(call);
           continue;
         }
-        const rewritten = pruneArguments(call, site.path);
+        const rewritten = pruneArguments(call);
         if (rewritten === undefined) {
           pruned.push(call);
           continue;
         }
+        const note = stubFor({
+          rule: "call_payload",
+          toolName: call.name,
+          chars: rewritten.removedChars,
+          ...(site.path !== undefined ? { path: site.path } : {}),
+          ...(rewritten.edits !== undefined ? { edits: rewritten.edits } : {}),
+        }).content;
         pruned.push({ ...call, arguments: rewritten.arguments });
-        saved += rewritten.savedChars;
-        changed = true;
+        saved += rewritten.removedChars;
+        spent += note.length;
+        if (site.resultIndex !== undefined) {
+          notes.push({ index: site.resultIndex, note });
+        }
       }
-      if (changed) {
+      // Pruning has to save something: the note costs, so the NET is what counts.
+      if (notes.length > 0 && saved - spent > 0) {
         set.set(index, {
           rule: "call_payload",
           original: message,
           message: { ...message, toolCalls: pruned },
-          savedChars: saved,
+          savedChars: saved - spent,
         });
+        for (const { index: at, note } of notes) {
+          const result = history[at];
+          if (result === undefined || result.role !== "tool") {
+            continue;
+          }
+          set.set(at, {
+            rule: "call_payload",
+            original: result,
+            message: { ...result, content: `${result.content}\n${note}` },
+            // The arguments' entry carries the net saving: this one adds the note.
+            savedChars: 0,
+          });
+          claimed.add(at);
+        }
       }
       continue;
     }
     if (message.role !== "tool") {
       // User text (and tentacle's own notes) is never touched.
+      continue;
+    }
+    if (claimed.has(index)) {
+      // R2 already decided this result (its note is appended there).
       continue;
     }
     const site = message.toolCallId === undefined ? undefined : callById.get(message.toolCallId);

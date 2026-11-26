@@ -7,8 +7,16 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ChatMessage, ToolCall } from "@tentacle/core";
+import { PRUNE_SENTINEL, fsEditTool, fsMultiEditTool, fsWriteTool } from "@tentacle/tools";
 import { modelView } from "../src/context-awareness.ts";
-import { PRUNE_MARKER, applyPrune, estimateGain, pruneCandidates, stubFor } from "../src/prune.ts";
+import {
+  PRUNE_MARKER,
+  applyPrune,
+  estimateGain,
+  payloadNote,
+  pruneCandidates,
+  stubFor,
+} from "../src/prune.ts";
 
 /** An assistant round that calls `calls`, answered by `results` (id -> content). */
 function round(calls: readonly ToolCall[], results: ReadonlyMap<string, string>): ChatMessage[] {
@@ -235,89 +243,389 @@ describe("R1 — a superseded fs_read", () => {
 });
 
 describe("R2 — a successful write/edit's payload", () => {
-  const tail = (): ChatMessage[] => [...filler(0, 6), { role: "user", content: "next" }];
+  const P = "news/SCHEMA.md";
+  const COLON = ":";
 
-  test("fs_write: only `content` becomes a placeholder; the other fields stay", () => {
-    const args = { path: "docs/x.md", content: "x".repeat(4000) };
-    const history: ChatMessage[] = [
+  /**
+   * `"go"`, one round of `calls`, then enough filler that the call is outside
+   * the protected tail (6 rounds) AND its path is no longer ACTIVE — D2's
+   * window is 2 × `keepRecentRounds` (12 by default).
+   */
+  function retired(
+    calls: readonly ToolCall[],
+    results: ReadonlyMap<string, string>,
+  ): ChatMessage[] {
+    return [
       { role: "user", content: "go" },
-      ...round(
-        [call("w1", "fs_write", args)],
-        new Map([["w1", "wrote 4000 bytes to docs/x.md (+80 -0)"]]),
-      ),
-      ...tail(),
+      ...round(calls, results),
+      ...filler(0, 12),
+      { role: "user", content: "next" },
     ];
-    const out = pruned(history);
-    const assistant = out[1];
-    if (assistant?.toolCalls === undefined) {
-      throw new Error("no toolCalls");
+  }
+
+  /** The raw `arguments` string of the call at `index`: byte-identical or not. */
+  function rawArgs(history: readonly ChatMessage[], index: number, which = 0): string {
+    const raw = history[index]?.toolCalls?.[which]?.arguments;
+    if (raw === undefined) {
+      throw new Error(`no tool call at ${index}`);
     }
-    const prunedArgs = JSON.parse(assistant.toolCalls[0]?.arguments ?? "") as Record<
-      string,
-      unknown
-    >;
-    expect(prunedArgs.path).toBe("docs/x.md");
-    expect(String(prunedArgs.content)).toContain("pruned by tentacle");
-    expect(String(prunedArgs.content)).toContain("docs/x.md");
-    // `arguments` still parse as a JSON OBJECT, and the id/name are untouched.
-    expect(typeof prunedArgs).toBe("object");
-    expect(assistant.toolCalls[0]?.id).toBe("w1");
-    expect(assistant.toolCalls[0]?.name).toBe("fs_write");
-    // The result message itself is untouched (it says what happened).
-    expect(contentAt(out, 2)).toBe("wrote 4000 bytes to docs/x.md (+80 -0)");
-  });
+    return raw;
+  }
 
-  test("fs_edit: `old_string` and `new_string` are placeholders, `replace_all` is kept", () => {
-    const args = { path: "a.ts", old_string: "o".repeat(3000), new_string: "n".repeat(3000) };
-    const history: ChatMessage[] = [
-      { role: "user", content: "go" },
-      ...round([call("e1", "fs_edit", args)], new Map([["e1", "edited a.ts (+40 -40)"]])),
-      ...tail(),
-    ];
+  function argsOf(
+    history: readonly ChatMessage[],
+    index: number,
+    which = 0,
+  ): Record<string, unknown> {
+    const raw = history[index]?.toolCalls?.[which]?.arguments;
+    if (raw === undefined) {
+      throw new Error(`no tool call at ${index}`);
+    }
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      throw new Error(`arguments at ${index} are not a JSON object`);
+    }
+    return parsed as Record<string, unknown>;
+  }
+
+  /** T2 — the payload keys are GONE (a missing key cannot be copied as a value). */
+  test("fs_write: `content` is dropped, the rest of the call stays", () => {
+    const history = retired(
+      [call("w1", "fs_write", { path: P, content: "x".repeat(4000) })],
+      new Map([["w1", `wrote 4000 bytes to ${P} (+80 -0)`]]),
+    );
     const out = pruned(history);
-    const prunedArgs = JSON.parse(out[1]?.toolCalls?.[0]?.arguments ?? "") as Record<
-      string,
-      unknown
-    >;
-    expect(String(prunedArgs.old_string)).toContain("pruned by tentacle");
-    expect(String(prunedArgs.new_string)).toContain("pruned by tentacle");
-    expect(prunedArgs.path).toBe("a.ts");
+    const args = argsOf(out, 1);
+    expect("content" in args).toBe(false);
+    expect(args.path).toBe(P);
+    // The id and the name are untouched: this is still the call that ran.
+    expect(out[1]?.toolCalls?.[0]?.id).toBe("w1");
+    expect(out[1]?.toolCalls?.[0]?.name).toBe("fs_write");
   });
 
-  test("fs_multi_edit: every edit's strings are placeholders, `edits` stays an array", () => {
+  test("fs_edit: `old_string`/`new_string` are dropped, `replace_all` is kept", () => {
+    const history = retired(
+      [
+        call("e1", "fs_edit", {
+          path: "a.ts",
+          old_string: "o".repeat(3000),
+          new_string: "n".repeat(3000),
+          replace_all: true,
+        }),
+      ],
+      new Map([["e1", "edited a.ts (+40 -40)"]]),
+    );
+    const out = pruned(history);
+    const args = argsOf(out, 1);
+    expect("old_string" in args).toBe(false);
+    expect("new_string" in args).toBe(false);
+    expect(args.replace_all).toBe(true);
+    expect(args.path).toBe("a.ts");
+  });
+
+  test("fs_multi_edit: the whole `edits` array is dropped, `path` stays", () => {
     const edits = [
       { old_string: "a".repeat(2000), new_string: "b".repeat(2000) },
       { old_string: "c", new_string: "d", replace_all: true },
     ];
-    const history: ChatMessage[] = [
-      { role: "user", content: "go" },
-      ...round(
-        [call("m1", "fs_multi_edit", { path: "a.ts", edits })],
-        new Map([["m1", "edited a.ts with 2 edits (+7 -7)"]]),
-      ),
-      ...tail(),
-    ];
+    const history = retired(
+      [call("m1", "fs_multi_edit", { path: "a.ts", edits })],
+      new Map([["m1", "edited a.ts with 2 edits (+7 -7)"]]),
+    );
     const out = pruned(history);
-    const prunedArgs = JSON.parse(out[1]?.toolCalls?.[0]?.arguments ?? "") as Record<
-      string,
-      unknown
-    >;
-    const prunedEdits = prunedArgs.edits as Record<string, unknown>[];
-    expect(Array.isArray(prunedEdits)).toBe(true);
-    expect(String(prunedEdits[0]?.old_string)).toContain("pruned by tentacle");
-    expect(prunedEdits[1]?.replace_all).toBe(true);
+    const args = argsOf(out, 1);
+    expect("edits" in args).toBe(false);
+    expect(args.path).toBe("a.ts");
   });
 
-  test("a FAILED write keeps its payload (the file is not the truth)", () => {
+  /** T1 — the evidence's own shape (docs/fix/prune-stub-imitation.md, Context). */
+  test("the placeholder never appears in a call's arguments any more", () => {
     const history: ChatMessage[] = [
       { role: "user", content: "go" },
       ...round(
-        [call("w1", "fs_write", { path: "docs/x.md", content: "x".repeat(4000) })],
-        new Map([["w1", "tool fs_write failed: EACCES: permission denied"]]),
+        [call("w30", "fs_write", { path: P, content: "s".repeat(3058) })],
+        new Map([["w30", `wrote 3058 bytes to ${P} (+90 -0)`]]),
       ),
-      ...tail(),
+      ...filler(0, 4),
+      ...round(
+        [
+          call("m43", "fs_multi_edit", {
+            path: P,
+            edits: [
+              { old_string: "a".repeat(338), new_string: "b".repeat(481) },
+              { old_string: "c".repeat(249), new_string: "d".repeat(240) },
+              { old_string: "e".repeat(214), new_string: "f".repeat(241) },
+              { old_string: "g".repeat(492), new_string: "h".repeat(492) },
+            ],
+          }),
+        ],
+        new Map([["m43", `edited ${P} with 4 edits (+6 -4)`]]),
+      ),
+      // Rounds 6-18: P falls out of the 2 × 6 activity window, so only the
+      // stripping rule is exercised here.
+      ...filler(10, 13),
+      { role: "user", content: "next" },
     ];
+    const out = pruned(history);
+    for (const message of out) {
+      for (const toolCall of message.toolCalls ?? []) {
+        expect(toolCall.arguments).not.toContain(PRUNE_MARKER);
+        for (const value of Object.values(argsOf([message], 0))) {
+          expect(String(value)).not.toContain(PRUNE_MARKER);
+        }
+      }
+    }
+    // Both calls are pruned to their `path`, and each result carries the note.
+    expect(Object.keys(argsOf(out, 1))).toEqual(["path"]);
+    expect(contentAt(out, 2)).toContain(PRUNE_MARKER);
+    expect(contentAt(out, 12)).toContain(PRUNE_MARKER);
+  });
+
+  /** T3 — what a model would write by imitating the stripped shape can't run. */
+  test("the stripped arguments fail the tool's own schema (an imitation writes nothing)", () => {
+    const write = pruned(
+      retired(
+        [call("w1", "fs_write", { path: P, content: "x".repeat(3000) })],
+        new Map([["w1", `wrote 3000 bytes to ${P} (+0 -0)`]]),
+      ),
+    );
+    const edit = pruned(
+      retired(
+        [
+          call("e1", "fs_edit", {
+            path: P,
+            old_string: "o".repeat(2000),
+            new_string: "n".repeat(2000),
+          }),
+        ],
+        new Map([["e1", `edited ${P} (+1 -1)`]]),
+      ),
+    );
+    const multi = pruned(
+      retired(
+        [
+          call("m1", "fs_multi_edit", {
+            path: P,
+            edits: [{ old_string: "a".repeat(2000), new_string: "b".repeat(2000) }],
+          }),
+        ],
+        new Map([["m1", `edited ${P} with 1 edits (+1 -1)`]]),
+      ),
+    );
+    expect(fsWriteTool.inputSchema.safeParse(argsOf(write, 1)).success).toBe(false);
+    expect(fsEditTool.inputSchema.safeParse(argsOf(edit, 1)).success).toBe(false);
+    expect(fsMultiEditTool.inputSchema.safeParse(argsOf(multi, 1)).success).toBe(false);
+    // NOT vacuous: the shape `main` emitted (the marker as a VALUE) passes the
+    // schema — that is exactly why the model could send it.
+    const stubbed = { path: P, content: `${PRUNE_SENTINEL}${COLON} 3.0k chars⟫` };
+    expect(fsWriteTool.inputSchema.safeParse(stubbed).success).toBe(true);
+  });
+
+  /** T4 — the note rides the RESULT, after the tool's own success line. */
+  test("fs_write: the result keeps its success line and gains one note line", () => {
+    const successLine = `wrote 3000 bytes to ${P} (+90 -0)`;
+    const history = retired(
+      [call("w1", "fs_write", { path: P, content: "x".repeat(3000) })],
+      new Map([["w1", successLine]]),
+    );
+    const out = pruned(history);
+    const result = contentAt(out, 2);
+    expect(result.startsWith(`${successLine}\n`)).toBe(true);
+    const note = result.slice(successLine.length + 1);
+    expect(note).toContain(PRUNE_MARKER);
+    expect(note).toContain(P);
+    expect(note).toContain("3.0k chars");
+    // The STORED result is untouched: only the model's copy carries the note.
+    expect(contentAt(history, 2)).toBe(successLine);
+  });
+
+  test("fs_multi_edit: the note names how many edits it dropped", () => {
+    const history = retired(
+      [
+        call("m1", "fs_multi_edit", {
+          path: P,
+          edits: [
+            { old_string: "a".repeat(338), new_string: "b".repeat(481) },
+            { old_string: "c".repeat(249), new_string: "d".repeat(240) },
+            { old_string: "e".repeat(214), new_string: "f".repeat(241) },
+            { old_string: "g".repeat(492), new_string: "h".repeat(492) },
+          ],
+        }),
+      ],
+      new Map([["m1", `edited ${P} with 4 edits (+6 -4)`]]),
+    );
+    const out = pruned(history);
+    const result = contentAt(out, 2);
+    expect(result).toContain("4 edits");
+    expect(result).toContain(PRUNE_MARKER);
+    expect(result).toContain(P);
+  });
+
+  /** T5 — D2: a path still being worked on keeps its last two payload calls. */
+  test("an ACTIVE path keeps the last two payload calls, byte-identical", () => {
+    const history: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round(
+        [call("w1", "fs_write", { path: P, content: "w".repeat(3000) })],
+        new Map([["w1", `wrote 3000 bytes to ${P} (+0 -0)`]]),
+      ),
+      ...round(
+        [
+          call("e1", "fs_edit", {
+            path: P,
+            old_string: "o".repeat(400),
+            new_string: "n".repeat(410),
+          }),
+        ],
+        new Map([["e1", `edited ${P} (+1 -1)`]]),
+      ),
+      ...round(
+        [
+          call("e2", "fs_edit", {
+            path: P,
+            old_string: "p".repeat(500),
+            new_string: "q".repeat(490),
+          }),
+        ],
+        new Map([["e2", `edited ${P} (+2 -2)`]]),
+      ),
+      ...filler(0, 7),
+      { role: "user", content: "next" },
+    ];
+    const out = pruned(history);
+    expect(rawArgs(out, 3)).toBe(rawArgs(history, 3));
+    expect(rawArgs(out, 5)).toBe(rawArgs(history, 5));
+    // The third-from-last is released: only TWO are mirrored.
+    expect("content" in argsOf(out, 1)).toBe(false);
+  });
+
+  test("an IDLE path is stripped while the active one is kept, in one history", () => {
+    const Q = "news/OTHER.md";
+    const history: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round(
+        [call("q1", "fs_write", { path: Q, content: "q".repeat(3000) })],
+        new Map([["q1", `wrote 3000 bytes to ${Q} (+0 -0)`]]),
+      ),
+      ...filler(0, 13),
+      ...round(
+        [call("p1", "fs_write", { path: P, content: "p".repeat(3000) })],
+        new Map([["p1", `wrote 3000 bytes to ${P} (+0 -0)`]]),
+      ),
+      ...round(
+        [
+          call("p2", "fs_edit", {
+            path: P,
+            old_string: "o".repeat(400),
+            new_string: "n".repeat(400),
+          }),
+        ],
+        new Map([["p2", `edited ${P} (+1 -1)`]]),
+      ),
+      ...filler(20, 7),
+      { role: "user", content: "next" },
+    ];
+    const out = pruned(history);
+    expect("content" in argsOf(out, 1)).toBe(false);
+    expect(rawArgs(out, 29)).toBe(rawArgs(history, 29));
+    expect(rawArgs(out, 31)).toBe(rawArgs(history, 31));
+  });
+
+  test("one message, two calls: only the idle path's call is stripped and noted", () => {
+    const A = "news/A.md";
+    const B = "news/B.md";
+    const history: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round(
+        [
+          call("m1", "fs_write", { path: A, content: "a".repeat(3000) }),
+          call("m2", "fs_write", { path: B, content: "b".repeat(3000) }),
+        ],
+        new Map([
+          ["m1", `wrote 3000 bytes to ${A} (+0 -0)`],
+          ["m2", `wrote 3000 bytes to ${B} (+0 -0)`],
+        ]),
+      ),
+      ...filler(0, 12),
+      // A call on B inside the window makes B active: its last two payload calls
+      // (this one and `m2`) keep their arguments.
+      ...round(
+        [
+          call("m3", "fs_edit", {
+            path: B,
+            old_string: "o".repeat(400),
+            new_string: "n".repeat(400),
+          }),
+        ],
+        new Map([["m3", `edited ${B} (+1 -1)`]]),
+      ),
+      { role: "user", content: "next" },
+    ];
+    const out = pruned(history);
+    expect("content" in argsOf(out, 1, 0)).toBe(false);
+    expect(rawArgs(out, 1, 1)).toBe(rawArgs(history, 1, 1));
+    // Only the stripped call's result carries the note.
+    expect(contentAt(out, 2)).toContain(PRUNE_MARKER);
+    expect(contentAt(out, 3)).toBe(`wrote 3000 bytes to ${B} (+0 -0)`);
+  });
+
+  test("an `fs_read` of P inside the window alone keeps P active", () => {
+    const history: ChatMessage[] = [
+      { role: "user", content: "go" },
+      ...round(
+        [call("w1", "fs_write", { path: P, content: "x".repeat(3000) })],
+        new Map([["w1", `wrote 3000 bytes to ${P} (+0 -0)`]]),
+      ),
+      ...filler(0, 12),
+      ...round([call("r1", "fs_read", { path: P })], new Map([["r1", body("CONTENT")]])),
+      { role: "user", content: "next" },
+    ];
+    const out = pruned(history);
+    expect(rawArgs(out, 1)).toBe(rawArgs(history, 1));
+  });
+
+  /** T6 — pruning has to save something: the note costs. */
+  test("a payload smaller than its note is not pruned at all", () => {
+    const history = retired(
+      [call("e1", "fs_edit", { path: "a.ts", old_string: "abc", new_string: "abcd" })],
+      new Map([["e1", "edited a.ts (+1 -1)"]]),
+    );
+    expect(pruneCandidates(history).size).toBe(0);
     expect(pruned(history)).toBe(history);
+  });
+
+  test("estimateGain is the payload minus the note, and nothing else", () => {
+    const content = "x".repeat(3000);
+    const history = retired(
+      [call("w1", "fs_write", { path: P, content })],
+      new Map([["w1", `wrote 3000 bytes to ${P} (+0 -0)`]]),
+    );
+    const note = payloadNote({ chars: content.length, path: P });
+    expect(estimateGain(history, pruneCandidates(history)).chars).toBe(
+      content.length - note.length,
+    );
+  });
+
+  /** T7 — a failed write: the payload stays AND no note is added. */
+  test("a FAILED write keeps its payload and gets no note", () => {
+    const history = retired(
+      [call("w1", "fs_write", { path: P, content: "x".repeat(4000) })],
+      new Map([["w1", "tool fs_write failed: EACCES: permission denied"]]),
+    );
+    expect(pruned(history)).toBe(history);
+  });
+
+  /** T8 — the pruned copy is a valid, byte-stable history. */
+  test("the pruned history has no repairs and is byte-identical across runs", () => {
+    const history = retired(
+      [call("w1", "fs_write", { path: P, content: "x".repeat(3000) })],
+      new Map([["w1", `wrote 3000 bytes to ${P} (+0 -0)`]]),
+    );
+    const a = pruned(history);
+    const b = pruned(history);
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+    expect(modelView(a).repairs).toBeNull();
+    expect(modelView(a).messages).toHaveLength(a.length);
   });
 });
 

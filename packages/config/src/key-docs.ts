@@ -901,7 +901,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     resolved: (c) => c.contextPrune.enabled,
     sourceKey: "contextPruneEnabled",
     details:
-      "Old file reads a later read or edit superseded, write/edit payloads already on disk, long shell output, spill previews and duplicates are replaced by a short `⟪pruned by tentacle: …⟫` stub saying how to get them back. Conversation text and the last `keepRecentRounds` rounds are never touched; the stored history and the session log never change. The window is `model.contextWindow`.",
+      "Old file reads a later read or edit superseded, write/edit payloads already on disk (except the last two on a file still being worked on), long shell output, spill previews and duplicates are replaced by a short `⟪pruned by tentacle: …⟫` stub saying how to get them back. Conversation text and the last `keepRecentRounds` rounds are never touched; the stored history and the session log never change. The window is `model.contextWindow`.",
     example: "true",
   },
   "contextPrune.pruneAtPercent": {

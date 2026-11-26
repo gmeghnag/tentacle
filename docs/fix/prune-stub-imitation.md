@@ -271,7 +271,146 @@ rounds must show `{"path":"news/SCHEMA.md"}` + a noted result.
 
 ## Execution
 
-*— (executor), (date)*
+*— claude (Claude Code CLI 2.1.332; the harness exposes no exact model id), 2026-11-26*
+
+**Load-bearing check — PASSES.** `.tentacle/tmp/prune-stub-imitation/loadbearing.ts`
+(built from `fsWriteTool/fsEditTool/fsMultiEditTool.inputSchema`, `.safeParse`):
+
+```
+today fs_write stub (stub in a value):        safeParse.success = true
+today fs_edit stub (stub in a value):         safeParse.success = true
+today fs_multi_edit stub (stub in a value):   safeParse.success = true
+stripped fs_write (no content):               safeParse.success = false
+stripped fs_edit (no old/new_string):         safeParse.success = false
+stripped fs_multi_edit (no edits):            safeParse.success = false
+```
+
+So (b) holds exactly: today's shape is imitable and runs (the guard then
+refuses), the stripped shape cannot run at all. (a) re-verified statically:
+`parseArgs` is a bare `JSON.parse` (`anthropic-provider.ts:628`, `:671`) and a
+past call is never validated against the tool schema (only
+`registry.ts:96-102`, at execution). The doc's own unverified item stands: no
+live Anthropic request was made (no API credits here).
+
+**Repro before** (`repro.ts`, on `57d23bf4`) — the doc's output, byte for byte:
+`[1] fs_write args: {…,"content":"⟪pruned by tentacle: 3.0k chars, already written to
+news/SCHEMA.md …⟫"}`, `[11] fs_edit args: {… old_string/new_string
+placeholders …}`.
+
+**Repro after.** `repro.ts` (same history, 7 filler rounds): both the round-30
+`fs_write` and the round-35 `fs_edit` keep their payloads untouched — P is
+ACTIVE (10 assistant rounds < 2 × 6), so nothing is pruned and no note appears.
+`repro2.ts` (15 filler rounds, P idle):
+
+```
+[1]  fs_write args: {"path":"news/SCHEMA.md"}
+[2]  result: wrote 3000 bytes to news/SCHEMA.md (+90 -0)
+     ⟪pruned by tentacle: the text this call sent (3.0k chars) is not shown any more — it is in news/SCHEMA.md; fs_read news/SCHEMA.md if you need it⟫
+[11] fs_edit args: {"path":"news/SCHEMA.md"}
+[12] result: edited news/SCHEMA.md (+6 -4)
+     ⟪pruned by tentacle: the text this call sent (819 chars) is not shown any more — …
+```
+
+Both halves of the plan's acceptance line are met.
+
+**As built, in order**
+
+1. `packages/agent/src/prune.ts`
+   - module header R2 line, the `call_payload` comment and
+     `PruneEntry.savedChars`'s doc rewritten to the new shape (incl. R2's
+     `savedChars: 0` result entry, beside the `viewed_image` exception).
+   - `payloadPlaceholder` → `payloadNote({chars, path, edits})` (the only
+     caller was `prune.ts`, so no other file changed): "the text this call sent
+     (4 edits, 1.6k chars) is not shown any more — it is in P; fs_read P if you
+     need it⟫"; `stubFor({rule:"call_payload"})` returns it, so the "every stub
+     carries the marker" contract holds.
+   - `pruneArguments` now DELETES `content` / `old_string`+`new_string` /
+     `edits` (computed `delete`, per the Biome `noDelete` rule) and returns
+     `{arguments, removedChars, edits?}`; no placeholder is ever put back.
+   - `CallSite.resultIndex` added (filled where the result is matched to its
+     call), so R2 can name the result it annotates.
+   - D2, before the candidates loop: `activeFrom = assistantIndices.at(-2 ×
+     keepRecentRounds) ?? 0`; `active` = paths of `fs_read`/`PAYLOAD_TOOLS`
+     sites at/after it; `keepPayload` = the last `KEEP_ACTIVE_PAYLOADS` (2)
+     successful payload calls per active path, collected by walking `sites`
+     **in reverse** (so it is the LAST two, not the first).
+   - the R2 branch: a call in `keepPayload` is pushed unchanged; a stripped call
+     contributes `removedChars` and one note; the assistant entry's `savedChars`
+     is the NET (`Σ removedChars − Σ note.length`) and both entries are skipped
+     when that is ≤ 0; each note becomes a second entry at its result's index
+     (`{...result, content: `${result.content}\n${note}`}`, `savedChars: 0`).
+   - design item 4 made explicit: a `claimed` set of the result indices R2 owns
+     short-circuits the tool-message branch, so `ruleFor` (in practice R5) never
+     overwrites the note.
+2. `packages/agent/test/prune.test.ts` — the R2 block rewritten to the new
+   contract: T1 (the evidence's own shape, 4 edits + 13 filler rounds, no marker
+   in any call's arguments, `{"path":…}` + noted result), T2 (per tool: the keys
+   are gone, `path`/`id`/`name`/`replace_all` stay, still a JSON object), T3
+   (each stripped object fails the tool's `inputSchema.safeParse`, and the
+   stubbed object still PASSES — the check is not vacuous), T4 (result = success
+   line + `\n` + note; "4 edits" for a multi-edit; the stored result unchanged),
+   T5 (write+edit+edit on P then 7 rounds → the two later calls byte-identical,
+   the first stripped; an idle path stripped beside an active one in the same
+   history; a lone `fs_read` in the window keeps a path active), T6 (a payload
+   smaller than its note → no entry at either index; `estimateGain` = payload −
+   note), T7 (failed write: unchanged history, no note), T8 (`repairs` null,
+   byte-identical across two runs). Plus one case the Tests list did not name
+   but the Failure modes did: **one message with two calls**, the idle path's
+   call stripped and noted, the active path's call byte-identical and un-noted.
+3. `packages/config/src/key-docs.ts:904` — `contextPrune.enabled` details:
+   "write/edit payloads already on disk (except the last two on a file still
+   being worked on)".
+4. `docs/feat/smart-compaction.md` — the dated amendment under the R2 row.
+5. `changelog.d/prune-stub-imitation.fixed.md` — one bullet.
+
+**Drift from the Implementation (all deliberate, each a site the plan
+under-specified)**
+
+- The plan said "one dated amendment line under the R2 row". Three more places
+  in the same file had to move with the code, otherwise the doc would describe
+  a shape that no longer exists: the R2 row's "Stub keeps" cell, the paragraph
+  quoting the in-argument placeholder (now the result note), and `:481`'s
+  "`payloadPlaceholder` and `formatChars` are exported" → `payloadNote`. Same
+  file, same section, no new scope.
+- `pruneArguments` lost its `path` parameter: the placeholder it existed for is
+  gone, and the note (which needs the path) is built by the R2 branch from the
+  `CallSite`. Matches the plan's stated return shape.
+- `fs_multi_edit` with a single edit renders no "(1 edits, …)" prefix
+  (`edits < 2` → omitted); the plan's example only fixes the "4 edits" case.
+- A note is also appended when the pruned call is the last candidate and its
+  result is the first message of the protected tail. The alternative (stripped
+  arguments with no note anywhere) is the incoherent state the design forbids,
+  so the note wins; the module's tail comment ("the last `keepRecentRounds`
+  assistant rounds are never candidates") remains true.
+- `packages/agent/test/prune.test.ts` gained a `rawArgs` helper: comparing
+  `arguments` inline tripped `toBe(expected: string)` under Bun's types.
+
+**Known, NOT changed (out of this task's scope).** `docs/feat/smart-compaction.md:1559`
+and `:1587` state that R2 "rewrites `toolCalls` and leaves `content` alone", so
+a pruned assistant message still counts as a cached prefix in the cost model.
+With the note on the result that is now only half true (the prefix also breaks
+at the annotated result). That paragraph is a cost-model analysis, not a
+behaviour claim; it needs its own eval, not a silent edit inside this fix.
+
+**Mutation (§9) — non-vacuity, both reverted**
+
+- (a) the in-argument placeholder restored (`out[key] = "⟪pruned by tentacle: …⟫"` for a
+  string payload) → `47 pass / 6 fail`: T2 `fs_write`, T2 `fs_edit`, T1, T3,
+  plus the two T5 cases that also assert the drop.
+- (b) `KEEP_ACTIVE_PAYLOADS = 0` → `50 pass / 3 fail`: exactly the three T5
+  cases (active path keeps last two; idle vs active; `fs_read` keeps active).
+
+**Gate (narrow, per §4; the orchestrator's script runs the whole one)**
+
+- `bun test packages/agent/test/prune.test.ts packages/agent/test/prune-loop.test.ts
+  packages/tools/test/prune-guard.test.ts packages/config/test/key-docs.test.ts`
+  → **106 pass, 0 fail**.
+- `bunx tsc --noEmit -p packages/agent` → no error in `prune.ts`/`prune.test.ts`
+  (two pre-existing, unrelated errors remain in `harness/a2a-map.ts` and
+  `harness-a2a-registry.test.ts`; this branch does not touch them).
+- `bunx biome check` on the three changed code files → clean.
+- No schema/protocol change → `packages/protocol/schema/protocol.json` needs no
+  regeneration; no `protocol.d/` note.
 
 ## Review
 

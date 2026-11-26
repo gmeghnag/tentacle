@@ -198,10 +198,18 @@ another round.
 | Rule | Candidate | Stub keeps | How to get it back (said in the stub) |
 |---|---|---|---|
 | R1 superseded read | `fs_read` result of path P when a LATER successful `fs_read` of P covers the same span (a line range, or the SAME `pages` window for a PDF), or a later successful `fs_write`/`fs_edit`/`fs_multi_edit` of P | path, range/pages, size, the round that superseded it | `fs_read P` again (the file is the truth) |
-| R2 write/edit payload | arguments of a SUCCESSFUL `fs_write` (`content`) / `fs_edit` (`old_string`,`new_string`) / `fs_multi_edit` (`edits[].*`) | path + every non-payload field; each payload string → a placeholder with its size | `fs_read P` |
+| R2 write/edit payload | arguments of a SUCCESSFUL `fs_write` (`content`) / `fs_edit` (`old_string`,`new_string`) / `fs_multi_edit` (`edits`) | path + every non-payload field; the payload keys are DROPPED and the note joins the call's result (see the amendment below) | `fs_read P` |
 | R3 long output acted on | a `shell` / `shell_output` result over `pruneOutputChars` (default 2 000) | first 10 + last 30 lines (failures keep the tail, which is where errors are) + exit code + size | re-run ONLY if safe to repeat; else the spill file if any |
 | R4 spill preview | a result with `spill` set | the banner (path, size), preview dropped | `fs_read <spill path>` with offset/limit / grep |
 | R5 duplicate | a result byte-identical to a LATER result of the same tool + same arguments | — | "identical to the later result of <tool> (call <id>)" |
+
+> **Amendment 2026-11-26 (`docs/fix/prune-stub-imitation.md`):** R2 no longer
+> puts a placeholder string INSIDE the arguments — a weak model read it as a
+> value and copied it into its own write. The payload keys are dropped instead
+> (a missing key cannot be copied, and a call imitating the stripped shape fails
+> the tool's schema), and the note goes on the call's RESULT. The last two
+> payload calls on a file still being worked on (a call naming it in the last
+> `2 x keepRecentRounds` assistant rounds) keep their arguments.
 
 Stubs are **deterministic** functions of the stored message (no clock, no
 counter that changes later), memoised per message object, so the same stub
@@ -211,9 +219,8 @@ bytes are sent every round. Form, e.g.:
 [pruned by tentacle: fs_read docs/x.md lines 1-150 (6.2k chars) — superseded by a later read; fs_read it again for the current content]
 ```
 
-R2 placeholder inside arguments (a JSON string value, never top-level):
-`"⟪pruned by tentacle: 4.1k chars, already written to docs/x.md — fs_read it⟫"`.
-The `⟪…⟫` sentinel is chosen to be unmistakable and greppable.
+R2 note, appended to the call's RESULT (never a string inside its arguments):
+`"⟪pruned by tentacle: the text this call sent (4 edits, 1.6k chars) is not shown any more — it is in docs/x.md; fs_read docs/x.md if you need it⟫"`.
 
 **2. When (batch trigger, at a round boundary, in the loop).** Before building
 a round's request: compute the size estimate the loop already computes
@@ -478,7 +485,7 @@ changes only what the model sees.
    compares it to the window; the counter itself is the loop's (`anchorContext`
    / `estimateUsed`), so a model-specific counter still governs the trigger in
    S2. `prune.ts` therefore imports no token counter.
-6. **`payloadPlaceholder` and `formatChars` are exported** helpers of the module
+6. **`payloadNote` and `formatChars` are exported** helpers of the module
    (the plan names four functions; these are shared by `stubFor` and R2 and are
    worth testing directly).
 7. **`OPTS`**: `keepRecentRounds` 6, `outputChars` 2000, `headLines` 10,
