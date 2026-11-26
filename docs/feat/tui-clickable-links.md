@@ -489,4 +489,53 @@ still fails with only the pre-existing describes selected (`-t`); `--parallel` p
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-26* (fresh context; same model as the planner, other model than the executor)
+
+**Verdict: REQUEST-CHANGES** (1 MEDIUM security, 1 MEDIUM functional; no HIGH).
+
+**Gate (narrow, as asked):** the 8 touched/adjacent test files `--parallel` → 282 pass, 0 fail
+(serially, 1 fail: "the shipped default is the text-only header", the cross-file theme leak
+Execution already reports; `render-lines.test.ts` alone passes 140/140). `bun run lint` clean
+(2709 files); `bun run typecheck` clean (all 4 projects). Full `bun test --parallel` not re-run here.
+
+**Findings**
+
+1. **MEDIUM (security, §7 "a pod is not trusted"; breaks Decision 3's premise "the target is
+   fully visible").** Raw SGR in item text reaches the screen, and `linkRows`
+   (`links.ts:166-171`) strips ALL SGR before detection, so concealed (`ESC[8m`) or
+   fg=bg-coloured cells become part of the link. Repro (`.tentacle/tmp/tui-clickable-links/rv-conceal.ts`):
+   a shell `resultText` of `visit https://good.com\e[8m.evil.com/x\e[28m now\nalso https://good.com.evil.com/x`
+   → row 1 SHOWS `visit https://good.com` + blank cells, and its span is
+   `[1,8,27,"https://good.com.evil.com/x"]`: a click on the visible `good.com` opens
+   `good.com.evil.com`. The source-set rule does not help: the attacker puts the full URL
+   anywhere in the same item (here line 2; an assistant item with it in backticks also
+   links). Any pod/tool/model output can do it. Fix direction: refuse a match whose span
+   in the RAW logical line contains an SGR the TUI did not add (or at least conceal `8`
+   and any fg/bg change), with a regression test on this exact input.
+2. **MEDIUM (functional).** `[https://x.com/a](https://x.com/a)` — a common LLM form —
+   renders `https://x.com/a` (text = href) with **no span** (same probe, `mdLink`):
+   `CANDIDATE_RE` (`links.ts:42`) does not stop at `]`/`(`, so `sourceUrls` records
+   `https://x.com/a](https://x.com/a)` and never the rendered URL. Same for
+   `[https://good](https://other)` (both missing). Missing-never-wrong holds, but the
+   primary use case (links in assistant markdown) silently loses these. Fix direction:
+   `sourceUrls` also records each markdown link target / the candidate cut at `](`;
+   add a test.
+
+**Mutation non-vacuity (applied, seen red, reverted; `git status` clean after):**
+`underlineRow` never re-opens after `ESC[24m` → "re-opens the underline…" fails;
+`ssh` ignores `SSH_TTY` → "ssh follows the environment" fails; link check skipped when
+`expandAll` → "opens it … Ctrl+O or not" fails. Executor's own 7 mutations not re-run.
+
+**Attacks tried:** (a) conceal/hidden-tail spoof → finding 1; (b) `[url](url)` and
+`[a](b)` markdown → finding 2; (c) `file:`/`javascript:` in markdown → visible
+`text (file:///…)`, unclickable (holds); (d) click on a tool header with Ctrl+O → no span
+(skipRows + `id !== ""` guard, holds); (e) blink OFF / hang arrays → same spans (tested,
+holds); (f) opener argv: one element, re-normalised, quiet stdio, no shell (holds).
+
+**What holds:** one session path (no RPC/protocol change; `protocol.json` untouched);
+no raw terminal write (spawn with ignored stdio); `LaidItem` stays the single hit index;
+OSC 8 removal is real; logic is in the pure `links.ts`, components only wire.
+
+**Executor behaviour:** disciplined — red-first per slice, 7 mutations, drifts recorded
+honestly (incl. the `toggleRows` guard correction). It did not red-team the untrusted-text
+angle that Decision 3 asked Review to attack.
