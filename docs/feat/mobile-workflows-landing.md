@@ -222,4 +222,30 @@ Red first on each (§9); mutation noted where the property is easy to fake.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-26*
+
+**Verdict: APPROVE** (no HIGH/MEDIUM). Fresh context; same model family as the planner (Opus), different from the executor (Sonnet) — shared planner blind spots may survive.
+
+**Gate (narrow, as asked).** The 17 touched test files: 414 pass, 0 fail. `bun run lint`: clean (2566 files). `bun run typecheck` (root + mobile + relay): clean. Full `bun run test` and the simulator e2e (flows 34/44/45/46) NOT run here — the merge gate's.
+
+**§7 red-team.**
+- *Single broker / one grant path:* `approve` reaches the store only through `askApproval` → `deps.request` → `approvals.add` after `answer.allowed` (`workflow-driver.ts:1271-1318`); the same body as `requestApproval`. No direct write.
+- *Pod not trusted:* `remove:` is wired only beside `save:` in the non-tunnelled block (`wiring.ts:975-976`); no driver → `unavailable` (`hosted-session.ts:3137`, `:3172`); client refuses before any open when `!daemonWakes` (`remote-session.ts:1528`).
+- *Peer not serialized:* both dispatch cases take no lock (`connection.ts:493-500`); approve answers before the ask (mutation below).
+- *Hash pin:* approve compares before asking and the stored hash is the pinned one; delete compares in one synchronous block with the unlink (`workflow-files.ts:620-623`).
+
+**Mutations (each reverted; `git status` clean after).**
+1. Remover ignores the hash pin → 3 fail (`changed`, broken→valid, no-longer-valid).
+2. `remove` skips the running check → 1 fail.
+3. `approve` skips the open-ask guard → 2 fail (second approve; schedule's open ask).
+4. `approve` AWAITS the ask → 6 fail incl. the daemon «over RPC: approve answers while its ask is still pending».
+5. Phone `canAnswer` forced true → 1 fail («nothing is sent with no sheet…»).
+
+**Attacks tried that found nothing blocking.**
+- Delete while another *session* on the same `serve` runs the workflow: the running check is per-session, but a run snapshots its spec; a later `rerun` re-reads and refuses `changed` (`workflow-driver.ts:1399-1404`) — loud, not silent.
+- Approve while a start's own hash ask is open (race, not `needs-approval` yet) or from another session: a second ask for one hash is possible. Harmless (both pinned to the same hash, once-only, owner-only); nit.
+- TUI `delete x confirm` pins the catalogue read triggered by the preceding `/workflow` (same pattern as `run`); an edit after that read is `changed`.
+- Over the landing a main-agent ask stays not presentable (S8 behaviour, as over a run); `sheet-plan` D8 mutation already shown by the executor.
+- `schedules` lists only this session's jobs; a delete's cross-session schedules fire `invalid` at fire time — visible. Nit.
+
+**Executor behaviour.** Drift is recorded honestly (count instead of Set — correct and tested; `local-runtime` forwards added). Red-before-green gaps are stated (client, `workflow-landing.test.ts`, D8 cases); mutations above cover the client gate and the phone gate.
