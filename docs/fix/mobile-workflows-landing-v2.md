@@ -292,3 +292,20 @@ On the first try the App.tsx mutation hit the run screen's identical line (`App.
 - Banner redraw dedup by `title/originShort/more`: two different asks with equal fields produce the same view, so skipping the redraw is harmless. **Holds.**
 
 **Executor**: honest. It reported the unrun flows, the unreachable `+1` (correct: one router prompt at a time), and the open `ASK_PARKS` and hitSlop items. It ran mutations M1–M10. It missed the dark-shots drift.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26*
+
+**Verdict: PASS.**
+
+- **Finding 1 withdrawn: it was a false positive from my side.** `apps/mobile/e2e/flows/_shot.yaml:8-20`, which this branch does not change, shoots `${SHOT}-light`, flips to dark, shoots `${SHOT}-dark` and returns to light. My `grep -c appearance` never looked inside that included flow. Flows 46 (4 shots) and 46b (2 shots) therefore produce the 12 planned frames. The executor was right to refuse the flip I suggested, because it would have saved a dark frame under the `-light` name.
+- **The new pin in `workflow-start-wiring.test.ts:211-239` is non-vacuous.** I ran my own mutations (`.tentacle/tmp/mobile-workflows-landing-v2/rev/mut2.ts`) and every one turned it red, exit 1:
+  - drop `_shot`'s dark screenshot;
+  - flip to `light` instead of `dark`;
+  - rename one of flow 46's shots;
+  - add a bare `appearance.js` step to 46b.
+
+  Each file was restored and `git status` is clean.
+- **Regressions:** HEAD also regenerates `tools/mockup-kit/generated` for the new `--s-capsule` token, as `theme.ts` and `AskCard.tsx` changed. `scripts/test/mockup-kit.test.ts`: 37 pass, 0 fail. The wiring, e2e-gate and e2e-appearance tests: 71 pass, 0 fail. `bun run lint` (2592 files) and `bun run typecheck` are clean.
+- **Still open, not a finding:** pixels. Flows 46 and 46b must pass the 2-sim e2e gate (`--only 46-workflow-landing,46b-workflow-landing-shots`) before merge.
