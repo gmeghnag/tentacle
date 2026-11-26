@@ -153,6 +153,7 @@ import { inUseCopies, prunePhotoCopies } from "./src/photo-copies.ts";
 import { PHOTO_SETTINGS } from "./src/photo-settings-expo.ts";
 import type { PhotoSettings } from "./src/photo-settings-store.ts";
 import { photosRoot, pickFromLibrary, takePhoto } from "./src/photo-source.ts";
+import { projectNewSessionTap, projectNewSessionView } from "./src/project-new-session.ts";
 import {
   type ProjectObservation,
   type ProjectRecordLike,
@@ -776,6 +777,21 @@ const LINKS = createLinkRegistry<ComputerLink>({
     return link.close();
   },
 });
+
+/**
+ * New session on a computer — the one create behind the drawer's pill and the
+ * Sessions screen's button: `createFreshSession` over that computer's live link.
+ * Never throws.
+ */
+async function createOnComputer(computerId: string, sessionId: string) {
+  let link: Awaited<ReturnType<typeof LINKS.get>>;
+  try {
+    link = await LINKS.get(computerId);
+  } catch {
+    return { ok: false, reason: "link" } as const;
+  }
+  return createFreshSession(link.client.newSession(undefined, sessionId));
+}
 
 /**
  * What the app remembers about a computer besides its record: its live link
@@ -1439,12 +1455,13 @@ function ComputersRoute({
   );
 }
 
-/** A computer's sessions (12c), unchanged: one controller per live client. */
+/** A computer's sessions (12c): one controller per live client, plus New session. */
 function SessionsRoute({
   palette,
   computerId,
   title,
   onOpen,
+  onCreated,
   onBack,
   focusSearch,
 }: {
@@ -1452,6 +1469,8 @@ function SessionsRoute({
   readonly computerId: string;
   readonly title: string;
   readonly onOpen: (row: SessionRow) => void;
+  /** New session created on this computer: open it. */
+  readonly onCreated: (sessionId: string) => void;
   readonly onBack?: () => void;
   readonly focusSearch?: boolean;
 }): JSX.Element {
@@ -1498,6 +1517,27 @@ function SessionsRoute({
     return created;
   }, [computerId, watcher]);
 
+  // New session (docs/feat/mobile-project-new-session.md): the drawer's flow,
+  // always on THIS list's computer.
+  const onCreatedRef = useRef(onCreated);
+  onCreatedRef.current = onCreated;
+  const fresh = useMemo(
+    () =>
+      createDrawerNewSession({
+        mint: () => crypto.randomUUID(),
+        // Bound to this list's computer: a screen reused for another one gets a
+        // new flow, without the old create or its error.
+        create: (_, sessionId) => createOnComputer(computerId, sessionId),
+        opened: (_, sessionId) => onCreatedRef.current(sessionId),
+      }),
+    [computerId],
+  );
+  const [freshState, setFreshState] = useState(() => fresh.state());
+  useEffect(() => {
+    setFreshState(fresh.state());
+    return fresh.subscribe(() => setFreshState(fresh.state()));
+  }, [fresh]);
+
   useEffect(() => {
     const unsubscribe = controller.subscribe((state) => {
       setSnapshot(state);
@@ -1508,8 +1548,10 @@ function SessionsRoute({
       unsubscribe();
       controller.dispose();
       watcher.stop();
+      // A create still in flight opens nothing: the person has moved on (D7).
+      fresh.dispose();
     };
-  }, [controller, watcher]);
+  }, [controller, watcher, fresh]);
 
   // Refresh triggers, no polling: screen focus, app foreground, pull-to-refresh
   // (below), and the link coming back up (above).
@@ -1527,10 +1569,27 @@ function SessionsRoute({
     return () => subscription.remove();
   }, [controller]);
 
+  const newSession = projectNewSessionView(snapshot, freshState);
+  const startNewSession = (): void => {
+    switch (projectNewSessionTap(newSession)) {
+      case "create":
+        void fresh.start(computerId, true);
+        break;
+      case "refuse":
+        playHaptic("light");
+        break;
+      case "ignore":
+        break;
+    }
+  };
+
   return (
     <SessionsScreen
       palette={palette}
       view={viewModel(snapshot, now)}
+      newSession={newSession}
+      onNewSession={startNewSession}
+      onNewSessionDismiss={() => fresh.dismiss()}
       title={title}
       refreshing={snapshot.status === "loading"}
       onRefresh={() => void controller.refresh()}
@@ -1717,15 +1776,7 @@ function SessionDrawerHost({
     () =>
       createDrawerNewSession({
         mint: () => crypto.randomUUID(),
-        create: async (computerId, sessionId) => {
-          let link: Awaited<ReturnType<typeof LINKS.get>>;
-          try {
-            link = await LINKS.get(computerId);
-          } catch {
-            return { ok: false, reason: "link" } as const;
-          }
-          return createFreshSession(link.client.newSession(undefined, sessionId));
-        },
+        create: createOnComputer,
         opened: (computerId, sessionId) => {
           const at = navigateRef.current;
           dispatch({ type: "close" });
@@ -3609,6 +3660,16 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                     // (Owner Q4: browsing never revives a session).
                     archived: row.archived,
                     ...(row.cwd === "" ? {} : { cwd: row.cwd }),
+                  })
+                }
+                onCreated={(sessionId) =>
+                  navigation.navigate("Session", {
+                    computerId: route.params.computerId,
+                    sessionId,
+                    title: NEW_SESSION_TITLE,
+                    archived: false,
+                    // No `cwd`: the screen asks `session/list` itself.
+                    focus: true,
                   })
                 }
               />

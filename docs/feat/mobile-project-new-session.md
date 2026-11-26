@@ -272,7 +272,79 @@ owner before the next build.
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Load-bearing check** (before any edit): `bun test
+apps/mobile/test/new-session-link.test.ts` → 2 pass, 0 fail;
+`session-host.ts:1154-1188` creates under the daemon's own build, no client cwd.
+**Repro:** `SessionsScreen.tsx` had no match for `New
+session|onNewSession|newSession`.
+
+**As built, in order**
+
+1. `drawer-new-session.ts` — `dispose()`; a create settling after it returns
+   before any state write or `opened`. Red: 2 fail, `flow.dispose is not a
+   function`.
+2. `project-new-session.ts` (new) — view + tap + the three reason constants.
+   Red against a throwaway stub (so on assertions, not the import): 0 pass,
+   10 fail.
+3. `SessionsScreen.tsx` — the three props, error line + pinned bar, D6 copy
+   (the now-unused `MONO` import dropped). Red: the new `band-screens` test
+   (`sessions-new-error` index -1).
+4. `App.tsx` — module-level `createOnComputer` (both callers), `SessionsRoute`
+   `onCreated` + flow + dispose in the controller's unmount effect, `navigate`
+   with `focus: true`.
+5. `e2e/flows/47-project-new-session.{yaml,js}`, registered after `34-hub-new`
+   in `run.ts`; changelog fragment.
+
+**Mutations** (each applied, run, reverted):
+
+```
+dispose guard removed            -> 14 pass, 2 fail
+  (fail) D7: a create that succeeds AFTER dispose opens nothing and writes no state
+  (fail) D7: a create that fails AFTER dispose opens nothing and writes no state
+stale gate dropped for a loaded list
+  (`list.stale && list.status !== "loaded"`)  -> 8 pass, 2 fail
+  (fail) link down: dimmed «Offline — reconnecting»; link up and a page enables it again
+  (fail) a failed refresh of a list with rows is stale: «Offline — reconnecting»
+```
+
+**Drift / choices the plan did not spell out**
+
+- `SessionsRoute`'s `create` is `(_, id) => createOnComputer(computerId, id)`,
+  not the bare function: `computerId` is then a real `useMemo` dependency
+  (Biome rejected it otherwise).
+- D3's rows overlap; precedence is `failed` > `stale` > «Connecting…», so a
+  link that drops before the first answer reads «Offline — reconnecting».
+- Flow 47 also asserts `sessions-new` before the shot and no `transcript-empty`
+  after the turn, and calls `hideKeyboard` before send (flow 26's pattern).
+- The error line's side padding is 20 pt (`space.rowX`, the drawer's); the
+  reason has 10 pt of its own so it starts at the same 20 pt.
+
+**Checks run:** Biome on the 9 changed lintable files: clean. `bunx tsc -p
+apps/mobile`: no output. The tests that cover or read the changed files (116
+files in one serial process): 2165 pass, 1 fail —
+`artifact-card-render.test.ts`, `Export named 'Animated' not found`; alone it
+is 5 pass, 0 fail (shared module registry in a serial multi-file run). The full
+`bun run check` is the orchestrator's.
+
+**Not verified:** flow 47 and the other e2e flows were not run (no simulator
+run), so the bar's pixels, focus on open and the `App.tsx` wiring at runtime are
+unseen; run the e2e gate with `--only
+47-project-new-session,26-drawer,34-hub-new` and take the light/dark/offline
+screenshots. The mockup page was not opened.
+
+**For the Review (seen, deliberately not changed — outside the plan)**
+
+- D7 covers unmount only. A row tapped while a create is in flight leaves the
+  Sessions screen mounted underneath, so the finished create would still call
+  `navigate("Session", …)` over the opened session (the navigator's exact
+  behaviour there was not exercised). A `navigation.isFocused()` guard in
+  `onCreated` would close it, if approved.
+- A re-read of an EMPTY list is `loading` with no rows
+  (`session-list.ts:124`), so the pill dims to «Connecting…» for that round
+  trip (pull-to-refresh, or returning to an empty project). This follows D2/D3
+  as written.
 
 ## Review
 

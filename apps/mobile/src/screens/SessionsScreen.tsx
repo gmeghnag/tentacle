@@ -5,6 +5,9 @@
  * section. A dumb renderer over `viewModel` and `session-groups.ts` (the logic
  * lives in `session-list.ts` / `session-list-controller.ts` / `session-groups.ts`,
  * AGENTS §7): it maps a precomputed view-model to elements and owns only the look.
+ * Under the list, pinned, a bar with the drawer's New session pill
+ * (docs/feat/mobile-project-new-session.md); what it shows and what a tap does are
+ * decided in `project-new-session.ts`.
  *
  * Every daemon string (`title`) is rendered as plain `Text` — never a link, never
  * markdown — because the daemon may be a pod, which is not trusted.
@@ -12,20 +15,24 @@
  * testIDs (the flows' contract): `sessions-list`, `section-active` (wraps Running
  * and Idle), `section-archived`, `session-<id>`, `sessions-loading`,
  * `sessions-error`, `sessions-retry`, `sessions-empty`, `sessions-stale`,
- * `sessions-more`, `sessions-search`, `sessions-back`.
+ * `sessions-more`, `sessions-search`, `sessions-back`, `sessions-new-bar`,
+ * `sessions-new`, `sessions-new-reason`, `sessions-new-error`.
  */
 import { type JSX, useState } from "react";
-import { RefreshControl, ScrollView, StyleSheet, View } from "react-native";
+import { Pressable, RefreshControl, ScrollView, StyleSheet, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import type { ProjectNewSessionView } from "../project-new-session.ts";
 import { groupSessions, sessionLine, sessionMeta } from "../session-groups.ts";
 import type { viewModel } from "../session-list-controller.ts";
 import type { SessionRow } from "../session-list.ts";
-import { MONO, type Palette, radius, size, space, typography } from "../theme.ts";
+import { DENSE_FONT_SCALE, type Palette, radius, size, space, typography } from "../theme.ts";
 import { BandSection } from "../ui/BandSection.tsx";
 import { Banner } from "../ui/Banner.tsx";
 import { CompactBar, useCompactTitle } from "../ui/CompactBar.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon } from "../ui/Icon.tsx";
+import { PillButton } from "../ui/PillButton.tsx";
 import { Row } from "../ui/Row.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { StatusDot } from "../ui/StatusDot.tsx";
@@ -45,6 +52,11 @@ export interface SessionsScreenProps {
   readonly onBack?: () => void;
   /** Opened from the drawer's magnifier: the search field takes focus when it appears. */
   readonly focusSearch?: boolean;
+  /** The New session bar (`projectNewSessionView`). */
+  readonly newSession: ProjectNewSessionView;
+  /** Every tap on the pill, dimmed or not: the caller decides what it does. */
+  readonly onNewSession: () => void;
+  readonly onNewSessionDismiss: () => void;
 }
 
 function Section({
@@ -109,7 +121,11 @@ export function SessionsScreen({
   onOpen,
   onBack,
   focusSearch,
+  newSession,
+  onNewSession,
+  onNewSessionDismiss,
 }: SessionsScreenProps): JSX.Element {
+  const insets = useSafeAreaInsets();
   const [query, setQuery] = useState("");
   const groups = groupSessions(view.sections, query);
   const nothingYet = view.status === "loading" && view.sections.active.length === 0;
@@ -203,13 +219,7 @@ export function SessionsScreen({
               testID="sessions-empty"
               icon="terminal"
               title="No sessions yet"
-              body={
-                <Text style={[typography.subhead, { color: palette.sec, textAlign: "center" }]}>
-                  {"Run "}
-                  <Text style={{ fontFamily: MONO, color: palette.label }}>tentacle</Text>
-                  {" in this project on your computer."}
-                </Text>
-              }
+              body="Start one with New session."
             />
           ) : null}
           {groups.noMatch ? (
@@ -256,6 +266,47 @@ export function SessionsScreen({
           ) : null}
         </View>
       </ScrollView>
+      {newSession.error === null ? null : (
+        <Pressable
+          testID="sessions-new-error"
+          accessibilityRole="button"
+          accessibilityHint="Dismisses this message"
+          onPress={onNewSessionDismiss}
+          style={styles.newError}
+        >
+          <Text style={[typography.footnote, { color: palette.red }]}>{newSession.error}</Text>
+        </Pressable>
+      )}
+      {/* The drawer's footer, same metrics (D1). */}
+      <View
+        testID="sessions-new-bar"
+        style={[
+          styles.newBar,
+          { borderTopColor: palette.sepChat, paddingBottom: Math.max(insets.bottom, 10) },
+        ]}
+      >
+        {newSession.reason === null ? null : (
+          <Text
+            testID="sessions-new-reason"
+            maxFontSizeMultiplier={DENSE_FONT_SCALE}
+            style={[typography.footnote, styles.newReason, { color: palette.sec }]}
+          >
+            {newSession.reason}
+          </Text>
+        )}
+        <View style={styles.newGap} />
+        <PillButton
+          palette={palette}
+          testID="sessions-new"
+          label="New session"
+          icon="plus"
+          height={40}
+          disabled={!newSession.enabled}
+          busy={newSession.busy}
+          accessibilityLabel={newSession.accessibilityLabel}
+          onPress={onNewSession}
+        />
+      </View>
       <CompactBar palette={palette} title={title} shown={compact.shown} />
     </View>
   );
@@ -284,4 +335,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
   },
   searchInput: { flex: 1, paddingVertical: 8 },
+  newError: { paddingHorizontal: space.rowX, paddingVertical: 8 },
+  newBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingTop: 6,
+    paddingHorizontal: 10,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  // The reason starts on the page margin and wraps rather than push the pill out.
+  newReason: { flexShrink: 1, paddingHorizontal: 10 },
+  newGap: { flex: 1 },
 });

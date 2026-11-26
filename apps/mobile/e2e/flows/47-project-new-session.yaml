@@ -1,0 +1,45 @@
+appId: so.tentacle.app
+---
+# 47-project-new-session (docs/feat/mobile-project-new-session.md): the New
+# session button under a project's session list creates a session on THAT
+# computer at the tap and opens it EMPTY with the composer focused (the text below
+# goes in with no tap on the field), and its first send runs a turn.
+#
+# It ENDS on daemon truth (`47-project-new-session.js`). No step back to the
+# list: the Session screen's header has no back testID and Maestro has no iOS edge
+# gesture. The offline refusal is pinned by `project-new-session.test.ts` (the
+# harness runs ONE `serve`).
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- assertVisible:
+    id: "sessions-new"
+- runFlow:
+    file: _shot.yaml
+    env:
+      SHOT: "47-project-new-session"
+- tapOn:
+    id: "sessions-new"
+- assertVisible:
+    id: "session-view"
+- assertVisible:
+    id: "transcript-empty"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 10000
+- inputText: "NEWPROJECT flow forty-seven"
+- hideKeyboard
+- tapOn:
+    id: "composer-send"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 20000
+- assertNotVisible:
+    id: "transcript-empty"
+# The daemon truth: the new session's first prompt reached the model.
+- runScript:
+    file: "47-project-new-session.js"
