@@ -121,10 +121,13 @@ function subtitleOf(name: string, raw: string): string {
     case "diagram":
       return str("title") ?? raw;
     // `Image <ref>`, plus ` · high` for the costly detail
-    // (docs/feat/image-view.md D10) — the TUI's case, mirrored.
+    // (docs/feat/image-view.md D10) and ` · region` for a zoom
+    // (docs/feat/image-region-png.md D7) — the TUI's case, mirrored.
     case "image_view": {
       const ref = str("ref") ?? "";
-      return str("detail") === "high" ? `${ref} · high` : ref;
+      const high = str("detail") === "high" ? " · high" : "";
+      const region = typeof args.region === "object" && args.region !== null ? " · region" : "";
+      return `${ref}${high}${region}`;
     }
     default:
       return raw;

@@ -10,9 +10,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { deflateSync } from "node:zlib";
 import { RemoteClient } from "@tentacle/client";
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
-import { PermissionBroker } from "@tentacle/core";
+import { PermissionBroker, encodePng } from "@tentacle/core";
 import { AttachmentStore, Connection, type SessionHost, UploadBudget } from "@tentacle/daemon";
 import { HostExecution } from "@tentacle/exec";
 import { createChannelPair } from "@tentacle/transport";
@@ -198,5 +199,39 @@ describe("fs_read on an image file: the limits come from wiring (T6)", () => {
     const r = await readThroughWiring({ ...vision(), maxImageBytes: 20 }, "small.png", 40);
     expect(r.isError).toBe(true);
     expect(r.content).toBe("[image omitted: 45 B is over this model's 20 B limit — small.png]");
+  });
+
+  // docs/feat/image-region-png.md D4: a re-encoded region is under the same cap.
+  test("the model's own maxImageBytes reaches image_view's region", async () => {
+    const s = store();
+    const bytes = encodePng(16, 16, new Uint8Array(256), "gray", (b) => {
+      return new Uint8Array(deflateSync(b));
+    });
+    const entry = await s.putTool({
+      variants: { high: { bytes, width: 16, height: 16 } },
+      mimeType: "image/png",
+      label: "dot.png",
+    });
+    if ("refused" in entry) throw new Error(entry.refused);
+    const wired = workerAgentFactory(
+      { ...vision(), maxImageBytes: 20 },
+      { attachments: s, toolImages: s },
+    );
+    const tool = wired.tools.get("image_view");
+    if (tool === undefined) throw new Error("image_view is not registered");
+    const r = await tool.execute(
+      {
+        ref: entry.high.ref.id.slice(0, 12),
+        region: { left: 0, top: 0, width: 1, height: 1 },
+      } as never,
+      {
+        sessionId: "S",
+        signal: new AbortController().signal,
+        env: new HostExecution({ cwd: dir }),
+        images: s,
+      },
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("this model's 20 B image limit");
   });
 });

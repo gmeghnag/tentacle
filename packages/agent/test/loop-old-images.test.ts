@@ -46,6 +46,7 @@ const store: ToolImageStore = {
   putTool: async () => ({ refused: "not used" }),
   resolve: () => ({ kind: "none" }),
   holds: () => true,
+  read: async () => null,
 };
 
 /** Records every request, and answers from a script (one entry per model call). */

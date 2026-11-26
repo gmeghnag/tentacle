@@ -44,12 +44,15 @@ const entry: ToolImageEntry = {
   },
 };
 
-/** A store with no `read` at all: any byte read would throw. */
+/** A store whose `read` throws: no byte read is expected. */
 function spy(found: ToolImageEntry | null, held = true): ToolImageStore {
   return {
     putTool: async () => ({ refused: "x" }),
     resolve: () => (found === null ? { kind: "none" } : { kind: "found", entry: found }),
     holds: () => held,
+    read: async () => {
+      throw new Error("no byte read expected");
+    },
   };
 }
 

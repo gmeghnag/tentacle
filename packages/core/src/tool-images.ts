@@ -63,14 +63,17 @@ export type ToolImageResolve =
 
 /**
  * The session store as a tool sees it: write a picture's variants, find an
- * entry by id prefix, and check its bytes are still held. Absent in a pod, a
- * sub-agent and a build without vision (the tool is then not registered).
+ * entry by id prefix, check its bytes are still held, and read them (an
+ * `image_view` region decodes the picture). Absent in a pod, a sub-agent and a
+ * build without vision (the tool is then not registered).
  */
 export interface ToolImageStore {
   /** Never throws: a full store or a failed disk write is `{refused}` (a marker note). */
   putTool(input: ToolImagePut): Promise<ToolImageEntry | { readonly refused: string }>;
   resolve(prefix: string): ToolImageResolve;
   holds(ref: AttachmentRef): boolean;
+  /** The ref's complete bytes; `null` (never a throw) when this store does not hold them. */
+  read(ref: AttachmentRef): Promise<Uint8Array | null>;
 }
 
 /**

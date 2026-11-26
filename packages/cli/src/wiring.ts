@@ -1390,7 +1390,12 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         maxEdge: imageFileMaxEdge(config.provider),
       }),
     );
-    tools.register(createImageViewTool(config.imageDetail ?? "auto"));
+    // Its `region` re-encodes a picture: under the same byte cap.
+    tools.register(
+      createImageViewTool(config.imageDetail ?? "auto", {
+        maxImageBytes: imageLimitValues.maxBytes,
+      }),
+    );
   }
   // `workload_shell` (docs/feat/workload-shell.md D3): a stateful, non-interactive
   // `sh` reached through the LAPTOP's engine credentials. Offered only when the

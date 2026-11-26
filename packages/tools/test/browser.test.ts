@@ -52,6 +52,7 @@ function fakeStore() {
     },
     resolve: () => ({ kind: "none" }),
     holds: () => true,
+    read: async () => null,
   };
   return { store, puts };
 }

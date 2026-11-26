@@ -223,8 +223,10 @@ after today's resolve/holds checks pick the source:
   JPEG (JPEG regions come later) — call image_view without region" (O7);
   nothing read;
 - `ctx.images.read(ref)` → `null` ⇒ today's "no longer held" sentence;
-- `readPngHeader` → cost check → `decodePng` → `regionBox` → `renderRegion`
-  with `maxEdge` = 768 or 1568 by the resolved detail (forced setting wins, as
+- `readPngHeader` → `regionBox` (on the header's size) → `decodePng` (the cost
+  check lives inside it, before its inflate) → `renderRegion`
+  *(fixed in Execution: the first draft decoded before `regionBox`, against
+  § Failure modes "nothing decoded")* with `maxEdge` = 768 or 1568 by the resolved detail (forced setting wins, as
   today, `image-view.ts:195-196`) and `maxBytes = min(maxImageBytes,
   MAX_IMAGE_BYTES)`;
 - `putTool({ variants: { high: { bytes: png, width, height } }, mimeType:
@@ -233,9 +235,12 @@ after today's resolve/holds checks pick the source:
 - result: `content` = `<label> · region <x>,<y> <w>×<h> of <W>×<H> · sent
   <ow>×<oh> · <detail> · <size>` + ` · clamped to the picture's edge` /
   ` · scaled down to fit the image limit` when they apply; `image` = the crop's ref.
-`concurrency(input)`: with `region` (or the O8 low path) →
-`[{read,"tool-images"},{write,"image-decode"}]` (one decode at a time per
-batch, O4); else today's claim.
+`concurrency(input)`: with `region` →
+`[{read,"tool-images"},{write,"image-decode"}]`; else today's claim. One decode
+at a time (O4) is also held by a promise slot inside the tool instance around
+read → decode → render. *(Fixed in Execution: `concurrency` sees only the
+input, `packages/core/src/tool.ts:284-286`, so it cannot know a call takes the
+O8 `low` path; the slot covers it.)*
 
 **D5 — `low` for a high-only PNG (O8).** When the resolved detail is `low`, the
 entry is high-only (`highOnly`, `image-view.ts:122-127`) and its mime is PNG,
@@ -373,7 +378,107 @@ Gate: `bun test` on the touched files while iterating; `bun run check` (and
 
 ## Execution
 
-*— (executor), (date)*
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Status: PARTIAL — T1/T2 (PngSuite) are missing. Do not merge until they pass.**
+
+**Step 0 (load-bearing check): PASS** (`.tentacle/tmp/image-region-png/step0.test.ts`):
+
+```
+read length 405 put length 405
+resolve kind found
+ 1 pass
+ 0 fail
+```
+
+**Repro.** On main (unchanged): `auto: parsed = {"ref":"a1b2c3d4e5f6"}`, no
+`region` in the description, core exports `PNG_CHANNELS, encodePng`. On this
+branch (`repro-after.ts`, with the contract's `left/top` keys): `region` kept
+under `auto` and `high`, description names it, `decodePng` / `readPngHeader`
+exported.
+
+**Blocked: fixtures (O12).** `curl` of
+`http://www.schaik.com/pngsuite/PngSuite-2017jul19.tgz` needed a permission
+approval nobody could give; not worked around, nothing forged.
+`packages/core/test/png-decode.test.ts` holds T1/T2 and **35 tests there fail**
+("fixture … is missing"), so the gate is red on purpose. To finish:
+1. drop the named subset into `packages/core/test/fixtures/png/` with the README
+   (source URL, licence line, sha256 per file);
+2. run that test file; confirm by PngSuite's docs that `basi*` are the twins of
+   `basn*`;
+3. add what needs the files: the `f00…f04n2c08` identity check (only if they
+   share a picture, else spot pixels) and the hand-read 16-bit spot pixels
+   (hex in the comment) — **not written yet**;
+4. re-run M2 so T1 itself is shown red.
+
+**Meanwhile (not a substitute for T1/T2).**
+- In-tree "hand-computed from the spec" cases: filters 0–4, 1/2/4/16-bit, tRNS,
+  palette, gray+alpha, the spec's 8×8 Adam7 diagram. Added after the decoder,
+  so their non-vacuity is M2/M11, not a red-first run.
+- Scratch differential against `pngjs@3.4.0` (`differential.test.ts`): 239 real
+  PNG files and 1440 random ones (every depth/colour pair, both interlace
+  methods) → 0 mismatches (16-bit within 1: pngjs rounds, we take the high byte).
+- Timing (4096×3072 RGBA, ≈ 48 MB): 52 ms (None) … 315 ms (Paeth).
+
+**As built, in order.**
+1. `core/src/png-decode.ts` (D2); `PNG_DEPTHS` moved there, `image-file.ts` imports it.
+2. `core/src/image-region.ts` (D3); exports in `index.ts`.
+3. `ToolImageStore.read` (D6); `read` added to the test fakes.
+4. `tools/src/image-view.ts` (D1/D4/D5); `viewImage` stays the synchronous
+   no-decode decision, so the existing tests are unchanged apart from fakes.
+5. `cli/src/wiring.ts` passes `maxImageBytes`; D7 in TUI and phone; changelog.
+
+No schema or protocol change.
+
+**Red before green.** `png-decode.test.ts` on a stub: 68 fail, 0 pass.
+`image-region.test.ts` on a stub: 11 fail, 1 pass (same-buffer crop).
+`image-view-region.test.ts` on the old tool: 25 fail, 5 pass (unchanged
+behaviour, plus the LOW-variant case, shown red by M5). T8: 4 fail → green.
+The wiring test was added after its edit (M7).
+
+**Drift from Implementation.**
+- The two plan fixes marked in D4.
+- The 128 MiB check is inside `decodePng`, so no caller can skip it.
+- `regionBox` snaps float noise by 1e-9 (`0.07 × 100` is 7 px, not 8).
+- After `putTool` the tool sends the variant whose id is the rendered bytes'
+  sha256: a whole-picture `low` region of a PDF page renders the stored `low`
+  bytes, and the store then answers with that entry, whose `high` is bigger.
+- A user image's crop is labelled from the ref's name (else `image`), not
+  `attachmentLabel`, whose sha would name the source in the crop's prune stub.
+- One extra test: `maxImageBytes` through wiring (`image-view-wiring.test.ts`).
+
+**Mutations (each applied, run, restored; `mutate.ts`).**
+
+| Mutation | Failing test |
+|---|---|
+| M1 drop the cost check | T3 (both budget cases) |
+| M2 swap two Adam7 pass offsets | hand-computed Adam7; also the pngjs differential. **T1 pending** |
+| M3 skip the clamp | T5 clamp |
+| M4 serve `entry.high` on a region | 18 tool tests |
+| M5 always send `entry.high` after the put | equal-to-stored-LOW |
+| M6 no decode slot | one-decode-at-a-time |
+| M7 wiring drops `maxImageBytes` | wiring cap |
+| M8 inflate not capped at the header size | T4 |
+| M9 no CRC check | IHDR / IDAT / IEND CRC |
+| M10 no D5 downscale | the three D5 cases |
+| M11 Paeth always `b` | every-filter case |
+
+**Checks.** Touched and related tests (32 files): 614 pass, 35 fail — all 35 are
+the missing-fixture tests. `biome check` clean (run over `packages apps`, wider
+than the changed files). `tsc` on a scratch config covering the changed files:
+nothing in them (two messages in untouched files, `a2a-map.ts` and
+`markdown.ts`, which look like artefacts of that config; the gate decides). Full
+gate and `tsc -p apps/mobile` not run (the orchestrator's).
+
+**For the Review / owner (plan followed, not changed).**
+- D5 can turn a view that used to work into an error: a default `low` of a
+  high-only PNG now fails when it is over the decode budget (Anthropic accepts
+  files up to 8000 px) or the 48 MiB tool sub-cap is full; before, `high` was
+  sent with a note. With a forced `model.imageDetail: low` such a file cannot be
+  viewed at all. A fallback to `high` + note would be a design change.
+- Re-viewing a `high` crop by its own id at the default `low` downscales it
+  again (a further stored picture); the prune stub does not say `detail`.
+- The `low` downscale is stored as `<label> region` (D4's label, followed).
 
 ## Review
 

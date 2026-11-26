@@ -136,6 +136,7 @@ function storeOf(refuse: (put: ToolImagePut, n: number) => boolean = () => false
     },
     resolve: (p: string) => real.resolve(p),
     holds: (r: AttachmentRef) => real.holds(r),
+    read: (r: AttachmentRef) => real.read(r),
   };
   store.store = real;
   return store;
