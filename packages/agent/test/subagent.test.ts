@@ -317,6 +317,7 @@ describe("createSubagentRunner", () => {
   // docs/feat/model-artifacts.md D2 / Owner Q13: a child's output is its report
   // to the parent, so `present` is never offered to it (and its context has no
   // artifact store anyway — the tool's own test pins that half).
+  // (The app tools likewise: `subagent-apps.test.ts`.)
   test("a child is never offered present, and a type naming it stays read-only", async () => {
     const { env } = recordingEnv();
     const offered: string[][] = [];

@@ -352,6 +352,8 @@ describe("toUpdateParams (the session/update frame)", () => {
     },
     // docs/feat/agent-workflows.md D5: the session's workflow runs.
     { type: "workflows", runs: [] },
+    // docs/feat/session-apps-publish.md D7: the session's published apps.
+    { type: "apps", apps: [] },
   ];
 
   test("covers every known type (keeps the samples honest)", () => {

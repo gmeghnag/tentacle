@@ -23,6 +23,7 @@ import { NOTHING } from "../keys/contract.ts";
 import type { KeySnapshot } from "../keys/snapshot.ts";
 import type { OpenPanel } from "../panel.ts";
 import type { PanelView, TreeAction } from "../tree-panel.ts";
+import { appsKind } from "./apps.ts";
 import { artifactsKind } from "./artifacts.ts";
 import { browserKind } from "./browser.ts";
 import { mcpKind } from "./mcp.ts";
@@ -102,6 +103,7 @@ export const PANEL_KINDS: readonly PanelKind<OpenPanel>[] = [
   toolsKind,
   artifactsKind,
   scheduleKind,
+  appsKind,
   workflowKind,
   browserKind,
 ];

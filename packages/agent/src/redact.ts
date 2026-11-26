@@ -8,6 +8,7 @@
  * `KEY=value` assignments). It errs toward masking. Opt-in: `tools.redactSecrets`
  * in the config enables it (off by default).
  */
+import type { SecretFinding } from "@tentacle/core";
 import type { ResultTransform } from "./result-pipeline.ts";
 
 export interface RedactRule {
@@ -66,6 +67,40 @@ export function redactText(
     out = out.replace(rule.pattern, rule.replacement);
   }
   return out;
+}
+
+/**
+ * Where `text` looks like it holds a secret, by the same rules redaction uses:
+ * the rule's name and the 1-based line, in reading order, at most `max` — NEVER
+ * the matched value (it goes into a prompt that travels to phones;
+ * docs/feat/session-apps-publish.md D5). Pure.
+ */
+export function findSecrets(
+  text: string,
+  rules: readonly RedactRule[] = DEFAULT_REDACT_RULES,
+  max = 20,
+): SecretFinding[] {
+  const hits: { rule: string; at: number }[] = [];
+  for (const rule of rules) {
+    // `matchAll` works on a copy of the rule's global pattern (no shared
+    // `lastIndex`) and is lazy: one rule contributes at most `max` hits.
+    let found = 0;
+    for (const match of text.matchAll(rule.pattern)) {
+      if (found >= max) break;
+      found += 1;
+      hits.push({ rule: rule.name, at: match.index });
+    }
+  }
+  hits.sort((a, b) => a.at - b.at);
+  let line = 1;
+  let scanned = 0;
+  return hits.slice(0, max).map(({ rule, at }) => {
+    for (let i = text.indexOf("\n", scanned); i !== -1 && i < at; i = text.indexOf("\n", i + 1)) {
+      line += 1;
+      scanned = i + 1;
+    }
+    return { rule, line };
+  });
 }
 
 /** A transform that redacts secrets from a tool result's content. */

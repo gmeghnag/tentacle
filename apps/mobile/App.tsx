@@ -685,6 +685,18 @@ function infoWiring(
                 remove: (scheduleId: string) => remote.deleteSchedule(scheduleId),
               },
             }),
+        // The session's published apps (docs/feat/session-apps-publish.md): the
+        // same handle's `onApps` / `unpublishApp`; the client bounded the rows.
+        ...(typeof remote.unpublishApp !== "function"
+          ? {}
+          : {
+              apps: {
+                current: () => remote.apps,
+                onChange: (listener: Parameters<RemoteSession["onApps"]>[0]) =>
+                  remote.onApps(listener),
+                stop: (app: string) => remote.unpublishApp(app),
+              },
+            }),
         // The MCP/skill switches (docs/feat/session-capabilities.md S5) and the
         // browser's (browser-inspect B6b): the same handle's `capabilities()` /
         // `onCapabilities` / `setCapability`, so the phone toggles through the one

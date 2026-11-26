@@ -147,6 +147,7 @@ describe("S7: a panel kind is described by its OWN descriptor, found by lookup",
     // (docs/feat/cron-tool.md S5) joined the original three, then `/tools`
     // (docs/feat/tool-toggles.md D7), then `/browser` (browser-inspect B6a).
     expect(kinds.slice().sort()).toEqual([
+      "apps",
       "artifacts",
       "browser",
       "mcp",
@@ -198,8 +199,8 @@ describe("S7: a panel kind is described by its OWN descriptor, found by lookup",
     // untouched: `keys/layers.ts` still lists sessions then tree — `/schedule`
     // rides the same one).
     for (const desc of PANEL_KINDS) {
-      // `/workflow` (docs/feat/workflows-ui.md D3) is a cursor list too.
-      const flat = desc.kind === "sessions" || desc.kind === "schedule" || desc.kind === "workflow";
+      // `/workflow` (docs/feat/workflows-ui.md D3) is a cursor list too, and `/apps`.
+      const flat = ["sessions", "schedule", "workflow", "apps"].includes(desc.kind);
       expect(desc.layer).toBe(flat ? "sessions" : "tree");
     }
   });

@@ -380,6 +380,8 @@ export function updateToEvent(
     case "subagents":
     case "jobs":
     case "schedules":
+    // `apps` (the session's published pages) by `onSessionApps`, likewise.
+    case "apps":
     case "subagent_notify":
     case "subagent_message":
     case "session_settings":

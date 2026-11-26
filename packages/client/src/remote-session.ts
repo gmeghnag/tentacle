@@ -11,6 +11,8 @@
  */
 import type { AttachmentRef, ChatMessage, ScheduledRef } from "@tentacle/core";
 import {
+  type AppRow,
+  type AppUnpublishResult,
   type ArtifactListResult,
   type ArtifactMeta,
   type BrowserStatusResult,
@@ -46,6 +48,7 @@ import {
   isWakeTurnId,
 } from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
+import { APPS_UNTRUSTED_DAEMON } from "./apps.ts";
 import {
   type AutoAcceptHandle,
   type AutoAcceptLink,
@@ -1122,6 +1125,29 @@ export class RemoteSession implements SessionStreamListener {
   }
 
   /**
+   * The session's published apps as the daemon last reported them (bounded).
+   * Undefined: no report yet, a daemon that publishes none, or one this client
+   * does not trust (a pod's list is dropped, AGENTS §7).
+   */
+  get apps(): readonly AppRow[] | undefined {
+    return this.id ? this.client.appsOf(this.id) : undefined;
+  }
+
+  /** Subscribe to this session's published apps; replays the current list. Returns an unsubscribe. */
+  onApps(listener: (rows: readonly AppRow[]) => void): () => void {
+    const unsubscribe = this.client.onSessionApps((notice) => {
+      if (notice.sessionId === this.id) {
+        listener(notice.rows);
+      }
+    });
+    const now = this.apps;
+    if (now) {
+      listener(now);
+    }
+    return unsubscribe;
+  }
+
+  /**
    * The session's workflow runs as the daemon last reported them (bounded and
    * sanitized by the client): the current run plus the last few ended ones, in
    * the daemon's order. Undefined: no report yet, an older daemon, or a client
@@ -1550,6 +1576,21 @@ export class RemoteSession implements SessionStreamListener {
       });
     }
     return this.client.deleteSchedule(this.id, scheduleId);
+  }
+
+  /**
+   * Take one published app offline (`session/app_unpublish`). A refusal is a
+   * RESULT with a `reason`. A client whose daemon is not trusted answers its own
+   * refusal and sends nothing (AGENTS §7).
+   */
+  unpublishApp(app: string): Promise<AppUnpublishResult> {
+    if (!this.id) {
+      return Promise.resolve({ ok: false, reason: "this session is not open yet" });
+    }
+    if (!this.daemonWakes) {
+      return Promise.resolve({ ok: false, reason: APPS_UNTRUSTED_DAEMON });
+    }
+    return this.client.unpublishApp(this.id, app);
   }
 
   /**
@@ -2659,6 +2700,7 @@ export class RemoteSession implements SessionStreamListener {
       case "subagents":
       case "jobs":
       case "schedules":
+      case "apps":
       case "subagent_notify":
       case "subagent_message":
         return;
@@ -2770,6 +2812,7 @@ export class RemoteSession implements SessionStreamListener {
       update.type === "subagents" ||
       update.type === "jobs" ||
       update.type === "schedules" ||
+      update.type === "apps" ||
       update.type === "subagent_notify" ||
       update.type === "subagent_message"
     ) {

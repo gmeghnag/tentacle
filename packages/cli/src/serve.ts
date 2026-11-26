@@ -9,7 +9,13 @@ import { join } from "node:path";
 import { EMPTY_SKILL_LISTING, projectKey } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
 import { DEFAULT_PUSH_GRACE_SECONDS } from "@tentacle/config";
-import type { ArtifactSink, AttachmentSource, ScheduleLink, ToolImageStore } from "@tentacle/core";
+import type {
+  AppsLink,
+  ArtifactSink,
+  AttachmentSource,
+  ScheduleLink,
+  ToolImageStore,
+} from "@tentacle/core";
 import {
   type AgentReuse,
   type BrowserHostPort,
@@ -81,6 +87,7 @@ import {
   type A2ACards,
   type SkillScan,
   type WiredAgent,
+  appsServiceOf,
   buildAgent,
   createSkillScan,
   scheduleLimitsOf,
@@ -232,6 +239,8 @@ export function createServeAgent(
     readonly toolImages?: ToolImageStore;
     /** The session's scheduled wakes (docs/feat/cron-tool.md D1): `serve` schedules. */
     readonly schedules?: () => ScheduleLink | null;
+    /** The session's published apps (docs/feat/session-apps-publish.md D1). */
+    readonly apps?: () => AppsLink | null;
   },
   /** The daemon-wide MCP set: its tools join every registry this builds (S2). */
   mcpHub?: Pick<McpHub, "onBuilt">,
@@ -263,6 +272,9 @@ export function createServeAgent(
       // Scheduled wakes (docs/feat/cron-tool.md D1): `serve` keeps the table (in its
       // sidecar) and fires it with nobody attached. `tunnelledAgent` never passes this.
       ...(ctx.schedules ? { schedules: ctx.schedules } : {}),
+      // Session apps: only where the host handed the link (`apps.enabled`).
+      // `tunnelledAgent` never passes this.
+      ...(ctx.apps ? { apps: ctx.apps } : {}),
       // Workflows (docs/feat/agent-workflows.md D3): `serve` runs them unattended
       // on the user's own host. `tunnelledAgent` never passes this.
       workflows: true,
@@ -674,6 +686,9 @@ export async function startDaemon(
         process.off("exit", exitDispose);
         push?.notifier.stop();
         liveActivity?.stop();
+        // A stop ends no session: the app timers stop, nothing is deleted, and
+        // the next start renews what the sidecars kept (session apps D9).
+        sessionHost.stopApps();
         await persister?.stop();
         devices?.stop();
         lock.release();
@@ -797,8 +812,13 @@ async function reloadedHost(
       }
     },
   };
+  // Session apps (docs/feat/session-apps-publish.md D1): ONE publisher for the
+  // daemon, built before the reload so a restored session renews at once. Its log
+  // lines are audit lines (ids and codes only).
+  const apps = appsServiceOf(config, (line) => options.onAudit?.(line));
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
+    ...(apps ? { apps } : {}),
     // A deleted session takes its spilled tool output with it.
     onSessionDeleted: (id) => void toolOutputStore().removeSession(id),
     maxSessions: options.maxSessions ?? DEFAULT_MAX_SESSIONS,

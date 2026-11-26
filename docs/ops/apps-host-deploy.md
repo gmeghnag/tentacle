@@ -311,6 +311,64 @@ pointed at the new one.
   service starts, key blocks are not applied until it is readable (apps already
   removed stay removed). Check the log for `operator-file takedowns unreadable`.
 
+## 12. Turning publishing on
+
+The publisher is part of tentacle (`docs/feat/session-apps-publish.md`); this
+section is for the computer that runs `serve` or the TUI, after §5 passed.
+
+**Config** (host config file only, never carried to a pod; both keys also work in
+a profile):
+
+```jsonc
+"apps": { "enabled": true, "domain": "apps.tentacle.so" }
+```
+
+Restart `serve` after changing it. With `enabled` off (the default) the agent is
+not offered `app_publish` / `app_unpublish`. Pod daemons (`run`, `attach`) are
+never offered them.
+
+**The key.** `<configDir>/apps/publisher.json` (Ed25519, JWK; file 0600, dir
+0700), created at the first approved publish and shared by every session of this
+computer. The host accepts renew, update and delete only from it. An unreadable
+or damaged file is refused with its path and never replaced.
+
+**Rotation.** Stop every live app (`/apps`, `s`), stop `serve`, remove the key
+file, start again: the next approved publish makes a new key. Removing it with
+apps live leaves them to lapse within one lease (5 min); they cannot be renewed
+or deleted afterwards. A new key counts against the host's new-keys-per-address
+daily budget (§7).
+
+**Per-key cap.** The host allows 5 live apps per key, so 5 for the whole
+computer, all sessions together (§7). A sixth publish answers «this computer
+already has 5 live apps».
+
+**Smoke, from a real session.**
+
+1. Ask the agent to write a small HTML page, `present` it, then publish it. The
+   ask must offer «Publish once» / «No» only, also with auto-accept on.
+2. Open the URL (the first visit shows the warning page). `/apps` lists it `up`.
+3. Present a changed page under the same artifact id and publish: same URL, a new
+   ask.
+4. `/apps`, `s`: the URL goes offline at once.
+5. Publish again, then quit the TUI (a worker asks first) or close the session:
+   offline.
+6. On `serve`: publish, restart `serve` within 5 minutes, check `up`. On a
+   laptop: sleep longer than 5 minutes, wake, check the same URL comes back with
+   no new ask (the worker or a never-restarted `serve` still holds the page).
+7. The phone: session info shows «Apps» with Copy and Stop.
+
+**What the publisher cannot see.**
+
+- Under the `all` kill switch (§6) renewals keep working, so `/apps` says `up`
+  while visitors get the maintenance page. Under `publish` a new publish answers
+  «publishing is paused by the operator».
+- A `serve` restart longer than one lease cannot revive its apps: the page bytes
+  are in memory only. The row says «publish again».
+- A `DELETE` that never reaches the host (offline, process killed) leaves the
+  page up until its lease lapses (≤ 5 min).
+- Changing `apps.domain` with apps live: requests are signed for the domain, so
+  the old host refuses them and the apps lapse. Change it with no live app (§10).
+
 ## Deploy log
 
 *(nothing deployed yet)*

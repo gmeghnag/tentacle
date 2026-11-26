@@ -546,6 +546,8 @@ export interface SessionScreenController {
    * local echo — and a refusal shows the daemon's own reason under the rows.
    */
   deleteSchedule(scheduleId: string): Promise<void>;
+  /** Take one published app offline (docs/feat/session-apps-publish.md): its app id. */
+  stopApp(app: string): Promise<void>;
   /** Tapping the title: the rename field opens on the CURRENT title (Owner 5). */
   beginRename(): void;
   /** What is typed into it. */
@@ -2100,6 +2102,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     },
     async deleteSchedule(scheduleId) {
       await info?.deleteSchedule(scheduleId);
+      emit();
+    },
+    async stopApp(app) {
+      await info?.stopApp(app);
       emit();
     },
     beginRename() {

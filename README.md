@@ -417,6 +417,8 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | Config key (`config.jsonc`) | Env override | Default | Meaning |
 | --- | --- | --- | --- |
 | `$schema` | — | — | A JSON-schema pointer for editor completion; accepted and ignored. |
+| `apps.domain` | — | "apps.tentacle.so" | The apps host's domain. |
+| `apps.enabled` | — | false | Offer the agent `app_publish` / `app_unpublish`. |
 | `autoWake` | `TENTACLE_AUTO_WAKE` | true | Start a continuation turn when a background job exits while idle. |
 | `beta.compactShell` | — | false | No effect on the TUI any more: a `shell` row has one shape (the phone still honours it). |
 | `contextAwareness.enabled` | — | true | Whether the model is told how full its context is. |

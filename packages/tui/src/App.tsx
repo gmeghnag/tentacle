@@ -6,7 +6,7 @@ import {
   initialWake,
   wakeStep,
 } from "@tentacle/core";
-import type { ArtifactMeta, BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
+import type { AppRow, ArtifactMeta, BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
 import { useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { AppView } from "./AppView.tsx";
@@ -481,6 +481,10 @@ export function App({
   const jobsSubRef = useRef<(() => void) | null>(null);
   /** This session's armed wake feed (cron-tool S5), replaced with the session. */
   const schedulesSubRef = useRef<(() => void) | null>(null);
+  /** This session's published-apps feed (session apps D10), and its last report. */
+  const appsSubRef = useRef<(() => void) | null>(null);
+  const [appRows, setAppRows] = useState<readonly AppRow[] | undefined>(undefined);
+  const appsRef = useRef<readonly AppRow[] | undefined>(undefined);
   /** This session's workflow-run feed (workflows-ui D3), replaced with the session. */
   const workflowsSubRef = useRef<(() => void) | null>(null);
   /** The current session's `onSubagentNotify` subscription (replaced with it). */
@@ -1028,6 +1032,7 @@ export function App({
     sessionId: sessionRef.current?.sessionId ?? null,
     capsPhase: sessionCapsPhase(sessionRef.current, caps),
     browserStatus,
+    appRows,
     field,
     attach,
     skills: skills(),
@@ -1508,6 +1513,8 @@ export function App({
     claimArtifactsPreview,
     setArtifactsPreview,
     deleteSchedule: deleteScheduleInPanel,
+    setAppsData,
+    unpublishApp,
     touchPanel,
     closePanel,
     openPanel,
@@ -1525,6 +1532,16 @@ export function App({
 
   setCataloguePanelRef.current = (cat: CatalogueView) => setCatalogueData(cat, Date.now());
   setBrowserPanelRef.current = setBrowserData;
+
+  /** The daemon's `apps` report, for every surface at once (the status line, `/apps`). */
+  const followApps = useCallback(
+    (rows: readonly AppRow[] | undefined) => {
+      appsRef.current = rows;
+      setAppRows(rows);
+      setAppsData(rows);
+    },
+    [setAppsData],
+  );
 
   /**
    * The daemon's `schedules` report, for EVERY surface at once (cron-tool fix
@@ -1698,6 +1715,8 @@ export function App({
     agentsSubRef,
     jobsSubRef,
     schedulesSubRef,
+    appsSubRef,
+    setApps: followApps,
     workflowsSubRef,
     notifySubRef,
     dockMsgSubRef,
@@ -1792,6 +1811,8 @@ export function App({
       workflowsSubRef.current = null;
       schedulesSubRef.current?.();
       schedulesSubRef.current = null;
+      appsSubRef.current?.();
+      appsSubRef.current = null;
       notifySubRef.current?.();
       notifySubRef.current = null;
       capsSubRef.current?.();
@@ -1821,6 +1842,7 @@ export function App({
     subagentsRef,
     jobRowsRef,
     schedulesRef,
+    appsRef,
     setQuitConfirm,
     runQuit,
     detachOnQuit,
@@ -1895,6 +1917,7 @@ export function App({
           histIndexRef,
           draftRef,
           sessionRef,
+          appsRef,
           schedulesRef,
           workflowsRef,
           workflowCatalogueRef,
@@ -2232,6 +2255,7 @@ export function App({
     setSchedulesState,
     workflowDetail: fetchWorkflowStep,
     workflowRerun: rerunWorkflowStep,
+    unpublishApp,
     switchTo,
     sessionsDelete,
     // A wake's delete is the DOCK's when it comes from the dropdown, and the

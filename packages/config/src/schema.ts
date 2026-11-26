@@ -563,6 +563,27 @@ const settingsShape = {
     .strict()
     .optional(),
   /**
+   * Session apps (docs/feat/session-apps-publish.md D11): the agent may publish
+   * an HTML page it presented as a public web page, asked every time. THIS
+   * host's setting, file-only, never carried (a pod never publishes).
+   */
+  apps: z
+    .object({
+      /** Default: disabled. */
+      enabled: z.boolean().optional(),
+      /** The apps domain, a bare hostname; default `apps.tentacle.so`. */
+      domain: z
+        .string()
+        .max(200)
+        .regex(
+          /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/,
+          "a bare lowercase hostname (no scheme, port or path)",
+        )
+        .optional(),
+    })
+    .strict()
+    .optional(),
+  /**
    * Scheduled wakes (docs/feat/cron-tool.md D3, owner Q6): THIS host's limits on
    * the agent's `schedule_create`. File-only, never carried (a pod is never
    * offered the tools). Every key is checked when a wake is created.

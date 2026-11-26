@@ -209,7 +209,8 @@ describe("the runbook", () => {
 
   test("has every section", () => {
     const headings = [...runbook.matchAll(/^## (\d+)\./gm)].map((m) => Number(m[1]));
-    expect(headings).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    // §12 «Turning publishing on» (docs/feat/session-apps-publish.md D15).
+    expect(headings).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
     expect(runbook).toContain("## Deploy log");
   });
 });

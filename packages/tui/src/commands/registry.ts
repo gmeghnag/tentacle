@@ -10,6 +10,7 @@ import type { SlashCommand } from "../commands.ts";
  * always the one the user typed (`dispatchCommand` looks it up by name).
  */
 import { command as agents } from "./agents.ts";
+import { command as apps } from "./apps.ts";
 import { command as artifacts } from "./artifacts.ts";
 import { command as attach } from "./attach.ts";
 import { command as browser } from "./browser.ts";
@@ -70,6 +71,7 @@ export const BUILT_INS: readonly Command[] = [
   browser,
   artifacts,
   schedule,
+  apps,
   workflow,
   agents,
   settings,

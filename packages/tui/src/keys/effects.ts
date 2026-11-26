@@ -122,6 +122,8 @@ export type KeyEffect =
   | { readonly kind: "killChild"; readonly id: string }
   /** Drop one scheduled wake (`session/schedule_delete`, cron-tool S5): the dock's `x`. */
   | { readonly kind: "deleteSchedule"; readonly id: string }
+  /** `s` in `/apps`: take one app offline (`session/app_unpublish`). */
+  | { readonly kind: "unpublishApp"; readonly app: string }
   | { readonly kind: "setDock"; readonly state: DockState }
   | { readonly kind: "fieldSet"; readonly text: string }
   | { readonly kind: "fieldReset" }

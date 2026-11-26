@@ -4,6 +4,8 @@
  * environment variable derived from its name, so the two cannot drift.
  */
 
+import { APPS_MAX_APP_BYTES_DEFAULT } from "@tentacle/protocol";
+
 const KIB = 1024;
 const MIB = 1024 * KIB;
 const GIB = 1024 * MIB;
@@ -12,7 +14,7 @@ const MINUTE = 60 * SECOND;
 const DAY = 24 * 60 * MINUTE;
 
 export const APPS_LIMITS = {
-  maxAppBytes: 10 * MIB,
+  maxAppBytes: APPS_MAX_APP_BYTES_DEFAULT,
   maxLiveAppsPerKey: 5,
   maxLiveApps: 2000,
   /** Live content, all apps together. */

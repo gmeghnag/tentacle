@@ -316,6 +316,9 @@ const FIXTURES: Record<string, Json[]> = {
     { deleted: false },
     { deleted: false, reason: "no schedule sc-9 in this session" },
   ],
+  // feat/session-apps-publish: the user takes one app offline.
+  "methods/session~1app_unpublish/params": [{ sessionId: "s", app: "abcdefghijklmnop" }],
+  "methods/session~1app_unpublish/result": [{ ok: true }, { ok: false, reason: "no such app" }],
   // feat/agent-workflows slice 10: the user schedules a workflow.
   "methods/session~1schedule_create/params": [
     {
@@ -903,6 +906,23 @@ const FIXTURES: Record<string, Json[]> = {
       ],
     }),
     update({ type: "schedules", schedules: [] }),
+    update({
+      type: "apps",
+      apps: [
+        {
+          app: "abcdefghijklmnop",
+          url: "https://abcdefghijklmnop.apps.tentacle.so/",
+          artifactId: "demo",
+          version: 2,
+          title: "Demo",
+          state: "down",
+          reason: "publish again",
+          since: 1_700_000_000_000,
+          publishedAt: 1_699_999_000_000,
+        },
+      ],
+    }),
+    update({ type: "apps", apps: [] }),
     update({ type: "capabilities", capabilities: { disabledMcp: [], disabledSkills: [] } }),
     update({
       type: "capabilities",

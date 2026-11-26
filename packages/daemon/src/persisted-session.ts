@@ -30,6 +30,7 @@ import {
   type ReturnedEntry,
   type TurnEnd,
 } from "@tentacle/protocol";
+import type { AppRecord } from "./apps-records.ts";
 
 /** The permission request a turn was suspended on at the write. */
 export interface PendingPermission {
@@ -113,6 +114,8 @@ export interface DaemonSessionState {
   readonly pinnedAt?: number;
   /** The scheduled wakes (docs/feat/cron-tool.md D6), written only when non-empty. */
   readonly schedules?: readonly ScheduledJob[];
+  /** The published apps (docs/feat/session-apps-publish.md D8), written only when non-empty. */
+  readonly apps?: readonly AppRecord[];
   /** The session log's part (absent: none — e.g. `archive`'s capture after the close, which reuses the one before). */
   readonly log?: DaemonLogCapture;
   /**
@@ -174,6 +177,13 @@ export interface DaemonSessionRecord extends SessionRecord {
    * file v3, so an older build refuses the session instead of dropping them.
    */
   readonly schedules?: readonly ScheduledJob[];
+  /**
+   * The apps the session publishes (docs/feat/session-apps-publish.md D8): a
+   * restart renews them; an archived session has none (its end took them down).
+   * Present stamps the state file v5, so an older build refuses the session
+   * instead of dropping a public page nobody would renew or stop.
+   */
+  readonly apps?: readonly AppRecord[];
   /**
    * The session's MCP/skill switches (docs/feat/session-capabilities.md S3b):
    * the last `capabilities` entry of the log THROUGH `logHead` (unpaired: the

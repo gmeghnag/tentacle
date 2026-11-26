@@ -75,6 +75,7 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
     contextPrune,
     sessionHop,
     workloadShell,
+    apps,
     schedules,
     mcpServers,
     mount,
@@ -134,6 +135,9 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
   }
   if (workloadShell) {
     config.workloadShell = { ...base.workloadShell, ...workloadShell };
+  }
+  if (apps) {
+    config.apps = { ...base.apps, ...apps };
   }
   if (schedules) {
     config.schedules = { ...base.schedules, ...schedules };

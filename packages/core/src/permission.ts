@@ -60,7 +60,9 @@ export interface PermissionRequest {
    * A `question` is a remote agent asking the PERSON (docs/feat/a2a-client.md
    * C6): its answer is `{allowed: true, message: <text>}`, `allowed: false` =
    * skipped — a human's text, never auto-accepted. An `agent_add` approves a
-   * remote agent the model proposed (C11): once-only, never auto-accepted.
+   * remote agent the model proposed (C11): once-only, never auto-accepted. An
+   * `app_publish` puts a page on the PUBLIC internet
+   * (docs/feat/session-apps-publish.md D3): once-only, never auto-accepted.
    */
   readonly kind?:
     | "tool"
@@ -69,7 +71,8 @@ export interface PermissionRequest {
     | "workflow_approve"
     | "browser_action"
     | "question"
-    | "agent_add";
+    | "agent_add"
+    | "app_publish";
   /**
    * Slack (laptop-internal, never on the wire): this `session_hop` is one
    * auto-accept MAY answer, because the LAPTOP's own rule said so
@@ -140,6 +143,8 @@ export const EXTERNAL_ANSWER: { readonly [K in PermissionKind]: "once" | "owner-
   // proposed (docs/feat/a2a-client.md C6/C11): the owner's, in every mode.
   question: "owner-only",
   agent_add: "owner-only",
+  // A public disclosure of the owner's content (session apps D3).
+  app_publish: "owner-only",
 };
 
 /** May an external caller answer an ask of this kind? `undefined` = not known = never (fail-closed). */
@@ -405,6 +410,8 @@ export function autoApproves(req: PermissionRequest, own = true): boolean {
     // agent is a new destination (docs/feat/a2a-client.md C6/C11).
     req.kind !== "question" &&
     req.kind !== "agent_add" &&
+    // Publishing a page is a public disclosure, asked every time (session apps D3).
+    req.kind !== "app_publish" &&
     (req.kind !== "session_hop" || req.hopAuto === true)
   );
 }
@@ -429,12 +436,16 @@ export function browserAutoAnswers(req: PermissionRequest, caps: SessionCapabili
  * An ask answered allow-once or deny only, on every surface: a workflow's
  * approval (a merge) and a browser action (acting as the user on the web) are
  * each one human decision, as is a model-proposed remote agent (session-only,
- * docs/feat/a2a-client.md C11). The daemon offers exactly these options
- * (`permissionOptions`), so a surface offering "always" would be refused.
+ * docs/feat/a2a-client.md C11), and every publish of a public page (session
+ * apps D3). The daemon offers exactly these options (`permissionOptions`), so a
+ * surface offering "always" would be refused.
  */
 export function onceOnlyAsk(req: PermissionRequest): boolean {
   return (
-    req.kind === "workflow_approve" || req.kind === "browser_action" || req.kind === "agent_add"
+    req.kind === "workflow_approve" ||
+    req.kind === "browser_action" ||
+    req.kind === "agent_add" ||
+    req.kind === "app_publish"
   );
 }
 

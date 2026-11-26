@@ -1,4 +1,5 @@
 import type { BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
+import type { AppRow } from "@tentacle/protocol";
 /**
  * The panels' state rules and executors (docs/feat/app-decomposition.md S7).
  * Every DECISION stays where it was and stays pure — `panels/registry.ts` +
@@ -25,9 +26,12 @@ import type { BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
  */
 import { useCallback, useRef } from "react";
 import type { SessionController, SessionDirectory } from "./app-types.ts";
+import { appStopNotice } from "./apps-view.ts";
 import { oneLine } from "./commands.ts";
+import { APPS_UNSUPPORTED } from "./commands/apps.ts";
 import { SCHEDULE_UNSUPPORTED } from "./commands/schedule.ts";
 import { type OpenPanel, applyPanel } from "./panel.ts";
+import { withAppsData } from "./panels/apps.ts";
 import { withBrowserData } from "./panels/browser.ts";
 import { isScheduleOpen, withSchedulesData, withSchedulesState } from "./panels/schedule.ts";
 import {
@@ -137,6 +141,10 @@ export interface PanelsLayer {
   setCatalogueData(catalogue: CatalogueView, now: number): void;
   /** Delete one scheduled wake; the row leaves on the daemon's own frame. */
   deleteSchedule(id: string, startedGen: number): void;
+  /** An open `/apps` panel follows the daemon's list (session apps D10). */
+  setAppsData(rows: readonly AppRow[] | undefined): void;
+  /** Take one app offline; the row leaves on the daemon's own frame. */
+  unpublishApp(app: string): void;
   /**
    * Claim the `/artifacts` preview slot: every OPEN and every CLOSE bumps it, so
    * a read that answers later is stale even though the panel never closed (fix
@@ -419,9 +427,31 @@ export function usePanels(host: PanelsHost): PanelsLayer {
     [sessions, pushNotice, panelRef, switchingRef, setPanel],
   );
 
+  const setAppsData = useCallback(
+    (rows: readonly AppRow[] | undefined) => setPanel((p) => withAppsData(p, rows)),
+    [setPanel],
+  );
+
+  const unpublishApp = useCallback(
+    (app: string): void => {
+      const session = sessionRef.current;
+      if (!session?.unpublishApp) {
+        pushNotice(APPS_UNSUPPORTED);
+        return;
+      }
+      void session.unpublishApp(app).then(
+        (result) => pushNotice(appStopNotice(app, result)),
+        (e: unknown) => pushNotice(appStopNotice(app, { ok: false, reason: (e as Error).message })),
+      );
+    },
+    [sessionRef, pushNotice],
+  );
+
   return {
     panelGenRef,
     panelApply,
+    setAppsData,
+    unpublishApp,
     setSessionsState,
     setSchedulesState,
     setSchedulesData,

@@ -560,7 +560,101 @@ up ≤ 5 min (F14); the publisher cannot see the host's `all` kill switch (F10);
 
 ## Execution
 
-*(empty until execution)*
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Load-bearing re-check (before any edit): holds.** `ask.ts` and `key.ts` re-run
+from the worktree gave the Repro's output (the kind-less `app_publish` ask:
+`autoApproves true options allow_once,allow_always,reject_once`; Ed25519 verify
+`true`), the capability `rg` still listed only the P1 contract and its test, and
+`autoApproves` / `onceOnlyAsk` / `EXTERNAL_ANSWER` / `toPermissionRequest` /
+`askOf` / `permissionOptions` / `a2a-add-agent.ts` read as cited. Also checked:
+the one-shot and plain CLI paths (whose broker approves all) build the agent
+without the `apps` link, so they have no publish tool.
+
+**As built** (S1–S6, in order; nothing committed):
+
+- **S1** contract and kind: `APPS_MAX_APP_BYTES_DEFAULT`, `AppRowSchema`, the
+  `apps` display update and snapshot field, `session/app_unpublish`,
+  `protocol.json` regenerated, `protocol.d/session-apps-publish.md`,
+  `core/apps.ts`, the `app_publish` kind, `findSecrets`, the sub-agent filter, the
+  client and external mappings.
+- **S2** daemon: `apps-key.ts`, `apps-client.ts`, `apps-lease.ts`,
+  `apps-records.ts`, `session-apps.ts`, `ArtifactStore.bytesOf`, sidecar v5,
+  `HostedSession` / `SessionHost` / `Connection` wiring, the real-host contract
+  test.
+- **S3** `app-publish.ts`, `apps.enabled` / `apps.domain` (README table
+  regenerated), `serve` / worker / `buildAgent` wiring.
+- **S4** `client/apps.ts` and the gated feed; TUI `/apps`, status words, quit
+  warning, publish options.
+- **S5** phone «Apps» section with Copy and Stop, publish options.
+- **S6** runbook §12, changelog fragment.
+
+**Drift from Implementation** (each small; why):
+
+1. `PreparedPublish` also carries `ok: true` (the union's discriminator) and
+   `domain` (the ask names `https://*.<domain>`).
+2. A fifth daemon file, `apps-records.ts` (record + pure parser), so the sidecar
+   module does not import the publisher.
+3. An app the host no longer knows (`deleted` / `not_found` / `forbidden`) is
+   replaced by a **create** on the next publish; an update could only fail
+   forever. A taken-down one still updates and is refused by the host (F9).
+4. D14: a **create** is never aborted (only its answer names the id to delete);
+   an update is aborted by Stop or the session's end.
+5. A revival answered `expired` is retried with backoff, never at once. Every
+   non-terminal code retries.
+6. A restored row is `renewing` and lapses one default lease after the restore.
+7. The 3 s close wait is `SessionApps.drained(ms)` (the service's clock), and
+   only a session with something to delete waits.
+8. TUI status words ride the status bar's suffix beside the switches' marker
+   (`app-layout.ts`), not the dock pill: the pill opens a list that holds no apps.
+9. `appStateOf` lives in `client/apps.ts` (the phone needs it), re-exported by
+   `tui/apps-view.ts`.
+10. Phone: **no** section when nothing was reported (apps are off by default, so
+    «update tentacle» would usually be false). `App.tsx`, `SessionScreen.tsx` and
+    `session-screen-controller.ts` also changed (the port and the two callbacks).
+11. Test files: wiring cases are in `cli/test/apps-hosts.test.ts`, the app frames
+    in `tui/test/apps-panel-app.test.tsx`.
+12. Existing tests updated for new facts: schema fixtures, the daemon's update
+    samples, "unknown sidecar version" is now 6, the TUI's command and panel
+    lists, the runbook's section list (§12).
+
+**Red before green.** Shown red on their assertions before the code: the protocol
+wire test (5/5), the kind table, router, external ask, permission options,
+sub-agent filter and `findSecrets` (21 red, with a `findSecrets` stub). The new
+modules (S2–S5) had their tests written with the module, **not** shown red first;
+their non-vacuity rests on the mutations below and on Review.
+
+**Mutations** (each applied, run, reverted):
+
+| Mutation | Result |
+|---|---|
+| drop `app_publish` from `onceOnlyAsk` | 4 fail |
+| `autoApproves` accepts `app_publish` | 2 fail |
+| register the tool in `tunnelledAgent` | 1 fail — the first run **passed** (only the non-proxy pod path was driven); a `tunnelledAgent` test was added |
+| a second broker handed to the tool | 1 fail |
+| skip the re-hash in `publish` | 1 fail |
+| remove the `daemonWakes` gate on `apps` | 2 fail |
+| write the sidecar `apps` as v4 | 6 fail |
+
+**Checks run** (narrow, per the brief): protocol, core, agent, tools, scripts,
+daemon, config, cli, client, tui, apps-host and mobile tests green after the
+updates above; `tsc -p apps/mobile` and `tsc -p apps/apps-host` clean;
+`biome check packages apps/apps-host apps/mobile` clean. The root
+`tsc --noEmit` and the full gate were **not** run here. One apps-host overload
+test failed once beside the protocol suite and passed on re-run.
+
+**Open for Review / not verified:**
+
+- **Secret-scan cost.** `findSecrets` runs the redaction rules synchronously over
+  up to 10 MiB. Ordinary pages: 33–53 ms for 10 MiB. A crafted run is quadratic
+  (`"a."` or `"eyJ-"` repeated: 32 KiB ≈ 100–140 ms, 64 KiB ≈ 560–600 ms), so a
+  crafted multi-MiB page would stall the daemon. The cause is the shared rules'
+  unbounded quantifiers (`url-credentials`, `jwt`); changing them also changes
+  output redaction, so it was left for a decision.
+- Turning `apps.enabled` off and restarting `serve` rewrites a session's sidecar
+  without its apps: nothing renews them and the pages lapse within one lease.
+- A real publish against a deployed host, the phone pixels, and a laptop sleep
+  with revival (runbook §12).
 
 ## Review
 

@@ -15,6 +15,7 @@
  * decides whether typed text activates a skill — by an exact match of its
  * first token, never by parsing the rest.
  */
+import { appsQuitText } from "./apps-view.ts";
 import { BUILT_IN_NAMES, SLASH_COMMANDS } from "./commands/registry.ts";
 import type { DisplayItem } from "./state.ts";
 
@@ -263,6 +264,8 @@ export interface QuitCommandInput {
    * detaches, so its caller passes 0 — the wakes live on with the daemon.
    */
   readonly schedules?: number;
+  /** Live published apps; 0 for a quit that only detaches, like `schedules`. */
+  readonly apps?: number;
   /** The user said `y` to `quitConfirmText`. */
   readonly confirmed: boolean;
 }
@@ -299,6 +302,10 @@ export function quitCommandStep(input: QuitCommandInput): "exit" | "stop-then-ex
   if ((input.schedules ?? 0) > 0 && !input.detaches && !input.confirmed) {
     return "confirm";
   }
+  // And a live published app: its page goes offline with the session.
+  if ((input.apps ?? 0) > 0 && !input.detaches && !input.confirmed) {
+    return "confirm";
+  }
   if (input.endsSession) {
     return input.running ? "stop-then-exit" : "exit";
   }
@@ -321,6 +328,8 @@ export interface QuitConfirmFacts {
    * (and a `connect` quit never reaches here: it only detaches).
    */
   readonly scheduleIds?: readonly string[];
+  /** The live published apps a quit that ends the session takes offline. */
+  readonly apps?: number;
 }
 
 /** Ids the dialog names, and how much of each: one row at 80 columns (LOW-2). */
@@ -363,8 +372,25 @@ export function scheduleQuitText(ids: readonly string[]): string | null {
   return `${what} (${list}) ${verb} with this session — quit? (y/N)`;
 }
 
-/** The confirmation `/quit` asks with others on the session, or children to lose. */
+/**
+ * The confirmation `/quit` asks: others on the session, work a quit would lose,
+ * and the public apps it takes offline (session apps D10) — one row.
+ */
 export function quitConfirmText(facts: QuitConfirmFacts): string {
+  const apps = appsQuitText(facts.apps ?? 0);
+  if (apps === null) {
+    return sessionQuitText(facts);
+  }
+  const { others, agents, jobs = 0, scheduleIds = [] } = facts;
+  if (others <= 0 && agents <= 0 && jobs <= 0 && scheduleIds.length === 0) {
+    return `${apps} — quit? (y/N)`;
+  }
+  const count = facts.apps === 1 ? "1 app goes offline" : `${facts.apps} apps go offline`;
+  const both = sessionQuitText(facts).replace(" — ", ` · ${count} — `);
+  return both.length <= QUIT_WAKES_COLS ? both : `${apps} and ends running work — quit? (y/N)`;
+}
+
+function sessionQuitText(facts: QuitConfirmFacts): string {
   const { others, agents, names } = facts;
   // A SHELL job is a different thing to lose, and is worded apart (owner Q3 (a)):
   // it keeps no report, so nothing of it reaches the conversation afterwards.
