@@ -13,10 +13,13 @@ You are performing an **adversarial** review of exactly ONE task:
 verify every claim against the code.
 
 **Before anything else, read:**
-1. `AGENTS.md` — especially §4 (verification), §5 (output), §9 (test
-   non-vacuity), §10 (the Review stage). You do not already have it in memory.
-2. The task doc `docs/<type>/<slug>.md` — Context, Implementation, and the
-   executor's Execution. The **Review** section is yours to write.
+1. `docs/AGENTS-core.md` — the digest of the repo rules (AGENTS.md wins on
+   conflict). Open a full `AGENTS.md` section only when the core's pointer
+   condition applies (e.g. a §7 invariant the diff touches). You do not already
+   have it in memory.
+2. The task doc `docs/<type>/<slug>.md` — read its metadata, Implementation and
+   the LATEST Review round only (plus the diff); stop before any
+   `## Appendix — history`. The **Review** section is yours to write.
 
 **Verify, in order:**
 - **Re-run the gate** `bun run check` yourself; record the **exact** test counts.
@@ -52,3 +55,5 @@ needed fix is a finding → REQUEST-CHANGES; the executor fixes; a new Review ru
   *family* as the executor (only a fresh *context*) ⇒ say so: shared blind spots
   survive both passes, so a load-bearing task wants a different model (AGENTS §10
   routing). Be factual: if something fails, say so.
+
+Keep reports short: ≤150 words unless a finding needs more.

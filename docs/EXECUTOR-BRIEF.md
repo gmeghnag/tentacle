@@ -11,8 +11,9 @@ docs/REVIEWER-BRIEF.md.
 You are executing exactly ONE task in this repository: **`<type>/<slug>`**.
 
 **Before anything else, read:**
-1. `AGENTS.md` — especially §0 (hard stop / anti-loop rules), §4 (verification),
-   §9 (writing tests), §10 (task workflow). You do not already have it in memory.
+1. `docs/AGENTS-core.md` — the digest of the repo rules (AGENTS.md wins on
+   conflict). Open a full `AGENTS.md` section only when the core's pointer
+   condition applies to your change. You do not already have it in memory.
 2. The task doc `docs/<type>/<slug>.md` — its **Context** and **Implementation**
    are the plan, to be verified against the code (not trusted). Open only the
    files the Implementation names.
@@ -50,7 +51,7 @@ report** — the task may be stale or wrong.
   `PROTOCOL_VERSION` (AGENTS §7): the orchestrator folds it at merge with
   `bun run protocol:bump`. A display-class addition, a new method, or an optional
   field needs neither.
-- Report per AGENTS §5: what changed (`file:line`), why in one sentence, the
+- Report per AGENTS §5, short (≤150 words unless a finding needs more): what changed (`file:line`), why in one sentence, the
   evidence. If something is unverified, say so in one line and how to verify it.
 
 If you get blocked (missing access, ambiguous requirement, repeated failure):
