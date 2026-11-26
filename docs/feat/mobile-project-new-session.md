@@ -452,3 +452,26 @@ nothing.
 
 **Executor behaviour:** followed the plan in order, showed red, ran mutations,
 and honestly surfaced the race above as out-of-plan instead of hiding it.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26* — **Verdict: PASS** (APPROVE)
+
+- **Finding 1 — fixed.** `openCreatedSession` (`project-new-session.ts:77-81`)
+  opens only while the list is focused, and `App.tsx:3669-3679` routes `onCreated`
+  through it with the Sessions screen's own `navigation`. The new tests run the
+  REAL `StackRouter` (resolved through `@react-navigation/native` → core →
+  routers): opened-row case keeps `["Sessions","ROW-X"]` and the flow returns to
+  idle; back-before-settle still opens the new session.
+- **Mutations** (applied, run, reverted; `git status --porcelain` empty after):
+  guard forced true (`|| true`) → «a row opened meanwhile stays» fails; App.tsx
+  wired with `{ isFocused: () => true }` instead of `navigation` → the
+  wiring test fails. Both non-vacuous.
+- **Regressions:** touched tests 67 pass, 0 fail; `bun run lint` clean (2638
+  files); `bun run typecheck` clean. The new test resolves
+  `@react-navigation/*` from `apps/mobile`; CI (`build.yml`) installs without
+  mobile but runs no tests, and the local gate needs mobile installed anyway
+  (`tsc -p apps/mobile`): no gate risk.
+- **Residual (accepted, not a finding):** any non-list screen in front when the
+  create settles (a row, a modal) also suppresses the open; the session is
+  listed at the next read — D7's convergence, never lost.
