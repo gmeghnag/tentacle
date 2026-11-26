@@ -518,6 +518,47 @@ reached with no Session beneath, or that screen's resync) detaches the handle th
 run screen still holds, so that run view stops updating until reopened. Before
 this fix the first leave already detached it.
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Finding 1 (vacuous `pop` test) — FIXED.** `workflow-screens-wiring.test.ts`
+now spans from `name="WorkflowRun"`, and asserts the span holds
+`onOpenSession={() =>` and no `createRouteQueue`. No production change.
+Red first: with `pop: true` removed from the run route the OLD test passed
+19/19; the new one fails (`"pop": true` expected, `false` received).
+
+| Mutation in `App.tsx` (one at a time, reverted) | Red (of 19) |
+|---|---|
+| run route: no `pop: true` | 1, the run-route test |
+| push queue: no `pop: true` | 1, the push-tap test |
+| run route: `sessionReturnParams` replaced | 1, the run-route test |
+| no `getId` | 1, the `getId` test |
+
+**Finding 2 (acceptance gate) — PARTIAL: flow written, NOT run on a simulator.**
+- New `flows/48-workflow-open-session.yaml` (+ `48-laptop-edit.js`,
+  `48-file.js`); in `FLOWS` after `46b`; `OPENSESSION_ID`; `run.ts`
+  `RUN_SEEDED_FLOWS` gives it flow 45's seed (45 and 48).
+- No new seed is needed (corrects "Why no simulator work"): the laptop raises
+  the `EDIT` ask while the run screen is on top, so the `foreign` bar appears.
+- Drift from Tests: no "back" assertion (the Session screen has no back button).
+  The flow pins rows, no `transcript-empty`, and that the laptop's turn ends on
+  that screen after the phone's approval. It does not detect a duplicate screen
+  lower in the stack; the wiring tests alone cover that.
+- Guard tests (`e2e-flows.test.ts`): 3 red before the flow existed (two of them
+  only because the file was missing). Mutations: 48 out of `RUN_SEEDED_FLOWS` →
+  1 red; the flow's `row-r.*` assertion removed → 1 red.
+- NOT done: step-0 simulator rate; `--only 06,45,48`; N4's push tap on a device.
+  The app needs a from-scratch Release build in this worktree (no `ios/`, longer
+  than a foreground command), with 26 GiB free on the disk. Treat flow 48's UI
+  steps as unverified. To run: `bun run e2e:mobile --ios 26 --only
+  06-session-open,45-workflow-run-view,48-workflow-open-session`; or the
+  orchestrator waives it.
+
+**Gate (narrow).** 8 files, 255 pass / 0 fail; `biome check apps/mobile
+changelog.d` clean; `tsc -p apps/mobile` clean. Full gate: the orchestrator's
+script.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner,

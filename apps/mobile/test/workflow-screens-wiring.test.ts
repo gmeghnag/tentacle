@@ -94,7 +94,11 @@ describe("one Session screen per session in the stack (docs/fix/mobile-session-o
   });
 
   test("the run's 'Open the session' pops back to it (mutation: drop `pop` → red)", () => {
-    const route = between(APP, "onOpenSession={", "</Stack.Screen>");
+    // Anchored on the screen: the FIRST `onOpenSession={` is a prop pass-through,
+    // and a span from it reaches the push queue's own `pop`.
+    const route = between(APP, 'name="WorkflowRun"', "</Stack.Screen>");
+    expect(route).toContain("onOpenSession={() =>");
+    expect(route).not.toContain("createRouteQueue");
     expect(goesBack(route)).toEqual({ pop: true, params: true });
   });
 
