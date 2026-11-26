@@ -5,7 +5,8 @@
  * decoder hands back.
  *
  * The budget bounds a decode only if the decoder allocates for the frame the
- * walk read, so the walk refuses every layout pdf.js (the injected decoder)
+ * walk read and runs the scans the walk counted, so the walk reads the whole
+ * image, up to its EOI, and refuses every layout pdf.js (the injected decoder)
  * would read differently. Real encoders write none of them.
  *
  * Pure: `@tentacle/core` imports no decoder, so it is injected. Never throws on
@@ -40,6 +41,16 @@ export type JpegDecoder = (bytes: Uint8Array) => {
 /** The same budget as a PNG: one decode slot serves both. */
 export const MAX_JPEG_DECODE_BYTES = MAX_PNG_DECODE_BYTES;
 
+/**
+ * pdf.js walks the frame's blocks once per scan, so the scans bound the CPU.
+ * libjpeg writes at most 18, mozjpeg about 20; at the memory budget a costly
+ * scan takes about 80 ms.
+ */
+export const MAX_JPEG_SCANS = 32;
+
+/** The last of a block's 64 coefficients: pdf.js loops on to any `Se` given. */
+const LAST_COEFFICIENT = 63;
+
 /** The longest piece of a decoder's own message that reaches a result. */
 const MAX_MESSAGE_CHARS = 120;
 
@@ -61,7 +72,7 @@ export const isSof = (marker: number, high: number, low: number): boolean =>
 
 const isApp = (marker: number): boolean => (marker >= 0xe0 && marker <= 0xef) || marker === COM;
 
-/** The markers that may follow a first scan: the end, or more of the file. */
+/** The markers that may follow a scan: the end, or more of the file. */
 const endsScan = (marker: number): boolean =>
   marker === EOI ||
   marker === DHT ||
@@ -219,27 +230,40 @@ function checkHuffman(payload: Uint8Array): JpegRefusal | null {
   return at === payload.length ? null : layout("a Huffman table that does not fill its segment");
 }
 
-/** `SOS`: 4 + 2·Ns payload bytes, every selector naming a frame component. */
+/**
+ * `SOS`: 4 + 2·Ns payload bytes, every selector naming a frame component once,
+ * the spectral selection inside the block.
+ */
 function checkScan(payload: Uint8Array, ids: readonly number[]): JpegRefusal | null {
   const count = u8(payload, 0);
   if (payload.length !== 4 + 2 * count) {
     return layout("a scan header whose length does not match");
   }
+  const named = new Set<number>();
   for (let n = 0; n < count; n += 1) {
-    if (!ids.includes(u8(payload, 1 + 2 * n))) {
+    const id = u8(payload, 1 + 2 * n);
+    if (!ids.includes(id)) {
       return layout("a scan that names a component the frame does not have");
     }
+    if (named.has(id)) {
+      return layout("a scan that names a component twice");
+    }
+    named.add(id);
   }
-  return null;
+  return u8(payload, 2 + 2 * count) > LAST_COEFFICIENT
+    ? layout("a scan that ends past coefficient 63")
+    : null;
 }
 
+const truncated = (): JpegRefusal => corrupt("it is truncated: no end-of-image marker");
+
 /**
- * The first scan's entropy data, then an end-of-image marker. Only stuffed
+ * A scan's entropy data: the offset of the marker that ends it. Only stuffed
  * bytes, restart markers and fill bytes are skipped. A `DNL` makes pdf.js parse
  * again at another height; a marker under `C0` is one pdf.js skips past, so it
- * could reach a `DNL` this walk never would.
+ * could reach a `DNL` or a scan this walk never would.
  */
-function checkFirstScan(bytes: Uint8Array, start: number): JpegRefusal | null {
+function skipScan(bytes: Uint8Array, start: number): number | JpegRefusal {
   for (let i = start; i + 1 < bytes.length; i += 1) {
     if (bytes[i] !== 0xff) {
       continue;
@@ -255,23 +279,15 @@ function checkFirstScan(bytes: Uint8Array, start: number): JpegRefusal | null {
     if (marker === DNL) {
       return layout("a DNL marker that changes the height");
     }
-    if (!endsScan(marker)) {
-      return unexpected(marker);
-    }
-    break;
+    return endsScan(marker) ? i : unexpected(marker);
   }
-  // `FF D9` cannot appear inside stuffed entropy data, so a plain search works.
-  for (let i = start; i + 1 < bytes.length; i += 1) {
-    if (bytes[i] === 0xff && bytes[i + 1] === EOI) {
-      return null;
-    }
-  }
-  return corrupt("it is truncated: no end-of-image marker");
+  return truncated();
 }
 
 /**
  * The STRICT walk: SOI, then only the segments a real encoder writes, each
- * exactly as long as its content, up to the first scan. Never throws.
+ * exactly as long as its content, with at most `MAX_JPEG_SCANS` scans, up to the
+ * EOI (what follows it is not part of the image). Never throws.
  */
 export function readJpegHeader(bytes: Uint8Array): JpegHeader | JpegRefusal {
   if (bytes[0] !== 0xff || bytes[1] !== SOI) {
@@ -281,6 +297,7 @@ export function readJpegHeader(bytes: Uint8Array): JpegHeader | JpegRefusal {
   let frame: Frame | undefined;
   let orientation: ExifOrientation | undefined;
   let afterApp = false;
+  let scans = 0;
   while (i + 1 < bytes.length) {
     if (bytes[i] !== 0xff) {
       return layout("data where a marker was expected");
@@ -295,6 +312,10 @@ export function readJpegHeader(bytes: Uint8Array): JpegHeader | JpegRefusal {
       i += 1;
       continue;
     }
+    if (marker === EOI && frame !== undefined && scans > 0) {
+      const { ids: _, ...header } = frame;
+      return { ...header, orientation: orientation ?? 1 };
+    }
     const sof = isSof(marker, 0xc0, 0xcf);
     if (!(sof || endsScan(marker)) || marker === EOI) {
       return unexpected(marker);
@@ -306,6 +327,7 @@ export function readJpegHeader(bytes: Uint8Array): JpegHeader | JpegRefusal {
     }
     const payload = bytes.subarray(i + 4, end);
     afterApp = isApp(marker);
+    let next = end;
     let refused: JpegRefusal | null = null;
     if (sof) {
       if (frame !== undefined) {
@@ -328,19 +350,22 @@ export function readJpegHeader(bytes: Uint8Array): JpegHeader | JpegRefusal {
       if (frame === undefined) {
         return corrupt("no frame header before the image data");
       }
-      const scan = checkScan(payload, frame.ids) ?? checkFirstScan(bytes, end);
-      if (scan !== null) {
+      scans += 1;
+      if (scans > MAX_JPEG_SCANS) {
+        return layout(`more than ${MAX_JPEG_SCANS} scans`);
+      }
+      const scan = checkScan(payload, frame.ids) ?? skipScan(bytes, end);
+      if (typeof scan !== "number") {
         return scan;
       }
-      const { ids: _, ...header } = frame;
-      return { ...header, orientation: orientation ?? 1 };
+      next = scan;
     }
     if (refused !== null) {
       return refused;
     }
-    i = end;
+    i = next;
   }
-  return corrupt("it ends before its image data");
+  return scans > 0 ? truncated() : corrupt("it ends before its image data");
 }
 
 /**

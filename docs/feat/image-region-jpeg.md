@@ -327,6 +327,14 @@ STOP and fix the plan (§8).
       for a marker and parses what it finds. Fill bytes elsewhere stay allowed.
   - EOI `FF D9` somewhere after the first scan's start, as `inspectJpeg`
     requires (`image-file.ts:235-246`).
+  - **Amended in fix round 1 (claude-sonnet-5-5, 26/11; Review finding 1, CPU).**
+    The walk no longer stops at the first scan, and the plain EOI search above is
+    replaced: it reads the WHOLE image, by the same rules, up to the top-level
+    EOI (bytes after it are ignored, as pdf.js ignores them). The rules for
+    "the first scan" apply to every scan. New refusals: more than
+    `MAX_JPEG_SCANS` = 32 scans; a scan naming a component twice; a scan whose
+    spectral end `Se` is over 63. This also supersedes the ≈ 0.6 s figure of J7
+    and § Failure modes: a crafted file at the budget takes up to ≈ 2.7 s.
   - **EXIF:** from the first APP1 starting `Exif\0\0`, the IFD0 tag `0x0112`
     (SHORT, count 1), with both byte orders. A malformed, truncated or
     out-of-range EXIF gives orientation 1 and never refuses: EXIF is
@@ -740,6 +748,66 @@ compiled binary itself was not built.
 ### Gate
 
 Not run by the executor: the full `bun run check` is the orchestrator's script.
+
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Finding 1 (MEDIUM, decode CPU): fixed** in `packages/core/src/jpeg-decode.ts`
+(D2 amendment above). Tests: six new T2 cases in `core/test/jpeg-decode.test.ts`.
+
+- Red on the old walk: `44 pass, 5 fail`, each `Received: "ACCEPTED 64×48"`
+  (cap, cap behind an APP EOI, duplicate selector, `Se` 64, later scan). The
+  sixth ("bytes after the EOI are not part of the image") is a guard, green on
+  both; its mutation is below.
+
+Drift from the Review's suggested fix, and why:
+
+- **Scans are counted by walking the segments to the EOI, not by counting every
+  `FF DA` in the file.** Motion photos append a video after the EOI, whose random
+  bytes would reach any cap. A plain search for the first `FF D9` would be
+  bypassed by an APP payload holding one. The walk follows lengths as pdf.js's
+  `markerLoop` does, so every scan pdf.js runs is counted and checked.
+- **`Se` > 63 is refused too (not in the finding).** pdf.js loops to whatever
+  `Se` says: at the budget, ONE `Se` = 255 refinement scan took 13 122 ms
+  (`fix1-worst.ts`, gray 6600×6600; 5584 ms at 12 MP). A scan cap alone does not
+  bound that.
+- A later scan followed directly by a SOF now says "unexpected marker FFC0"
+  (the first-scan rule), before pdf.js would throw on it.
+
+Worst accepted file after the fix (valid refinement scans, `fix1-worst.ts 32,33
+valid`):
+
+```
+gray 44MP · cost 125 MiB · 32 scans · 2727 ms · 33 scans: refused
+420 21MP  · cost 121 MiB · 32 scans · 2228 ms · 33 scans: refused
+420 12MP  · cost  70 MiB · 32 scans · 1265 ms · 33 scans: refused
+```
+
+Residual: those ≈ 2.7 s are still synchronous on the daemon thread (J7's worker
+debt). A lower cap shortens it; 32 leaves room over libjpeg's 18 and mozjpeg's
+≈ 20 (encoder figures from Review/knowledge, not measured here). 15 MiB of tiny
+DHT/DQT tables costs 24–38 ms (`fix1-flood.ts`). `fix1-real.ts`: 36 real JPEGs
+(scratch photos and worktree files, 3 progressive) all accepted.
+
+Mutations (`fix1-mutate.ts`; each applied, run, source restored):
+
+| Mutation | Failing T2 tests |
+|---|---|
+| no scan cap | "32 scans are accepted, 33 refused", "an EOI inside a later APP segment…" (2) |
+| duplicate selectors allowed | "a scan that names a component twice…" (1) |
+| no `Se` check | "a spectral selection past coefficient 63…" (1) |
+| walk stops at the first scan | cap ×2, twice, `Se`, "a later scan gets the same walk" (5) |
+| scans counted past the EOI | "bytes after the EOI are not part of the image" (1) |
+| fill allowed after APP/COM | both first-scan smuggling cases + "a later scan gets the same walk" (3) |
+
+```
+bun test (the 6 core/tools image files)                     204 pass, 0 fail
+bunx biome check core/{src/jpeg-decode,test/jpeg-decode.test}.ts   no issues
+tsc -p <scratch tsconfig.scoped.json>                       clean
+```
+
+Gate: not run by the executor (the orchestrator's script).
 
 ## Review
 

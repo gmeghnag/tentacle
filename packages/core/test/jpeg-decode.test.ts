@@ -315,6 +315,78 @@ describe("readJpegHeader: strict refusals (T2)", () => {
   });
 });
 
+// pdf.js walks every block of the frame once per scan, so the decode's CPU is
+// bounded by what EVERY scan up to the EOI may say, not only the first one.
+describe("readJpegHeader: every scan bounds the decode's CPU (T2)", () => {
+  const layout = (what: string) => `the JPEG has an unexpected layout (${what})`;
+  const sos = segment(base, 0xda);
+  const sosPayload = [...base.subarray(sos.at + 4, sos.end)];
+  const [, first = 0, , second = 0] = sosPayload;
+  const scan = cat(seg(0xda, sosPayload), [0]);
+  const scans = (n: number) => cat(...new Array<Uint8Array>(n).fill(scan));
+  /** `base` (one scan) with `extra` between its entropy data and its EOI. */
+  const afterScan = (...extra: ArrayLike<number>[]) =>
+    cat(base.subarray(0, eoiAt), ...extra, [0xff, 0xd9]);
+  const sosWith = (change: (payload: number[]) => void) => {
+    const payload = [...sosPayload];
+    change(payload);
+    return seg(0xda, payload);
+  };
+  const twice = sosWith((p) => {
+    p[3] = first;
+  });
+  // `Se`, the second byte from the end.
+  const pastEnd = sosWith((p) => {
+    p[p.length - 2] = 64;
+  });
+
+  test("32 scans are accepted, 33 refused", () => {
+    expect(accepted(afterScan(scans(31))).width).toBe(64);
+    expect(refusal(afterScan(scans(32)))).toBe(layout("more than 32 scans"));
+  });
+
+  test("an EOI inside a later APP segment does not end the count", () => {
+    const bytes = afterScan(seg(0xe1, [0xff, 0xd9]), scans(32));
+    expect(refusal(bytes)).toBe(layout("more than 32 scans"));
+  });
+
+  test("bytes after the EOI are not part of the image", () => {
+    const bytes = cat(base, scans(100), seg(0xc0, sofPayload(60_000, 60_000, S420)));
+    expect(accepted(bytes).width).toBe(64);
+  });
+
+  test("a scan that names a component twice, first or later", () => {
+    expect(second).not.toBe(first);
+    const sentence = layout("a scan that names a component twice");
+    expect(refusal(replaced(0xda, twice))).toBe(sentence);
+    expect(refusal(afterScan(twice))).toBe(sentence);
+  });
+
+  test("a spectral selection past coefficient 63, first or later", () => {
+    const sentence = layout("a scan that ends past coefficient 63");
+    expect(refusal(replaced(0xda, pastEnd))).toBe(sentence);
+    expect(refusal(afterScan(pastEnd))).toBe(sentence);
+  });
+
+  test("a later scan gets the same walk as the first", () => {
+    const unknown = sosWith((p) => {
+      p[1] = 0x77;
+    });
+    expect(refusal(afterScan(unknown))).toBe(
+      layout("a scan that names a component the frame does not have"),
+    );
+    expect(refusal(afterScan(scan, DNL))).toBe(layout("a DNL marker that changes the height"));
+    expect(refusal(afterScan(scan, [0xff, 0x10]))).toBe("the JPEG has an unexpected marker FF10");
+    const frame = seg(0xc0, sofPayload(64, 48, S420));
+    expect(refusal(afterScan(frame))).toBe("the JPEG has an unexpected marker FFC0");
+    expect(refusal(afterScan(seg(0xfe, []), frame))).toBe(layout("a second frame header"));
+    // pdf.js would search this APP payload and find the scans hidden in it.
+    expect(refusal(afterScan(seg(0xe1, scans(40)), [0xff]))).toBe(
+      layout("a fill byte after an application or comment segment"),
+    );
+  });
+});
+
 describe("readJpegHeader: EXIF orientation", () => {
   /** An APP1 Exif segment whose IFD0 holds one entry. */
   function exif(order: "MM" | "II", value: number, ifdOffset = 8, type = 3): Uint8Array {
