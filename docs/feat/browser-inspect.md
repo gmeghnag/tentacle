@@ -1456,3 +1456,69 @@ a file not touched here (same as B6a). The full gate is the orchestrator's scrip
 - A tab closed in Chrome shows until the next refresh trigger (the plan's debt).
 
 *— claude-sonnet-5-5, 2026-11-26*
+
+## Review
+
+### Review B5b + B6a + B6b + icon (fresh context, `git diff main...HEAD` at `78c66c46`)
+
+**Verdict: REQUEST-CHANGES** — two MEDIUM findings. Both are display bugs and both are small fixes. No §7 invariant is broken.
+
+**Findings**
+1. **MEDIUM: the TUI says «acting asks first» while auto is on.** `packages/tui/src/browser-view.ts:72` calls `tabSubtitle(tab)` without `auto`, and the phone passes it (`apps/mobile/src/browser-view.ts:147`).
+   - Scenario: `/browser auto` is on and the user hands over a tab. The `/browser` panel shows `Handed over by you · acting asks first`, but B5b answers that first action by itself (`firstOnHandedOver` is not `hard`, `classify.ts:146`). The UI states a safety property that is false.
+   - The executor wrote this down as debt in B6a and again in B6b, but it is one argument to add. Fix: pass `browserSwitchesOf(caps).actions === "auto"`. Add a row to the view table for it.
+2. **MEDIUM: a lost lease is reported as `heldElsewhere`.** `packages/tools/src/browser.ts:885` maps «does not hold the browser» to `heldElsewhere: true`. The same toolset's `call()` (`:215`) treats that same message as «hub restarted, lease lost» and claims again.
+   - Scenario: the user quits and reopens Chrome, so the native host restarts and every lease is gone, but `claimed` still has the uid. On the next `browser/status`, the hub answers the `tabs` op with «this session does not hold the browser» (`cli/src/browser-host.ts:252`). The TUI and the phone then say «Another tentacle process holds the browser» and show no tab count. This lasts until the session's next browser tool call.
+   - The plan's failure row «hub restarting during status» says this case gives `tabs []`, not this state. Fix: only `held by another tentacle process` means `heldElsewhere`. On «does not hold», drop the uid from `claimed` and return `tabs: []` (no claim: a read never takes the lease). Add a test for it.
+
+**Gate (run here):**
+- The 27 test files this diff touches, run with `bun test --parallel`: **301 pass, 0 fail**.
+- `bun run typecheck` (root + mobile + relay): clean.
+- `bun run lint`: clean (2615 files).
+- The full `bun run test` was not run. That is the orchestrator's merge gate.
+
+**Mutations (mine; each file restored from a scratch copy, `git status` empty after each):**
+
+| Mutation | Result |
+|---|---|
+| browser branch of `autoAnswers` gated on `answersAutoAccept` | RED: A1 and W4 |
+| no-port check removed from `setCapability` | RED: S2 |
+| `toWireCapabilities` always adds `browser` | RED: S2 |
+| status `hostPath` keeps `?query` | RED: tools «host + path only» |
+| one base64 byte changed in `icon-48` | RED: 2 install tests |
+| browser clause of `hasDisabled` → `false` | **GREEN, nothing pins it** |
+
+The last row is below MEDIUM: it only affects the RECORD that a new segment restates auto or clear (Q2 audit), never what is restored.
+
+**Premises re-checked (TRUE):**
+- There is one `new HostedSession` site (`session-host.ts:1713`), so `attachBrowser` reaches every session, the reloaded ones included.
+- No restore path lets `browser` through. `normalizeCapabilities` covers reload, `seedCapabilities` rebuilds only the three sets, and the laptop's `wireCapabilities` (`cli/src/session-capabilities.ts:21`) drops it. A resume record that says auto therefore reaches no daemon.
+- `autoApproves` is unchanged.
+- The hub gates `retitle` and `tabs` on `holds` (`browser-host.ts:252`).
+- Only the TUI and the phone send `session/set_capability`.
+
+**Attacks tried:**
+1. A pod forging `capabilities.browser` or a fake `browser/status`. Result: display only. A pod has no port, no browser tools and no hub. On the laptop, `autoApproves` refuses `browser_action`, and the slack never crosses the wire.
+2. Auto carried across resume, `/clear`, hop or a `serve` reload. Result: three layers drop it.
+3. A secrets mode race between concurrent calls in one session (D3). Result: a call in flight takes the mode of the latest call start. That only moves toward what the user just chose. Asks are always masked.
+4. `useBrowserStatus` re-reading on every render. Result: no, `caps` is React state.
+5. Icon drift. Result: caught (row above).
+6. A2A. Result: it never sets a switch, and `browser_action` stays `owner-only`.
+
+**Holds:**
+- The single-broker auto answer is daemon-side and on the live switch, and a `hard` ask always asks.
+- The UIs render from the echo only.
+- `browser/status` never claims a lease and runs without a lock.
+
+**Not verified:**
+- No simulator sweep (owed before the next iOS build).
+- No real-Chrome `retitle`.
+- No extension load with the icons.
+
+**Executor behaviour:**
+- Honest about drift (D1–D5 and the amendments are accurate) and about what was not verified.
+- It did log finding 1, but logged it as debt instead of fixing a one-line false safety label.
+
+**Model:** Opus. The planner was also Opus (claude-opus-5-5), so this pass shares the planner's model family. B6 was executed by Sonnet.
+
+*— claude-opus-5-5, 2026-11-26*
