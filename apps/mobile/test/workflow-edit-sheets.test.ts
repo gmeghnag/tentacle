@@ -6,7 +6,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { WorkflowDraft } from "@tentacle/core";
-import { draftProblems } from "@tentacle/core";
+import { draftProblems, patchStep, setFailTarget } from "@tentacle/core";
 import {
   type SheetAction,
   type SheetActions,
@@ -274,6 +274,155 @@ describe("the step sheet, per kind", () => {
   });
 });
 
+describe("a segmented option follows the SHAPE, not its content", () => {
+  // The bug this kills: both controls WRITE a shape with empty content
+  // (`where: {docker: ""}`, `on_fail: {goto: ""}`) and used to READ their chosen
+  // option from that content being non-empty — so the tap erased its own
+  // evidence. Every test below applies the action through the CORE, exactly as
+  // `App.tsx` does, and re-derives the sheet from the patched draft.
+  const LOCAL = {
+    schemaVersion: 1,
+    name: "task",
+    version: 1,
+    steps: [
+      { id: "plan", agent: { prompt: "prompts/plan.md" } },
+      { id: "exec", run: "bun run lint" },
+      { id: "gate", approve: { title: "Merge" } },
+    ],
+  } satisfies WorkflowDraft;
+  const sheetOf = (draft: WorkflowDraft, id: string) =>
+    sheetModel({
+      request: { kind: "step", id },
+      draft,
+      prompts: PROMPTS,
+      notice: null,
+    }) as SheetModel;
+  const stepOf = (draft: WorkflowDraft, id: string): Record<string, unknown> =>
+    (draft.steps as Record<string, unknown>[]).find((step) => step.id === id) ?? {};
+  const on = (model: SheetModel, key: string): boolean[] | undefined => {
+    const control = field(model, key);
+    return control?.control === "segmented"
+      ? control.options.map((option) => option.on)
+      : undefined;
+  };
+
+  test("`Where`→Docker sticks: the shape says Docker while the name is still empty", () => {
+    const action = segmentAction(sheetOf(LOCAL, "exec"), "where", "Docker");
+    expect(action).toEqual({
+      do: "patch",
+      id: "exec",
+      patch: { kind: "run", where: { docker: "" } },
+    });
+    if (action?.do !== "patch") {
+      throw new Error("expected the Docker patch");
+    }
+    const after = patchStep(LOCAL, "exec", action.patch).draft;
+    expect(stepOf(after, "exec").where).toEqual({ docker: "" });
+    const model = sheetOf(after, "exec");
+    expect(on(model, "where")).toEqual([false, true]);
+    expect(field(model, "docker")).toMatchObject({
+      control: "text",
+      value: "",
+      placeholder: "name",
+    });
+    // Unsavable, with the validator's OWN sentence — never a silent no-op.
+    expect(draftProblems(after, PROMPTS)).toEqual([
+      "steps[1].where: needs a container name — {docker: <container>}",
+    ]);
+  });
+
+  test("`Where`→Local clears it: the key goes, and the row with it", () => {
+    const docker: WorkflowDraft = {
+      ...LOCAL,
+      steps: [LOCAL.steps[0], { id: "exec", run: "bun run lint", where: { docker: "node" } }],
+    };
+    const action = segmentAction(sheetOf(docker, "exec"), "where", "Local");
+    expect(action).toEqual({ do: "patch", id: "exec", patch: { kind: "run", where: "local" } });
+    if (action?.do !== "patch") {
+      throw new Error("expected the Local patch");
+    }
+    const after = patchStep(docker, "exec", action.patch).draft;
+    expect("where" in stepOf(after, "exec")).toBe(false);
+    const model = sheetOf(after, "exec");
+    expect(on(model, "where")).toEqual([true, false]);
+    expect(field(model, "docker")).toBeUndefined();
+  });
+
+  test("`Then`→Go to step sticks: the edge exists, its step is not picked yet", () => {
+    const action = segmentAction(sheetOf(LOCAL, "exec"), "then", "Go to step");
+    expect(action).toEqual({ do: "then", id: "exec", target: "" });
+    const { actions, calls } = spy();
+    applySheetAction(actions, action);
+    // The spy's separators, around an empty target: the call is NOT dropped.
+    expect(calls).toEqual(["setFail exec  "]);
+    const after = setFailTarget(LOCAL, "exec", "").draft;
+    const model = sheetOf(after, "exec");
+    expect(on(model, "then")).toEqual([false, true]);
+    expect(field(model, "goto")).toMatchObject({
+      control: "pick",
+      value: "",
+      sub: "not picked yet",
+      opens: { kind: "pick", id: "exec", purpose: "fail" },
+    });
+    expect(field(model, "max")).toMatchObject({ control: "stepper", value: 1, min: 1, max: 10 });
+    expect(model.sections[1]?.foot).toBeNull();
+    expect(draftProblems(after, PROMPTS)).toEqual([
+      "steps[1].on_fail: needs a step id — {goto: <step>, max: 1..10}",
+    ]);
+  });
+
+  test("`Then`→Stop clears a pending target: switching back takes the rows away", () => {
+    const pending = setFailTarget(LOCAL, "exec", "").draft;
+    const action = segmentAction(sheetOf(pending, "exec"), "then", "Stop");
+    expect(action).toEqual({ do: "then", id: "exec", target: "stop" });
+    const after = setFailTarget(pending, "exec", "stop").draft;
+    expect("on_fail" in stepOf(after, "exec")).toBe(false);
+    const model = sheetOf(after, "exec");
+    expect(on(model, "then")).toEqual([true, false]);
+    expect(field(model, "goto")).toBeUndefined();
+    expect(field(model, "max")).toBeUndefined();
+  });
+
+  test("`promptMode` reads the KEY: an empty `prompt:` is still File", () => {
+    // Hand-written, not producible from the phone: the old read (`path !== ""`)
+    // called it Inline and then hid the file it names — the same bug, once more.
+    const hand: WorkflowDraft = {
+      schemaVersion: 1,
+      name: "task",
+      version: 1,
+      steps: [{ id: "plan", agent: { prompt: "" } }],
+    };
+    const model = sheetOf(hand, "plan");
+    expect(on(model, "promptMode")).toEqual([true, false]);
+    expect(field(model, "promptPath")).toMatchObject({
+      control: "text",
+      value: "",
+      placeholder: "prompts/plan.md",
+    });
+    expect(field(model, "promptText")).toBeUndefined();
+  });
+
+  test("a blank container name reaches the VALIDATOR, not the old name", () => {
+    const docker: WorkflowDraft = {
+      ...LOCAL,
+      steps: [{ id: "exec", run: "bun run lint", where: { docker: "node" } }],
+    };
+    const action = textAction(sheetOf(docker, "exec"), "docker", "");
+    expect(action).toEqual({
+      do: "patch",
+      id: "exec",
+      patch: { kind: "run", where: { docker: "" } },
+    });
+    if (action?.do !== "patch") {
+      throw new Error("expected the blank docker patch");
+    }
+    const after = patchStep(docker, "exec", action.patch).draft;
+    expect(draftProblems(after, PROMPTS)).toEqual([
+      "steps[0].where: needs a container name — {docker: <container>}",
+    ]);
+  });
+});
+
 describe("refusals: the sheet never guesses", () => {
   const model = sheetModel({
     request: { kind: "step", id: "exec" },
@@ -328,9 +477,10 @@ describe("refusals: the sheet never guesses", () => {
     expect(textAction(model, "id", "lint")).toEqual({ do: "rename", id: "exec", to: "lint" });
   });
 
-  test("`Go to step` with no target picked yet sets no fail target", () => {
-    // The step stops today: re-segmenting must not write `on_fail` naming the
-    // empty string, which the validator would refuse on a line nobody sees.
+  test("`Go to step` with no target picked yet writes the PENDING shape", () => {
+    // The step stops today: re-segmenting must leave the sheet able to draw the
+    // choice (an `on_fail` object exists), with the step still to be picked —
+    // which the validator refuses on Save until it is (`needs a step id`).
     const stopping = sheetModel({
       request: { kind: "step", id: "plan" },
       draft: DRAFT,
@@ -339,7 +489,7 @@ describe("refusals: the sheet never guesses", () => {
     }) as SheetModel;
     const { actions, calls } = spy();
     applySheetAction(actions, segmentAction(stopping, "then", "Go to step"));
-    expect(calls).toEqual([]);
+    expect(calls).toEqual(["setFail plan  "]);
   });
 
   test("a token cap that is not a positive whole number sends nothing", () => {

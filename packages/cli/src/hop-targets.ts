@@ -22,12 +22,13 @@ import type { PermissionBroker } from "@tentacle/core";
 import type { EngineEndpoint } from "@tentacle/docker";
 import type { HopSpec, HopWorkload } from "@tentacle/tui";
 import { workloadText } from "@tentacle/tui";
-import type { TentacleConfig } from "./config.ts";
+import { type TentacleConfig, networkValueProblem } from "./config.ts";
 import { WorkloadNotFoundError } from "./engine-host.ts";
 import type { EngineHost, EngineKind } from "./engine-host.ts";
 import { attachEngineRuntime, startEngineRuntime } from "./engine-runtime.ts";
 import {
   type KubeNamespace,
+  chooseNetwork,
   engineNoun,
   kubeNamespace,
   laptopWorkspaceInput,
@@ -301,6 +302,25 @@ async function containerTarget(
   if (engine === null) {
     return { kind: "failed", notice: "not moved: no docker or podman engine is set" };
   }
+  // feat/run-network D1, fix round 1 (review finding 1): this is the SECOND
+  // creator of a docker/podman container, and it must honour the SAME resolved
+  // network as `run` — a container built here on `bridge` while `network: none`
+  // is configured would silently claim a sandbox the owner asked for. A hop has
+  // no `--network` flag (D2: the network is fixed at create), so the resolution
+  // is env > profile/config; kubernetes cannot reach this factory (a pod is
+  // attach-only, decision 1) and `run` refuses a network there anyway. A
+  // malformed value is a refusal, never a silent drop — and BEFORE the mount
+  // gate asks anything or a container exists.
+  const network = chooseNetwork({
+    env: process.env.TENTACLE_NETWORK,
+    configured: config.network,
+  });
+  if (network !== undefined) {
+    const networkProblem = networkValueProblem(network);
+    if (networkProblem !== null) {
+      return { kind: "failed", notice: `not moved: ${networkProblem}` };
+    }
+  }
   const resolved = image ?? deps.defaultImage?.();
   if (resolved === undefined || resolved === "") {
     return {
@@ -365,6 +385,8 @@ async function containerTarget(
       // (`session-hop.docker.test.ts`): the file a shell call wrote inside the
       // container never appeared in the cwd.
       ...(plan.kind === "mount" ? { workspace: plan.mount } : {}),
+      // The network resolved above (`run`'s own precedence, minus the flag).
+      ...(network !== undefined ? { network } : {}),
       // Kept (D5): `resumeHint` + `recordKept` are the two halves of the `run`
       // shape — the engine keeps it, and `tentacle ps` lists it.
       resumeHint: (name) => `tentacle attach ${name}`,

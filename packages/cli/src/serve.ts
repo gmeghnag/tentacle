@@ -78,11 +78,13 @@ import { type ServeMcpOptions, buildMcp } from "./serve-mcp-server.ts";
 import { type RelayOptions, relayChoice } from "./serve-relay.ts";
 import { APP_VERSION } from "./version.ts";
 import {
+  type A2ACards,
   type SkillScan,
   type WiredAgent,
   buildAgent,
   createSkillScan,
   scheduleLimitsOf,
+  startA2ACards,
   sweepToolOutput,
   toolOutputStore,
 } from "./wiring.ts";
@@ -235,6 +237,8 @@ export function createServeAgent(
   mcpHub?: Pick<McpHub, "onBuilt">,
   /** The daemon's browser toolset (docs/feat/browser-inspect.md B4): `serve` is the user's own Mac. */
   browser?: BrowserToolset,
+  /** The `a2a` cards' snapshot this build freezes (docs/feat/a2a-client.md C5, owner decision (c)). */
+  a2aCards?: A2ACards,
 ): WiredAgent {
   const wired = buildAgent(
     { ...config, cwd: ctx.cwd },
@@ -264,7 +268,7 @@ export function createServeAgent(
       workflows: true,
       // Harness sub-agents (docs/feat/subagent-harness-runners.md D5, Owner A8):
       // `claude` on THIS host with its login. `tunnelledAgent` never passes this.
-      harnesses: {},
+      harnesses: a2aCards ? { a2aCards } : {},
       // The user's Chrome (browser-inspect B4, D5: every session of this Mac,
       // phone sessions included). `tunnelledAgent` (a pod) never passes this.
       ...(browser !== undefined ? { browser } : {}),
@@ -769,6 +773,10 @@ async function reloadedHost(
   const skillScan = createSkillScan(config); // The lock is held: this is THE daemon of the store. Silent, not awaited.
   sweepToolOutput(config);
   const images = daemonImagePolicy(config);
+  // Owner decision (c) (docs/feat/a2a-client.md C5): the `a2a` cards, read ONCE
+  // before the host (≤ 2 s; none configured ⇒ no wait), so a reloaded session's
+  // build reads them too.
+  const a2aCards = await startA2ACards(config);
   /**
    * The ONE hook every session reports to: the push notifier and the activity
    * notifier, in that order, each isolated. A throw from either is already
@@ -797,8 +805,20 @@ async function reloadedHost(
     maxDetachedSessions: options.maxDetachedSessions ?? DEFAULT_MAX_DETACHED_SESSIONS,
     ...(options.onAudit ? { onAudit: options.onAudit } : {}),
     // Each session gets its own agent, confined to the daemon's cwd.
-    createAgent: (cwd, ctx) =>
-      createServeAgent(config, options, skillScan, { ...ctx, cwd }, mcpHub, browserTools),
+    createAgent: (cwd, ctx) => {
+      const wired = createServeAgent(
+        config,
+        options,
+        skillScan,
+        { ...ctx, cwd },
+        mcpHub,
+        browserTools,
+        a2aCards.cards(),
+      );
+      // The NEXT build sees a card that changed (C5 «between sessions», one build late).
+      void a2aCards.refresh();
+      return wired;
+    },
     newSessionSkills: () => skillScan.newSession(),
     // `/mcp` (`mcp/status`): the connection set is daemon-wide, so this is the
     // right answer for every session on it (docs/feat/serve-mcp.md S2).

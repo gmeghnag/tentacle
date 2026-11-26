@@ -31,6 +31,26 @@ appId: so.tentacle.app
     id: "row-r2"
 - assertVisible:
     id: "turn-idle"
+# docs/feat/mobile-copy-text.md (item 8): a long-press on a message copies it
+# whole and the pill `✓ Copied · Select text` shows above the composer. Ids only
+# (RN's new architecture exposes no text to XCUITest, P9 in
+# docs/feat/mobile-session-view.md:170); `copy-flash-select` is what pins the
+# state to "Copied" — "No text to copy" and "Couldn't copy" offer no action.
+# `row-r2` is the seeded answer, `r2` per the fold's `r<seq>` keys
+# (`transcript.ts:197`), so its wrapper is `row-r2-copy`.
+# The pill's 2.5 s window starts at the RELEASE, not at the copy (D3): Maestro
+# holds a long press for 3 s, so a window counted from the copy would be spent
+# under the finger — the first gate run asserted exactly that and found nothing.
+- assertVisible:
+    id: "row-r2-copy"
+- longPressOn:
+    id: "row-r2-copy"
+- extendedWaitUntil:
+    visible:
+      id: "copy-flash"
+    timeout: 5000
+- assertVisible:
+    id: "copy-flash-select"
 # Leaving: the session screen has no back button since docs/feat/mobile-chrome.md
 # (its header is the drawer), and Maestro has no iOS edge swipe — so the flow
 # leaves the way a person does now, by switching to another session in the

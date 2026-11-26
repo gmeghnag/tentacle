@@ -79,8 +79,9 @@ describe("forward compatibility (docs/feat/protocol-v10-forward-compat.md)", () 
     expect(InitializeParamsSchema.safeParse(bad).success).toBe(false);
   });
 
-  test("the blocking set lives in ONE place: permission_request is its only member", () => {
-    expect([...BLOCKING_UPDATE_TYPES]).toEqual(["permission_request"]);
+  test("the blocking set lives in ONE place: a permission request and a remote question", () => {
+    // question_request: docs/feat/a2a-client.md C6 (declared + skip fallback).
+    expect([...BLOCKING_UPDATE_TYPES]).toEqual(["permission_request", "question_request"]);
   });
 
   test("clientSupportsUpdate: a declared list decides; no list = the v10 base set", () => {

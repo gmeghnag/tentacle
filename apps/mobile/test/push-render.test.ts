@@ -340,3 +340,22 @@ describe("vectors: one spec, two implementations (decision 20)", () => {
     }
   });
 });
+
+describe("a question push", () => {
+  test("is a plain Open (no quick actions): the answer is text, never an option", () => {
+    const ask: PushAsk = {
+      requestId: "req-q",
+      tool: "reviewer",
+      title: "reviewer asks",
+      options: [{ optionId: "skip", name: "Skip", kind: "reject_once" }],
+      question: { maxChars: 2000 },
+    };
+    expect(categoryFor(ask)).toBe(CATEGORY_OPEN);
+    // Mutation: drop the question guard -> a stray allow_once makes it Approve/Deny.
+    const withAllow = [
+      ...ask.options,
+      { optionId: "a", name: "Allow", kind: "allow_once" as const },
+    ];
+    expect(categoryFor({ ...ask, options: withAllow })).toBe(CATEGORY_OPEN);
+  });
+});

@@ -236,6 +236,14 @@ export function decideAction(deps: DecideDeps): ActionDecision {
     tool: clipPushText(ask.tool, PUSH_TOOL_MAX),
   } as const;
 
+  if (ask.question !== undefined) {
+    // A remote agent's question is answered with TEXT by its own method
+    // (`session/answer_question`), never by a banner action: a bare Deny here
+    // would go through `resolve_permission`, which the daemon refuses. The app
+    // opens the sheet in question mode instead.
+    return { do: "refuse", why: "no-option" };
+  }
+
   if (deps.actionId === "tentacle.approve") {
     if (!offers(message, "allow_once")) {
       return { do: "refuse", why: "no-option" };

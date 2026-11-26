@@ -327,17 +327,206 @@ describe("budget.wait (decision 3)", () => {
 });
 
 describe("verdicts", () => {
-  test("a child ending without step_verdict fails `no verdict`", async () => {
+  // docs/fix/workflow-no-verdict (a): ONE reminder turn, then the honest sentence.
+  const SENTENCE = "no verdict — the step ended without calling step_verdict";
+
+  test("a child ending without step_verdict is reminded ONCE, then fails `no verdict`", async () => {
+    let runs = 0;
     const { driver, host } = setup({
       approved: true,
       children: {
-        plan: async () => ({ report: "I think it works", toolUses: 0, stopReason: "end_turn" }),
+        plan: async () => {
+          runs += 1;
+          return { report: "I think it works", toolUses: 0, stopReason: "end_turn" };
+        },
       },
     });
     void driver.start({ name: "task", by: "user" });
     await flush();
-    expect(last(host.rows)?.steps[0]?.reason).toBe("no verdict");
+    // A model that did the work and merely forgot the tool gets one more chance.
+    expect(runs).toBe(2);
+    expect(last(host.rows)?.steps[0]?.reason).toBe(SENTENCE);
     expect(last(host.rows)?.state).toBe("error");
+  });
+
+  test("the reminder's verdict ends the step; both runs' tokens land in ONE sum", async () => {
+    let runs = 0;
+    const prompts: string[] = [];
+    const { driver, host } = setup({
+      approved: true,
+      text: YAML("  - id: plan\n    agent: { prompt_text: plan it }\n"),
+      children: {
+        plan: async (opts, controls) => {
+          runs += 1;
+          prompts.push(opts.prompt);
+          if (runs === 2) {
+            const tool = controls?.extraTools?.find((t) => t.name === "step_verdict");
+            await tool?.execute({ verdict: "pass", reason: "late" }, {} as ToolContext);
+          }
+          controls?.onEvent?.({ kind: "subagent_usage", promptTokens: 10, completionTokens: 5 });
+          return {
+            report: runs === 1 ? "did the work" : "verdict recorded",
+            toolUses: 0,
+            stopReason: "end_turn",
+          };
+        },
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(runs).toBe(2);
+    // The reminder says what to do, in words (it shares no history with run 1).
+    expect(prompts[1]).toContain("step_verdict");
+    expect(last(host.rows)?.steps[0]?.state).toBe("ok");
+    expect(last(host.rows)?.steps[0]?.reason).toBe("late");
+    expect(last(host.rows)?.tokens).toBe(30);
+    // The first run did the work: its report is the one the step keeps.
+    expect(host.entries.find((e) => e.type === "workflow_step")?.body.report).toBe("did the work");
+  });
+
+  test("a child that hit its token budget is NOT reminded (its last report is tool-free)", async () => {
+    let runs = 0;
+    const { driver, host } = setup({
+      approved: true,
+      children: {
+        plan: async () => {
+          runs += 1;
+          return { report: "r", toolUses: 0, stopReason: "max_token_budget" };
+        },
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(runs).toBe(1);
+    expect(last(host.rows)?.state).toBe("stopped");
+    expect(last(host.rows)?.stopReason).toBe("budget");
+  });
+
+  test("the reminder gets the step's REMAINING budget, never its full one again", async () => {
+    const caps: (number | undefined)[] = [];
+    const { driver } = setup({
+      approved: true,
+      text: YAML("  - id: plan\n    agent: { prompt_text: p, tokens: 100 }\n"),
+      children: {
+        plan: async (_o, controls) => {
+          caps.push(controls?.maxTokens);
+          if (caps.length === 1) {
+            controls?.onEvent?.({ kind: "subagent_usage", promptTokens: 40, completionTokens: 20 });
+            return { report: "nearly", toolUses: 0, stopReason: "end_turn" };
+          }
+          const tool = controls?.extraTools?.find((t) => t.name === "step_verdict");
+          await tool?.execute({ verdict: "pass", reason: "now" }, {} as ToolContext);
+          return { report: "done", toolUses: 0, stopReason: "end_turn" };
+        },
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(caps).toEqual([100, 40]);
+  });
+
+  test("a step whose budget is already spent is not reminded", async () => {
+    let runs = 0;
+    const { driver, host } = setup({
+      approved: true,
+      text: YAML("  - id: plan\n    agent: { prompt_text: p, tokens: 10 }\n"),
+      children: {
+        plan: async (_o, controls) => {
+          runs += 1;
+          controls?.onEvent?.({ kind: "subagent_usage", promptTokens: 10, completionTokens: 5 });
+          return { report: "r", toolUses: 0, stopReason: "end_turn" };
+        },
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(runs).toBe(1);
+    expect(last(host.rows)?.steps[0]?.state).toBe("error");
+    expect(last(host.rows)?.steps[0]?.reason).toBe(SENTENCE);
+  });
+
+  // The reminder's cap is the REMAINDER, so its hitting it is an artefact of the
+  // plan, not the step's budget: run 1 did NOT hit the cap, so the honest outcome
+  // is the step's own `no verdict` (docs/fix/workflow-no-verdict, Review round 1).
+  test("a reminder that runs out of the REMAINDER fails `no verdict`, never `budget`", async () => {
+    let runs = 0;
+    const { driver, host } = setup({
+      approved: true,
+      text: YAML("  - id: plan\n    agent: { prompt_text: p, tokens: 100 }\n"),
+      children: {
+        plan: async (_o, controls) => {
+          runs += 1;
+          controls?.onEvent?.({ kind: "subagent_usage", promptTokens: 40, completionTokens: 20 });
+          // Run 1 answers in prose («PASS»); the reminder (cap 40) burns it all.
+          return {
+            report: runs === 1 ? "PASS" : "PASS again",
+            toolUses: 0,
+            stopReason: runs === 1 ? "end_turn" : "max_token_budget",
+          };
+        },
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(runs).toBe(2);
+    const row = last(host.rows);
+    expect(row?.steps[0]?.state).toBe("error");
+    expect(row?.steps[0]?.reason).toBe(SENTENCE);
+    // NOT the run-level `budget` stop, which hides the cause and skips the edges.
+    expect(row?.state).toBe("error");
+    expect(row?.stopReason).toBeUndefined();
+  });
+
+  test("that `no verdict` still goes through `retry` (the run is not stopped `budget`)", async () => {
+    let runs = 0;
+    const { driver, host } = setup({
+      approved: true,
+      text: YAML("  - id: plan\n    agent: { prompt_text: p, tokens: 100 }\n    retry: 1\n"),
+      children: {
+        plan: async (_o, controls) => {
+          runs += 1;
+          controls?.onEvent?.({ kind: "subagent_usage", promptTokens: 40, completionTokens: 20 });
+          return {
+            report: "PASS",
+            toolUses: 0,
+            stopReason: runs % 2 === 1 ? "end_turn" : "max_token_budget",
+          };
+        },
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    // Poll the condition the asserts read; a fixed number of ticks would be a wait.
+    for (let i = 0; i < 400 && runs < 4; i++) {
+      await flush();
+    }
+    // Two attempts (the first run + its capped reminder) = the step was retried.
+    expect(runs).toBe(4);
+    expect(last(host.rows)?.steps[0]?.reason).toBe(SENTENCE);
+    expect(last(host.rows)?.steps[0]?.attempt).toBe(1);
+  });
+
+  test("a cancelled run is not reminded: its outcome is already decided", async () => {
+    let runs = 0;
+    let release: (() => void) | undefined;
+    const { driver, host } = setup({
+      approved: true,
+      children: {
+        plan: async () => {
+          runs += 1;
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          return { report: "cut", toolUses: 0, stopReason: "cancelled" };
+        },
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    driver.stop("wf-1");
+    release?.();
+    await flush();
+    expect(runs).toBe(1);
+    expect(last(host.rows)?.stopReason).toBe("cancelled");
   });
 
   test("an invalid verdict is a tool error to the child; the first valid one wins", async () => {
@@ -1033,6 +1222,154 @@ describe("the approval shows every command, verbatim (docs/fix/workflow-approve-
     await flush();
     const ask = broker.asks.find((a) => a.req.title.includes("Merge it"));
     expect(ask?.req.detail).toBe(detail);
+  });
+});
+
+// docs/fix/mobile-ask-surfaces.md S1b: the ask says WHERE it comes from, as
+// structure (name, run, step, N of M) instead of leaving every surface to parse
+// `agent.description`/`id`. Only the driver knows the step's position.
+describe("the ask's structured workflow origin (S1b)", () => {
+  const askShell = async (
+    o: SubagentRunOptions,
+    c: SubagentRunControls | undefined,
+    ask: PermissionRequester,
+  ): Promise<PermissionResponse> =>
+    ask(
+      { tool: "shell", level: "ask", title: "Run", input: {} },
+      { agent: { type: "explore", description: o.description, id: c?.agentId ?? "" } },
+    );
+
+  test("an agent step's ask carries name, run, step, index and count — and keeps the child's own agent label", async () => {
+    // Mutation: drop the `workflow` from `stepRequester`'s options → absent here.
+    const { driver, broker } = setup({
+      approved: true,
+      children: {
+        exec: async (o, c, ask) => {
+          await askShell(o, c, ask);
+          return says("pass")(o, c, ask);
+        },
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    const shell = broker.asks.find((a) => a.req.tool === "shell");
+    expect(shell?.options?.workflow).toEqual({
+      name: "task",
+      runId: "wf-1",
+      stepId: "exec",
+      index: 1,
+      count: 2,
+    });
+    // The transition's fallback: the child's `agent` survives beside the origin.
+    expect(shell?.options?.agent).toEqual({
+      type: "explore",
+      description: "task/exec",
+      id: "wf-1.exec",
+    });
+    shell?.answer({ allowed: true, scope: "once" });
+    await flush();
+  });
+
+  test("the origin OVERRIDES a workflow the child tried to set: a step cannot claim another's", async () => {
+    // Mutation: `workflow: options?.workflow ?? workflow` → the forged one wins.
+    const { driver, broker } = setup({
+      approved: true,
+      children: {
+        exec: async (o, c, ask) => {
+          await ask(
+            { tool: "shell", level: "ask", title: "Run", input: {} },
+            {
+              agent: { type: "general", description: "d", id: c?.agentId ?? "" },
+              workflow: { name: "other", runId: "wf-9", stepId: "x", index: 0, count: 9 },
+            },
+          );
+          return says("pass")(o, c, ask);
+        },
+      },
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    const shell = broker.asks.find((a) => a.req.tool === "shell");
+    expect(shell?.options?.workflow).toEqual({
+      name: "task",
+      runId: "wf-1",
+      stepId: "exec",
+      index: 1,
+      count: 2,
+    });
+    shell?.answer({ allowed: true, scope: "once" });
+    await flush();
+  });
+
+  test("a run step's ask says the same, and a later step says its own N", async () => {
+    // Mutation: `index: 0` instead of the step's position → both asks say `1 of 2`.
+    const t = setup({
+      approved: true,
+      text: YAML("  - id: gate\n    run: bun run lint\n  - id: after\n    run: bun run build\n"),
+    });
+    const driver = new WorkflowDriver({
+      ...t.deps,
+      commands: {
+        authorize: async (command, requester) => {
+          const r = await requester({ tool: "shell", level: "ask", title: command, input: {} });
+          return r.allowed ? { allowed: true, command } : { allowed: false, reason: "denied" };
+        },
+        exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      },
+    });
+    driver.bind(noopHost());
+    t.broker.auto = () => ({ allowed: true, scope: "once" });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    expect(
+      t.broker.asks.filter((a) => a.req.tool === "shell").map((a) => a.options?.workflow),
+    ).toEqual([
+      { name: "task", runId: "wf-1", stepId: "gate", index: 0, count: 2 },
+      { name: "task", runId: "wf-1", stepId: "after", index: 1, count: 2 },
+    ]);
+  });
+
+  test("an approve step's ask carries its own step and position", async () => {
+    const { driver, broker } = setup({
+      approved: true,
+      text: YAML("  - id: merge\n    approve: { title: Merge it }\n"),
+    });
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    const merge = broker.asks.find(
+      (a) => a.req.kind === "workflow_approve" && a.req.title === "Merge it",
+    );
+    expect(merge?.options?.workflow).toEqual({
+      name: "task",
+      runId: "wf-1",
+      stepId: "merge",
+      index: 0,
+      count: 1,
+    });
+    merge?.answer({ allowed: true });
+    await flush();
+  });
+
+  test("the run's HASH approval carries the run, no step and no position", async () => {
+    // Mutation: give the hash approval a `stepId` (e.g. the first step) → red.
+    const { driver, broker } = setup();
+    void driver.start({ name: "task", by: "user" });
+    await flush();
+    const hash = broker.asks[0];
+    expect(hash?.req.kind).toBe("workflow_approve");
+    expect(hash?.options?.workflow).toEqual({ name: "task", runId: "wf-1" });
+    hash?.answer({ allowed: true });
+    await flush();
+  });
+
+  test("a SCHEDULE's approval carries the name only: it has no run", async () => {
+    // Mutation: give it the run id of the last run → a label for a run that is not it.
+    const t = setup();
+    const pending = t.driver.requestApproval("task");
+    await flush();
+    expect(t.broker.asks[0]?.options?.workflow).toEqual({ name: "task" });
+    t.broker.asks[0]?.answer({ allowed: true });
+    expect(await pending).toBe(true);
   });
 });
 

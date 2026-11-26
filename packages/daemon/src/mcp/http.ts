@@ -11,6 +11,7 @@
  * `progressToken`: `text/event-stream`, a `notifications/progress` every 15 s,
  * then the result. A client disconnect ends only that wait.
  */
+import { describePeer } from "../external/peer.ts";
 import {
   EXTERNAL_MAX_BODY_BYTES,
   type ExternalCaller,
@@ -81,12 +82,12 @@ export function createMcpRoute(options: McpHttpOptions): ExternalRoute {
   const post = async (req: Request, srv: TimeoutServer): Promise<Response> => {
     // A browser page never drives the route (the MCP spec's code: 403, before auth).
     if (req.headers.get("origin") !== null) {
-      options.onAudit?.("mcp-origin-refused");
+      options.onAudit?.(`mcp-origin-refused ${describePeer(req, srv)}`);
       return new Response("forbidden", { status: 403 });
     }
     const caller = authenticateCaller(req, options.callers);
     if (caller === null) {
-      options.onAudit?.("mcp-auth-failure");
+      options.onAudit?.(`mcp-auth-failure ${describePeer(req, srv)}`);
       return new Response("unauthorized", {
         status: 401,
         headers: { "www-authenticate": "Bearer" },

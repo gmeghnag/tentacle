@@ -7,7 +7,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { ComputerRow } from "../src/computer-rows.ts";
-import { type DrawerSource, drawerList, drawerTitle } from "../src/drawer-list.ts";
+import { type DrawerSource, drawerList, drawerTitle, rowMarks } from "../src/drawer-list.ts";
 import type { SessionRow } from "../src/session-list.ts";
 
 function row(sessionId: string, over: Partial<SessionRow> = {}): SessionRow {
@@ -18,6 +18,8 @@ function row(sessionId: string, over: Partial<SessionRow> = {}): SessionRow {
     subtitle: "3m ago",
     badges: [],
     wakes: 0,
+    asks: 0,
+    workflows: 0,
     archived: false,
     running: false,
     attached: 0,
@@ -288,5 +290,51 @@ describe("the drawer row's folder line (docs/feat/mobile-header-status.md)", () 
   test("an empty cwd is no folder line", () => {
     const list = drawerList(source([row("r1", { cwd: "" })]), options);
     expect(list.recent.map((r) => r.folder)).toEqual([""]);
+  });
+});
+
+describe("rowMarks (mobile-ask-surfaces S7b)", () => {
+  const none = { asks: 0, workflows: 0, wakes: 0 };
+  test("absent / zero counts draw no glyph", () => {
+    expect(rowMarks(none, false)).toEqual({ ask: false, workflow: false, wake: false });
+  });
+  test("each count lights only its own glyph", () => {
+    expect(rowMarks({ ...none, asks: 2 }, false)).toEqual({
+      ask: true,
+      workflow: false,
+      wake: false,
+    });
+    expect(rowMarks({ ...none, workflows: 1 }, false)).toEqual({
+      ask: false,
+      workflow: true,
+      wake: false,
+    });
+    expect(rowMarks({ ...none, wakes: 3 }, false)).toEqual({
+      ask: false,
+      workflow: false,
+      wake: true,
+    });
+  });
+  test("the open session's local ask wins over a stale asks: 0", () => {
+    expect(rowMarks(none, true).ask).toBe(true);
+  });
+  test("drawerList: local ask marks ONLY the current row", () => {
+    const list = drawerList(source([row("a"), row("b")]), {
+      currentId: "b",
+      archivedOpen: null,
+      currentAsking: true,
+    });
+    expect(list.recent.map((r) => [r.id, r.marks.ask])).toEqual([
+      ["a", false],
+      ["b", true],
+    ]);
+  });
+  test("drawerList: daemon counts reach the row marks", () => {
+    const list = drawerList(source([row("a", { asks: 1, workflows: 2, wakes: 1 }), row("b")]), {
+      currentId: null,
+      archivedOpen: null,
+    });
+    expect(list.recent[0]?.marks).toEqual({ ask: true, workflow: true, wake: true });
+    expect(list.recent[1]?.marks).toEqual({ ask: false, workflow: false, wake: false });
   });
 });

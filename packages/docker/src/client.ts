@@ -35,6 +35,31 @@ import type {
 export const MAX_API = "1.52";
 export const MIN_API = "1.41";
 
+/**
+ * A `POST /containers/create` the engine refused, CLASSIFIED (feat/run-network
+ * D5): `image` — the image is missing (the caller pulls and retries once);
+ * `network` — the `HostConfig.NetworkMode` names no network this engine knows
+ * (the caller must NOT pull: the image is not the problem). Anything else stays
+ * the engine's own `DockerApiError`.
+ */
+export class ContainerCreateError extends Error {
+  constructor(
+    readonly container: string,
+    readonly reason: "image" | "network",
+    readonly engineMessage: string,
+  ) {
+    super(
+      reason === "network"
+        ? `cannot create container ${container}: ${engineMessage} — check the network name (or \`docker network create <name>\`)`
+        : `cannot create container ${container}: ${engineMessage} — pull the image or check its name`,
+    );
+    this.name = "ContainerCreateError";
+  }
+}
+
+/** Docker's and Podman's wording for a `NetworkMode` that names nothing. */
+const NETWORK_NOT_FOUND = /network .* not found|no such network/i;
+
 export interface DockerClientOptions {
   readonly dial: Dialer;
   /** Human label for errors, e.g. `context "desktop-linux" (unix:///…/docker.sock)`. */
@@ -267,11 +292,17 @@ export class DockerClient {
       },
       signal ? { signal } : {},
     );
-    if (res.status === 404) {
+    if (res.status !== 201) {
       const err = apiError(res);
-      throw new Error(
-        `cannot create container ${name}: ${err.engineMessage} — pull the image or check its name`,
-      );
+      // The ORDER matters: docker answers an unknown network with a 404 too, and
+      // a 404 must not be read as "no such image" (which pulls over the network).
+      if (NETWORK_NOT_FOUND.test(err.engineMessage)) {
+        throw new ContainerCreateError(name, "network", err.engineMessage);
+      }
+      if (res.status === 404) {
+        throw new ContainerCreateError(name, "image", err.engineMessage);
+      }
+      throw err;
     }
     const created = json<{ Id: string; Warnings?: string[] | null }>(this.expect(res, [201]));
     return { id: created.Id, warnings: created.Warnings ?? [] };

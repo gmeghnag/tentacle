@@ -139,6 +139,9 @@ import {
   type PermissionRequestUpdate,
   type PromptContentBlock,
   type PromptResult,
+  QUESTION_ANSWER_OPTION,
+  QUESTION_SKIP_OPTION,
+  type QuestionRequestUpdate,
   type QueueState,
   type QueuedEntry,
   type ReturnedEntry,
@@ -206,7 +209,7 @@ import {
   toWireCapabilities,
   wireLine,
 } from "./mapping.ts";
-import { outcomeToResponse, toPermissionRequestUpdate } from "./permission-map.ts";
+import { QUESTION_OPTIONS, outcomeToResponse, toAskUpdate } from "./permission-map.ts";
 import {
   type ClearForkCapture,
   type DaemonLogCapture,
@@ -228,7 +231,7 @@ import {
 } from "./schedules-view.ts";
 import { forkableMessages } from "./session-fork.ts";
 import type { ImagePolicy, WorkloadShellsLike } from "./session-host.ts";
-import type { SessionSummary } from "./session-list.ts";
+import { type SessionSummary, liveRunCount } from "./session-list.ts";
 import { type LogBase, SessionLog, replayFromBase } from "./session-log.ts";
 import type { SessionPersister } from "./session-persister.ts";
 import type { SessionLiveness } from "./session-reaper.ts";
@@ -319,10 +322,21 @@ export interface Attachment {
   readonly timeZone?: string;
 }
 
+/**
+ * What an ask is streamed as: a permission request, or a remote agent's
+ * question (docs/feat/a2a-client.md C6) — one ask machine, two blocking types.
+ */
+type AskUpdate = PermissionRequestUpdate | QuestionRequestUpdate;
+
+/** The blocking update type an ask of `req`'s kind is raised as. */
+function askTypeOf(req: PermissionRequest): AskUpdate["type"] {
+  return req.kind === "question" ? "question_request" : "permission_request";
+}
+
 /** A permission request waiting for its first answer (keyed by its nonce). */
 interface PendingAsk {
   /** The request as it was streamed: what a fresh watcher's `state.pending` repeats. */
-  readonly update: PermissionRequestUpdate;
+  readonly update: AskUpdate;
   /**
    * The request the ask was raised FOR, laptop-side (`autoAnswers` reads its
    * `kind`/`hopAuto`, which the wire update does not carry).
@@ -349,7 +363,7 @@ interface PendingAsk {
    * right after every `history_replaced`, because the parent keeps committing
    * (the cut moves past it) and a barrier withdraws what nothing re-offers.
    */
-  readonly reoffer?: PermissionRequestUpdate;
+  readonly reoffer?: AskUpdate;
   /** Streamed to the clients yet (only once its record is durable). */
   shown: boolean;
   /**
@@ -557,6 +571,8 @@ type UpdateOf<K extends SessionUpdate["type"]> = Extract<SessionUpdate, { type: 
 export type PushWatchedUpdate =
   | UpdateOf<"permission_request">
   | UpdateOf<"permission_resolved">
+  // A remote agent's question (docs/feat/a2a-client.md C6): pushed as an ask.
+  | UpdateOf<"question_request">
   | UpdateOf<"turn_end">
   | UpdateOf<"session_closed">
   // Task 18's Live Activity needs three more (docs/feat/mobile-live-activity.md
@@ -1567,17 +1583,20 @@ export class HostedSession {
     // flight, AGAIN when it is shown (the `persisted().then` below: fix round 1,
     // R1). Deciding only here left an ask shown to a client that cannot display
     // it and this host no longer answers, waiting forever.
+    // A remote agent's question is its own blocking type (docs/feat/a2a-client.md
+    // C6): raised, shown and re-checked against `question_request`.
+    const askType = askTypeOf(req);
     const unsupported = this.autoAnswers(req, this.activeTurnId ?? undefined)
       ? undefined
-      : this.blockingUnsupported("permission_request");
+      : this.blockingUnsupported(askType);
     if (unsupported !== undefined) {
       return Promise.resolve({ allowed: false, reason: unsupported });
     }
     const requestId = crypto.randomUUID();
     const toolCallId = options?.toolCallId || undefined;
-    const asked = this.askedOn();
-    const update = {
-      ...toPermissionRequestUpdate(requestId, toolCallId ?? "pending", req, options?.agent),
+    const asked = this.askedOn(askType);
+    const update: AskUpdate = {
+      ...toAskUpdate(requestId, toolCallId ?? "pending", req, options?.agent, options?.workflow),
       ...(asked !== undefined ? { askedOn: asked } : {}),
     };
     // The asking call's group head (a call alone: itself), kept with the entry:
@@ -1586,13 +1605,10 @@ export class HostedSession {
     const record: PendingPermission = {
       toolCallId: toolCallId ?? "",
       tool: req.tool,
-      resumable: classifyPending(
-        this.session.messages,
-        toolCallId,
-        options?.origin,
-        req.tool,
-        groupStart,
-      ),
+      // A question is never resumable: a restart ends the asking child anyway.
+      resumable:
+        req.kind !== "question" &&
+        classifyPending(this.session.messages, toolCallId, options?.origin, req.tool, groupStart),
       requestedAt: this.now(),
       ...(groupStart !== undefined ? { groupStart } : {}),
     };
@@ -1623,7 +1639,7 @@ export class HostedSession {
       // Otherwise the ask is shown to a client that cannot display it — and this
       // host no longer answers it — so it waits forever (fix round 1, R1).
       if (!this.autoAnswers(ask.req, ask.turnId)) {
-        const reason = this.blockingUnsupported("permission_request");
+        const reason = this.blockingUnsupported(askType);
         if (reason !== undefined) {
           this.settle(requestId, { outcome: "cancelled" }, reason);
           return;
@@ -1679,12 +1695,12 @@ export class HostedSession {
    */
   private registerAsk(
     requestId: string,
-    update: PermissionRequestUpdate,
+    update: AskUpdate,
     record: PendingPermission | null,
     signal: AbortSignal,
     req: PermissionRequest,
     turnId: string | undefined,
-    reoffer?: PermissionRequestUpdate,
+    reoffer?: AskUpdate,
   ): Promise<{ outcome: PermissionOutcome; reason?: string; message?: string }> {
     return new Promise((resolve) => {
       const onAbort = (): void => this.settle(requestId, { outcome: "cancelled" });
@@ -1692,11 +1708,19 @@ export class HostedSession {
         update,
         req,
         ...(turnId !== undefined ? { turnId } : {}),
-        offered: new Set(update.options.map((o) => o.optionId)),
+        // A question settles only through `answerQuestion`, by its own two
+        // internal options; its text rides the `answer` one.
+        offered: new Set(
+          update.type === "question_request"
+            ? QUESTION_OPTIONS
+            : update.options.map((o) => o.optionId),
+        ),
         replyable: new Set(
-          update.reply
-            ? update.options.filter((o) => o.kind.startsWith("reject_")).map((o) => o.optionId)
-            : [],
+          update.type === "question_request"
+            ? [QUESTION_ANSWER_OPTION]
+            : update.reply
+              ? update.options.filter((o) => o.kind.startsWith("reject_")).map((o) => o.optionId)
+              : [],
         ),
         record,
         ...(reoffer ? { reoffer } : {}),
@@ -1728,21 +1752,33 @@ export class HostedSession {
     options: PermissionRequestOptions,
     agentId: string,
   ): Promise<PermissionResponse> {
-    const signal = options.signal;
+    // The child's signal, or the ASKER's own withdrawal (a remote question that
+    // lost a `both` race, docs/feat/a2a-client.md C6): either settles it.
+    const signal =
+      options.signal && options.withdraw
+        ? anySignal([options.signal, options.withdraw])
+        : options.signal;
     if (this.closed || !signal || signal.aborted) {
       return Promise.resolve(outcomeToResponse({ outcome: "cancelled" }));
     }
     const requestId = crypto.randomUUID();
     const spawnTurn = this.spawnTurns.get(agentId);
+    const askType = askTypeOf(req);
     const unsupported = this.autoAnswers(req, spawnTurn)
       ? undefined
-      : this.blockingUnsupported("permission_request");
+      : this.blockingUnsupported(askType);
     if (unsupported !== undefined) {
       return Promise.resolve({ allowed: false, reason: unsupported });
     }
-    const asked = this.askedOn();
-    const update: PermissionRequestUpdate = {
-      ...toPermissionRequestUpdate(requestId, options.toolCallId || "pending", req, options.agent),
+    const asked = this.askedOn(askType);
+    const update: AskUpdate = {
+      ...toAskUpdate(
+        requestId,
+        options.toolCallId || "pending",
+        req,
+        options.agent,
+        options.workflow,
+      ),
       ...(spawnTurn !== undefined ? { turnId: spawnTurn } : {}),
       ...(asked !== undefined ? { askedOn: asked } : {}),
     };
@@ -1758,6 +1794,9 @@ export class HostedSession {
     }
     this.autoAnswer(requestId);
     return decided.then(({ outcome, reason, message }) => {
+      if (outcome.outcome === "cancelled" && options.withdraw?.aborted) {
+        return DISMISSED;
+      }
       if (reason !== undefined) {
         return { allowed: false, reason };
       }
@@ -1809,13 +1848,13 @@ export class HostedSession {
    * nobody named a host — an older client, or a pod-side one, which never sends
    * one.
    */
-  private askedOn(): string[] | undefined {
+  private askedOn(type: AskUpdate["type"] = "permission_request"): string[] | undefined {
     const labels: string[] = [];
     for (const attachment of this.attachments) {
       if (attachment.host === undefined) continue;
       // Only a client that can actually be shown this ask is a sibling it would
       // be raised to; an older one takes the fallback and is never asked.
-      if (!clientSupportsUpdate(attachment.updates, "permission_request")) continue;
+      if (!clientSupportsUpdate(attachment.updates, type)) continue;
       if (!labels.includes(attachment.host)) labels.push(attachment.host);
     }
     return labels.length === 0 ? undefined : labels;
@@ -1827,16 +1866,17 @@ export class HostedSession {
    * with the reason — instead of waiting on a client that cannot show it.
    */
   private recheckAsks(): void {
-    const reason = this.blockingUnsupported("permission_request");
-    if (reason === undefined) {
-      return;
-    }
     for (const requestId of [...this.asks.keys()]) {
+      const ask = this.asks.get(requestId);
+      if (!ask) continue;
+      // Each ask against ITS blocking type: a permission request and a remote
+      // question (docs/feat/a2a-client.md C6) are declared separately.
+      const reason = this.blockingUnsupported(ask.update.type);
+      if (reason === undefined) continue;
       // An ask this host ANSWERS itself needs no client: `blockingUnsupported`
       // is asked about the set, not about that one ask (docs/fix/
       // serve-autoaccept-unattended.md OD5).
-      const ask = this.asks.get(requestId);
-      if (ask && this.autoAnswers(ask.req, ask.turnId)) continue;
+      if (this.autoAnswers(ask.req, ask.turnId)) continue;
       this.settle(requestId, { outcome: "cancelled" }, reason);
     }
   }
@@ -1910,6 +1950,14 @@ export class HostedSession {
       }
       throw new RpcError(DomainErrorCode.PermissionNotPending, "permission request not pending");
     }
+    // A question is answered only by `session/answer_question`: its internal
+    // options are never a permission option (docs/feat/a2a-client.md C6).
+    if (ask.update.type === "question_request") {
+      throw new RpcError(
+        JsonRpcErrorCode.InvalidParams,
+        "a question is answered with session/answer_question",
+      );
+    }
     if (!ask.offered.has(optionId)) {
       throw new RpcError(JsonRpcErrorCode.InvalidParams, "option not offered for this request");
     }
@@ -1921,6 +1969,36 @@ export class HostedSession {
     }
     this.answered.remember(requestId, { optionId, message });
     this.settle(requestId, { outcome: "selected", optionId }, undefined, message);
+  }
+
+  /**
+   * `session/answer_question` (docs/feat/a2a-client.md C6): answer a remote
+   * agent's pending question with `answer`, or skip it (no `answer`). The SAME
+   * first-wins machine as `resolvePermission`: synchronous, `permission_resolved`
+   * before the asker wakes, an identical re-send after a link drop is a success
+   * with no effect, anything else not pending → `PermissionNotPending`. A
+   * permission request named here → `InvalidParams`, and it STAYS pending.
+   */
+  answerQuestion(requestId: string, answer?: string): void {
+    const optionId = answer !== undefined ? QUESTION_ANSWER_OPTION : QUESTION_SKIP_OPTION;
+    const ask = this.asks.get(requestId);
+    if (!ask) {
+      if (this.answered.isRepeat(requestId, { optionId, message: answer })) {
+        return;
+      }
+      throw new RpcError(DomainErrorCode.PermissionNotPending, "question not pending");
+    }
+    if (ask.update.type !== "question_request") {
+      throw new RpcError(
+        JsonRpcErrorCode.InvalidParams,
+        "a permission request is answered with session/resolve_permission",
+      );
+    }
+    if (answer !== undefined && answer.length > ask.update.maxChars) {
+      throw new RpcError(JsonRpcErrorCode.InvalidParams, "answer longer than the question allows");
+    }
+    this.answered.remember(requestId, { optionId, message: answer });
+    this.settle(requestId, { outcome: "selected", optionId }, undefined, answer);
   }
 
   /**
@@ -2375,6 +2453,11 @@ export class HostedSession {
         (this.agentRuntime?.list().length ?? 0),
       // A count, only where the session schedules (docs/feat/cron-tool.md D5).
       ...(this.scheduling ? { schedules: this.scheduleTable.length } : {}),
+      // Unanswered asks right now (docs/fix/mobile-ask-surfaces.md D5): the
+      // drawer's `hand.raised`. Always a number on a live session — 0 is a fact.
+      asks: this.asks.size,
+      // Runs live or waiting on the user; absent where this host runs none.
+      ...(this.workflows ? { workflows: liveRunCount(this.lastWorkflows) } : {}),
       ...(this.pinnedAt !== undefined ? { pinnedAt: this.pinnedAt } : {}),
     };
   }
@@ -3431,6 +3514,7 @@ export class HostedSession {
     if (
       update.type !== "permission_request" &&
       update.type !== "permission_resolved" &&
+      update.type !== "question_request" &&
       update.type !== "turn_end" &&
       update.type !== "session_closed" &&
       // Task 18 (L7): the Live Activity's three extra kinds. Widening this filter

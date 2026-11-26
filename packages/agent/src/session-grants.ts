@@ -95,6 +95,18 @@ export class SessionGrants {
     this.grantedTools.clear();
     this.shellPrefixes.length = 0;
     this.workloadPrefixes.clear();
+    for (const listener of this.clearListeners) listener();
+  }
+
+  private readonly clearListeners = new Set<() => void>();
+
+  /**
+   * Something else the user approved for THIS session goes with its approvals:
+   * the remote agents the model proposed (docs/feat/a2a-client.md C11). A
+   * settings rebuild keeps the store (`AgentReuse.grants`), so it keeps them too.
+   */
+  onClear(listener: () => void): void {
+    this.clearListeners.add(listener);
   }
 
   /** Persist a session-scoped approval as the narrowest applicable rule. */

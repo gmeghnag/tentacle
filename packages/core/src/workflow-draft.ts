@@ -249,7 +249,10 @@ export function insertStep(
 /**
  * The `✗` port dropped on a step: `on_fail: {goto, max}`. Dropping it on itself
  * is refused (the mockup's own words — a self-goto is what `retry:` is for).
- * `"stop"` removes the key, so a default never lands in the file.
+ * `"stop"` removes the key, so a default never lands in the file. `""` is the
+ * PENDING target the phone's `Then`→`Go to step` writes before a step is picked
+ * (`{goto: "", max}`): a shape the sheet can draw, which no file can hold — the
+ * validator refuses it (`needs a step id`) and a save needs a clean draft.
  */
 export function setFailTarget(
   draft: WorkflowDraft,
@@ -266,7 +269,7 @@ export function setFailTarget(
     if (target === id) {
       return refusal(draft, "itself — use Retry");
     }
-    if (!idsOf(steps).includes(target)) {
+    if (target !== "" && !idsOf(steps).includes(target)) {
       return refusal(draft, noStep(target));
     }
   }

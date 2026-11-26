@@ -97,6 +97,36 @@ export function engineNoun(kind: EngineKind): "pod" | "container" {
 }
 
 /**
+ * `run --network`: flag > env (`TENTACLE_NETWORK`) > configured (profile/file) >
+ * absent, mirroring `chooseEngine` (`""` from the env is unset, as an empty
+ * `TENTACLE_ENGINE` is). No validation here: the value's SHAPE is one rule,
+ * `networkValueProblem` in `@tentacle/config` (which the loader and the CLI both
+ * ask) — see feat/run-network D3.
+ */
+export function chooseNetwork(input: {
+  readonly flag?: string | undefined;
+  readonly env?: string | undefined;
+  readonly configured?: string | undefined;
+}): string | undefined {
+  if (input.flag !== undefined) {
+    return input.flag;
+  }
+  if (input.env !== undefined && input.env !== "") {
+    return input.env;
+  }
+  return input.configured;
+}
+
+/**
+ * A network with `--engine kubernetes` (feat/run-network D1): ALWAYS an error,
+ * whatever its source — a pod's network is the cluster's, and silently ignoring
+ * `network: none` would falsely claim a sandbox.
+ */
+export function networkOnKubernetes(kind: EngineKind, network: string | undefined): boolean {
+  return kind === "kubernetes" && network !== undefined;
+}
+
+/**
  * An engine-specific flag given for the wrong engine → the usage error (the
  * strict-args rule: never silently ignored), else `null`.
  */

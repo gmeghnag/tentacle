@@ -17,7 +17,7 @@ import { loadConfig } from "@tentacle/config";
 import type { ChatRequest, ModelProvider, StreamEvent } from "@tentacle/core";
 import { McpClient, createStreamableHttpTransport } from "@tentacle/mcp";
 import { ARGS, parseArgs, resolveMcpToken } from "../src/flags.ts";
-import { mcpAddHint, parseMcpAsks } from "../src/serve-mcp-server.ts";
+import { hintUrl, mcpAddHint, parseMcpAsks } from "../src/serve-mcp-server.ts";
 import { type ServeOptions, startDaemon } from "../src/serve.ts";
 
 const TOKEN = "mcp-secret";
@@ -145,6 +145,28 @@ describe("flags", () => {
     const hint = mcpAddHint("http://127.0.0.1:4000");
     expect(hint).toContain("http://127.0.0.1:4000/mcp");
     expect(hint).toContain("Bearer <token>");
+  });
+
+  // A wildcard bind serves loopback, so the hint must name loopback: no MCP client
+  // can dial `0.0.0.0`. Mutation: return the input unchanged → the wildcard cases go red.
+  test("hintUrl: a wildcard bind becomes a URL a client can dial", () => {
+    expect(hintUrl("http://0.0.0.0:4001")).toBe("http://127.0.0.1:4001");
+    expect(hintUrl("http://[::]:4001")).toBe("http://[::1]:4001");
+    // A bare v6 bind is what `--host ::` actually composes (`ws://:::4001`): `URL`
+    // refuses it unbracketed, so the hint must bracket the host first. Mutation:
+    // parse the string as given (`bare = serverUrl`) → these three return their
+    // undialable input → red.
+    expect(hintUrl("ws://:::4001")).toBe("ws://[::1]:4001");
+    expect(hintUrl("http://:::4001")).toBe("http://[::1]:4001");
+    expect(hintUrl("http://::1:4001")).toBe("http://[::1]:4001");
+    expect(hintUrl("https://0.0.0.0:443")).toBe("https://127.0.0.1:443");
+    expect(hintUrl("http://192.168.1.5:4001")).toBe("http://192.168.1.5:4001");
+    expect(hintUrl("http://localhost:4001")).toBe("http://localhost:4001");
+    expect(hintUrl("http://127.0.0.1:4001")).toBe("http://127.0.0.1:4001");
+    expect(hintUrl("not a url")).toBe("not a url");
+    expect(mcpAddHint(hintUrl("http://0.0.0.0:4001"))).toBe(
+      'claude mcp add --transport http tentacle http://127.0.0.1:4001/mcp --header "Authorization: Bearer <token>"',
+    );
   });
 });
 
@@ -320,7 +342,7 @@ describe("serve --mcp-token", () => {
       });
       expect(res.status).toBe(401);
     }
-    expect(audit).toContain("mcp-auth-failure");
+    expect(audit.some((line) => line.startsWith("mcp-auth-failure at "))).toBe(true);
   });
 
   test("off without a token: /mcp is not mounted", async () => {

@@ -29,6 +29,7 @@ function r(id: string, over: Partial<DrawerRow> = {}): DrawerRow {
     running: false,
     attached: 0,
     pinned: false,
+    marks: { ask: false, workflow: false, wake: false },
     ...over,
   };
 }

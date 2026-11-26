@@ -24,6 +24,7 @@ import {
   askForStep,
   runProjection,
 } from "@tentacle/client";
+import type { AskOrigin } from "@tentacle/client";
 import type {
   WorkflowResult,
   WorkflowRow,
@@ -77,6 +78,8 @@ export type StepDetail =
 export interface CardAsk {
   readonly requestId: string;
   readonly agent?: { readonly id?: string };
+  /** Who asked, from the structured fields (`askOrigin`): the pairing's first key. */
+  readonly origin?: AskOrigin;
   readonly title: string;
   /** Never truncated: a `run` command is shown as it will run (§7). */
   readonly detail: string;
@@ -87,6 +90,35 @@ export interface AskSource {
   current(): CardAsk | null;
   answerFor(requestId: string, optionId: "allow_once" | "reject_once"): "sent" | "ignored";
   subscribe(listener: () => void): () => void;
+  /** Bring the parked ask's sheet back (the slim row's tap). Absent: nothing to bring. */
+  unpark?(): void;
+}
+
+/**
+ * The ask of one step (`stepId`) or of the run itself (`null`), paired by the
+ * STRUCTURED origin first (docs/fix/mobile-ask-surfaces.md D6): `origin.runId` is
+ * the run and `origin.stepId` the step (absent: the run's own approval). An ask
+ * whose origin names a run is decided by that alone — another run's origin never
+ * pairs, whatever its agent id says. Only an ask WITHOUT a run id in its origin
+ * (an older daemon) falls back to `askForStep`'s `<runId>.<stepId>` id split.
+ */
+export function askForRunStep(
+  asks: readonly CardAsk[],
+  runId: string,
+  stepId: string | null,
+): CardAsk | undefined {
+  const structured = asks.find(
+    (ask) =>
+      ask.origin?.kind === "workflow" && ask.origin.runId === runId && ask.origin.stepId === stepId,
+  );
+  if (structured !== undefined) {
+    return structured;
+  }
+  return askForStep(
+    asks.filter((ask) => !(ask.origin?.kind === "workflow" && ask.origin.runId !== null)),
+    runId,
+    stepId,
+  );
 }
 
 /**
@@ -99,6 +131,7 @@ export function askSourceFromSheet(sheet: {
   view(): SheetState;
   answerFor(requestId: string, optionId: "allow_once" | "reject_once"): "sent" | "ignored";
   subscribe(listener: () => void): () => void;
+  unpark?(): void;
 }): AskSource {
   return {
     current() {
@@ -109,12 +142,14 @@ export function askSourceFromSheet(sheet: {
       return {
         requestId: view.requestId,
         ...(view.agentId === null ? {} : { agent: { id: view.agentId } }),
+        origin: view.origin,
         title: view.request.title,
         detail: view.request.detail ?? "",
       };
     },
     answerFor: (requestId, optionId) => sheet.answerFor(requestId, optionId),
     subscribe: (listener) => sheet.subscribe(listener),
+    ...(sheet.unpark === undefined ? {} : { unpark: () => sheet.unpark?.() }),
   };
 }
 
@@ -219,14 +254,21 @@ export function pendingAsk(
  */
 export type AskBar =
   | { readonly kind: "ask"; readonly stepId: string | null; readonly ask: CardAsk }
+  /** An ask that is NOT this run's (Q1): a slim row; its tap opens the session. */
+  | { readonly kind: "foreign"; readonly ask: CardAsk }
   | { readonly kind: "open-session"; readonly stepId: string };
 
 export function askBarFor(
-  state: Pick<RunState, "runAsk" | "steps" | "projection" | "canAnswer">,
+  state: Pick<RunState, "runAsk" | "steps" | "projection" | "canAnswer"> & {
+    readonly foreign?: CardAsk | null;
+  },
 ): AskBar | null {
   const pending = pendingAsk(state);
   if (pending !== null) {
     return { kind: "ask", stepId: pending.stepId, ask: pending.ask };
+  }
+  if (state.foreign !== undefined && state.foreign !== null) {
+    return { kind: "foreign", ask: state.foreign };
   }
   if (state.canAnswer || state.projection === null) {
     return null;
@@ -263,6 +305,8 @@ export interface WorkflowRunController {
   setMode(mode: RunMode): void;
   /** Answer the ask of `stepId` (null: the run's own approval). */
   answer(stepId: string | null, optionId: "allow_once" | "reject_once"): void;
+  /** Bring the parked ask's sheet back over this run (the slim row's tap). */
+  reviewAsk(): void;
   stop(): Promise<void>;
   resume(): Promise<void>;
   rerun(stepId: string): Promise<void>;
@@ -306,10 +350,12 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
     const cards: StepCard[] = (run?.steps ?? []).map((step) => ({
       step,
       look: stateLook(step.state),
-      ask: askForStep(asks, deps.runId, step.id) ?? null,
+      ask: askForRunStep(asks, deps.runId, step.id) ?? null,
       ...(details.has(step.id) ? { detail: details.get(step.id) } : {}),
     }));
-    const runAsk = askForStep(asks, deps.runId, null) ?? null;
+    const runAsk = askForRunStep(asks, deps.runId, null) ?? null;
+    const foreign =
+      asks.find((ask) => ask !== runAsk && !cards.some((card) => card.ask === ask)) ?? null;
     return {
       phase,
       run,
@@ -321,6 +367,7 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
         steps: cards,
         projection,
         canAnswer: deps.asks !== null,
+        foreign,
       }),
       mode: deps.mode.get(),
       notice,
@@ -501,13 +548,16 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
       changed();
     },
     answer(stepId, optionId) {
-      const ask = askForStep(pending(), deps.runId, stepId);
+      const ask = askForRunStep(pending(), deps.runId, stepId);
       const sent =
         ask !== undefined && deps.asks !== null
           ? deps.asks.answerFor(ask.requestId, optionId)
           : "ignored";
       notice = sent === "sent" ? null : RUN_ASK_GONE;
       changed();
+    },
+    reviewAsk() {
+      deps.asks?.unpark?.();
     },
     stop: () => act({ action: "stop", runId: deps.runId }),
     resume: () => act({ action: "resume", runId: deps.runId }),

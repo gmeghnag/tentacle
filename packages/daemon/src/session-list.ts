@@ -43,6 +43,18 @@ export interface SessionSummary {
    * not fire) and where the host never schedules (a pod daemon).
    */
   readonly schedules?: number;
+  /**
+   * Unanswered permission asks right now (docs/fix/mobile-ask-surfaces.md D5):
+   * the drawer's `hand.raised`. A live session: 0 is a fact. Absent for an
+   * archived entry (it holds no ask: nothing is loaded to ask).
+   */
+  readonly asks?: number;
+  /**
+   * Workflow runs live or waiting on the user (D5): the drawer's curvepath.
+   * Absent where the session runs no workflows at all (a tunnelled session, a
+   * pod daemon) — which is not the same claim as 0.
+   */
+  readonly workflows?: number;
   /** When it was pinned (`session/pin`); absent = not pinned. */
   readonly pinnedAt?: number;
 }
@@ -56,6 +68,19 @@ export interface ListCursor {
 export function encodeListCursor(key: ListCursor): string {
   return `${key.updatedAt}:${key.sessionId}`;
 }
+
+/**
+ * How many of a session's workflow runs are live or waiting on the user — what
+ * the drawer's curvepath means (docs/fix/mobile-ask-surfaces.md D5). A run is
+ * over iff its state says so; an unknown state counts as live, because a run
+ * this build cannot judge must not look finished.
+ */
+export function liveRunCount(rows: readonly { state: string }[]): number {
+  return rows.filter((row) => !FINISHED_RUN_STATES.has(row.state)).length;
+}
+
+/** The run states that are OVER (`WorkflowRowSchema.state`'s documented set). */
+const FINISHED_RUN_STATES: ReadonlySet<string> = new Set(["ok", "error", "stopped"]);
 
 /** Split at the FIRST `:` (an id may hold one, `updatedAt` never does). */
 export function parseListCursor(cursor: string): ListCursor {
@@ -103,6 +128,8 @@ export function toSessionList(
       archived: s.archived,
       ...(s.jobs !== undefined ? { jobs: s.jobs } : {}),
       ...(s.schedules !== undefined ? { schedules: s.schedules } : {}),
+      ...(s.asks !== undefined ? { asks: s.asks } : {}),
+      ...(s.workflows !== undefined ? { workflows: s.workflows } : {}),
       ...(s.pinnedAt !== undefined ? { pinned: true as const } : {}),
     };
     if (after === undefined || compare(entry, after) > 0) {

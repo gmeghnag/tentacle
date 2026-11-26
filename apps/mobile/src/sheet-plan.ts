@@ -22,6 +22,7 @@
  *   `sheetHidden` is "locked OR not active", and the drain never waits for a
  *   transition.
  */
+import type { AskOrigin } from "@tentacle/client";
 import { DENSE_FONT_SCALE } from "./theme.ts";
 
 /**
@@ -61,11 +62,19 @@ const DETENTS: readonly number[] = [0.3, 0.5, 1.0];
 const MIDDLE = 1;
 
 /**
+ * The ask's peek detent (docs/fix/mobile-ask-surfaces.md D3): it must hold the
+ * one-row `AskSlim` (≈ 76 pt) on the smallest phone (667 pt), pinned by a test.
+ */
+export const PEEK = 0.12;
+const PERMISSION_DETENTS: readonly number[] = [PEEK, 0.5, 1.0];
+
+/**
  * The per-sheet table. Outbox opens at M, not S: its title, quote and five pills
  * (≈ 420 pt) do not fit 0.3 (Owner Q1).
  */
 export const SHEET_SPEC: Record<SheetKind, SheetSpec> = {
-  permission: { detents: DETENTS, initial: MIDDLE, dimmed: -1, grabber: true },
+  // dimmed 0: behind the peek row the screen is live (an ask never blocks).
+  permission: { detents: PERMISSION_DETENTS, initial: MIDDLE, dimmed: 0, grabber: true },
   outbox: { detents: DETENTS, initial: MIDDLE, dimmed: -1, grabber: true },
   commands: { detents: DETENTS, initial: MIDDLE, dimmed: -1, grabber: true },
   tools: { detents: DETENTS, initial: MIDDLE, dimmed: -1, grabber: true },
@@ -116,13 +125,12 @@ export function initialDetent(kind: SheetKind, ctx: DetentContext): number {
 }
 
 /**
- * Whether the native sheet can be swiped/backdrop-dismissed. Only a permission
- * ask IN PROGRESS is held (D5, Owner Q2): its dismissal semantics are "withdraw
- * and send nothing", which needs an explicit "Not now" button, not a gesture the
- * person may make by accident. `returned` is free again.
+ * Whether the native sheet can be swiped/backdrop-dismissed: always. An ask is
+ * never blocking (docs/fix/mobile-ask-surfaces.md): a swipe PARKS it
+ * (`ask-park.ts`), it never withdraws it.
  */
-export function sheetGestureEnabled(kind: SheetKind, asking: boolean): boolean {
-  return !(kind === "permission" && asking);
+export function sheetGestureEnabled(_kind: SheetKind, _asking: boolean): boolean {
+  return true;
 }
 
 /**
@@ -403,62 +411,6 @@ export function askRouteId(requestId: string | null, seq: number): string {
 }
 
 /**
- * What one ask's blocked-dismissal note is stored under: the ask's OWN id, so a
- * new ask never inherits the note the previous one earned (D5).
- */
-export function holdKey(computerId: string, sessionId: string, askId: string): string {
-  return `${computerId}\u0000${sessionId}\u0000${askId}`;
-}
-
-/** How many times a blocked dismissal was attempted for one ask. */
-export interface SheetHolds {
-  /**
-   * A blocked swipe/backdrop was attempted on this ask (`gestureCancel`): the
-   * ask plays the `light` haptic and shows the inline footnote under its options
-   * (D5). Monotonic per key: a second attempt is a NEW note, never a no-op.
-   */
-  note(key: string): void;
-  /** How many attempts this ask has had; 0 = none (the footnote is hidden). */
-  sequence(key: string): number;
-  /** The screen's `useSyncExternalStore` subscription. */
-  subscribe(listener: () => void): () => void;
-  /** The ask is settled, or the session is gone: drop its note. */
-  forget(key: string): void;
-}
-
-/**
- * The blocked-dismissal notes, held outside React like `SHEET_DETENTS`: the
- * navigator's `gestureCancel` listener observes an attempt on a route it does
- * not own the state of, and the session screen that publishes the ask's element
- * reads it back — the two are different screens (`sheet-host.ts`'s reason).
- */
-export function createSheetHolds(): SheetHolds {
-  const counts = new Map<string, number>();
-  const listeners = new Set<() => void>();
-  const notify = (): void => {
-    for (const listener of listeners) {
-      listener();
-    }
-  };
-  return {
-    note(key) {
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-      notify();
-    },
-    sequence: (key) => counts.get(key) ?? 0,
-    subscribe(listener) {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    forget(key) {
-      if (counts.delete(key)) {
-        notify();
-      }
-    },
-  };
-}
-
-/**
  * The opening context for a sheet's options: Dynamic Type, the detent the person
  * left this sheet at (D3), and whether Session info was opened with a reveal —
  * the one opening that scrolls inside the sheet, so it needs the room.
@@ -560,9 +512,6 @@ export function reconcile(
   const wanted = desired[i];
   return wanted === undefined ? null : { action: "push", kind: wanted };
 }
-
-/** The app's ONE note store (the navigator writes it, the session screen reads it). */
-export const SHEET_HOLDS: SheetHolds = createSheetHolds();
 
 /**
  * The route's params a screen may rewrite in place, by `SET_PARAMS` keyed on the
@@ -810,8 +759,66 @@ export function yieldForeign(
  * which today read `useIsFocused()` alone. A sheet route on top BLURS Session,
  * so without this an ask's auto-read would stop exactly when its own sheet opens.
  */
-export function sessionInFront(focused: boolean, actual: readonly SheetEntry[]): boolean {
-  return focused || actual.length > 0;
+export function sessionInFront(
+  focused: boolean,
+  actual: readonly SheetEntry[],
+  ownRun = false,
+): boolean {
+  return focused || actual.length > 0 || ownRun;
+}
+
+/** The route `WorkflowRun` is registered under (`routes.ts`). */
+export const WORKFLOW_RUN_ROUTE = "WorkflowRun";
+
+/**
+ * The id of THIS session's own run when it is the screen on top (docs/fix/
+ * mobile-ask-surfaces.md D6), else null. `Sheet` routes above it are ignored: the
+ * run is what the person is looking at under them. A run of another session, or
+ * any other screen above the run, is not "on top".
+ */
+export function ownRunTopId(
+  routes: readonly SheetRouteLike[],
+  owner: { readonly computerId: string; readonly sessionId: string },
+): string | null {
+  for (let i = routes.length - 1; i >= 0; i--) {
+    const route = routes[i];
+    if (route === undefined || route.name === SHEET_ROUTE) {
+      continue;
+    }
+    if (route.name !== WORKFLOW_RUN_ROUTE) {
+      return null;
+    }
+    const params = route.params as
+      | { readonly computerId?: unknown; readonly sessionId?: unknown; readonly runId?: unknown }
+      | undefined;
+    return params?.computerId === owner.computerId &&
+      params?.sessionId === owner.sessionId &&
+      typeof params.runId === "string"
+      ? params.runId
+      : null;
+  }
+  return null;
+}
+
+/** Whether this session's own run is the screen on top (the session is then "in front"). */
+export function ownRunOnTop(
+  routes: readonly SheetRouteLike[],
+  owner: { readonly computerId: string; readonly sessionId: string },
+): boolean {
+  return ownRunTopId(routes, owner) !== null;
+}
+
+/**
+ * Whether the ask may be presented as a SHEET on the screen in front (Q1, owner
+ * «only the slim row»): over a run (`topRunId`) only that run's own ask; anything
+ * else (main agent, a sub-agent, another run, a run id the daemon did not send)
+ * stays a slim row. Everywhere else, always.
+ */
+export function askPresentable(origin: AskOrigin, topRunId: string | null): boolean {
+  if (topRunId === null) {
+    return true;
+  }
+  return origin.kind === "workflow" && origin.runId === topRunId;
 }
 
 /** The app activity `AppState` reports (`AppStateStatus`, minus its RN typing). */

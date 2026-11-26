@@ -195,7 +195,10 @@ describe("smart compaction in the loop", () => {
     expect(model.requests.some((r) => pruned(r) > 0)).toBe(true);
     const off = new Session(agentWith(new Scripted(SIX)), "s1");
     await send(off, "go");
-    expect(JSON.stringify(session.messages)).toBe(JSON.stringify(off.messages));
+    // `durationMs` is each tool's wall-clock time: it differs run to run (and under a loaded parallel gate).
+    const bytes = (ms: readonly ChatMessage[]): string =>
+      JSON.stringify(ms, (k, v) => (k === "durationMs" ? 0 : v));
+    expect(bytes(session.messages)).toBe(bytes(off.messages));
   });
 
   test("the context size a client is shown is the pruned one", async () => {

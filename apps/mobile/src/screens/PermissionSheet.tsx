@@ -1,140 +1,71 @@
 /**
- * The permission sheet (mockup `Approval`, docs/feat/mobile-session-view.md
- * 12c): drawn from `permission-sheet.ts`'s state, inside the native `Sheet`
- * route — the presentation (a `formSheet`, the native grabber, the detents) is
- * the route's, never this component's (docs/feat/mobile-native-sheets.md D4).
- * Every decision (the age guard, the options, the reply, the returned words,
- * each option's style and its label's code runs) lives there (AGENTS §7).
+ * The permission sheet (docs/fix/mobile-ask-surfaces.md): drawn from
+ * `permission-sheet.ts`'s state inside the native `Sheet` route — the
+ * presentation (a `formSheet`, the grabber, the detents) is the route's, never
+ * this component's (docs/feat/mobile-native-sheets.md D4). Every decision (the
+ * age guard, the options, the reply, the origin, the preview) lives in pure
+ * modules (`permission-sheet.ts`, `ask-card.ts`, `ask-park.ts`; AGENTS §7).
  *
- * While the age guard holds, the options are drawn dimmed AND `disabled`, so a
- * stray tap does nothing whether it reaches JS or is swallowed by the platform.
+ * The peek detent draws the one-row `AskSlim` (never buttons: the command is not
+ * seen from there); the others draw `AskCard`. The sheet is NOT blocking: a
+ * swipe PARKS the ask (the screen's banner), it never withdraws it.
  *
- * Dismissal (D5): while the ask is unanswered the sheet cannot be swiped — the
- * route's `gestureEnabled` is false — so "Not now" (`perm-later`) is the ONLY
- * way out, and it runs today's swipe semantics (`sheet.dismiss()`: withdraw,
- * send nothing). A blocked swipe is reported back as `held` and says so
- * (`perm-hold`), instead of the person's gesture doing nothing at all.
- *
- * testIDs (the flows' contract, unchanged): `perm-sheet`, `perm-<optionId>`,
- * `perm-later`, `perm-hold`, `perm-reply-input`, `perm-reply-send`,
- * `perm-arming`, `perm-returned`, `perm-returned-dismiss`.
+ * testIDs (the flows' contract): `perm-sheet`, `perm-slim`, `perm-<optionId>`,
+ * `perm-menu`, `perm-reply-input`, `perm-reply-send`, `perm-arming`,
+ * `perm-returned`, `perm-returned-dismiss`, `perm-auto-accept`.
  */
 import { type ComponentRef, type JSX, useEffect, useRef } from "react";
-import { Keyboard, Pressable, ScrollView, StyleSheet, Switch, View } from "react-native";
 import {
-  type OptionPill,
-  type PermissionSheet,
-  type SheetOptionId,
-  type SheetState,
-  labelRuns,
-  optionStyle,
-} from "../permission-sheet.ts";
-import { DENSE_FONT_SCALE, MONO, type Palette, radius, size, typography } from "../theme.ts";
-import { Icon, type IconName } from "../ui/Icon.tsx";
+  Keyboard,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Switch,
+  View,
+  useWindowDimensions,
+} from "react-native";
+import { askCard } from "../ask-card.ts";
+import { askSurface } from "../ask-park.ts";
+import { type PermissionSheet, type SheetState, replyCopy } from "../permission-sheet.ts";
+import { DENSE_FONT_SCALE, type Palette, radius, size, typography } from "../theme.ts";
+import { AskCard } from "../ui/AskCard.tsx";
+import { AskSlim } from "../ui/AskSlim.tsx";
 import { Text, TextInput } from "../ui/Text.tsx";
+
+/** The command box's mono advance (14 pt monospace ≈ 0.6 em), so `cols` is arithmetic. */
+const MONO_ADVANCE = 0.6;
+const MONO_SIZE = 14;
+/** Sheet padding (20 × 2) + the command box padding (12 × 2). */
+const CHROME_WIDTH = 64;
 
 export interface PermissionSheetViewProps {
   readonly sheet: PermissionSheet;
   readonly state: SheetState;
   readonly palette: Palette;
-  /**
-   * A swipe/backdrop dismissal was just BLOCKED on this ask (D5): the route's
-   * `gestureCancel` was noted in `SHEET_HOLDS` under this ask's key, and the
-   * sheet says why nothing happened (`perm-hold`) instead of the person's
-   * gesture silently doing nothing.
-   */
-  readonly held: boolean;
-}
-
-function pillColors(pill: OptionPill, palette: Palette): { bg: string; fg: string } {
-  switch (pill) {
-    case "primary":
-      return { bg: palette.accentFill, fg: palette.onAccent };
-    case "secondary":
-      return { bg: palette.tint, fg: palette.accent };
-    case "destructive":
-      return { bg: palette.fill, fg: palette.red };
-    default:
-      return { bg: palette.fill, fg: palette.label };
-  }
-}
-
-/** One 50 pt answer pill. `disabled` is REAL (the age guard), not just a look. */
-function AnswerPill({
-  palette,
-  label,
-  pill,
-  icon,
-  disabled,
-  onPress,
-  testID,
-}: {
-  readonly palette: Palette;
-  readonly label: string;
-  readonly pill: OptionPill;
-  readonly icon: IconName | null;
-  readonly disabled: boolean;
-  readonly onPress: () => void;
-  readonly testID: string;
-}): JSX.Element {
-  const colors = pillColors(pill, palette);
-  return (
-    <Pressable
-      testID={testID}
-      accessibilityRole="button"
-      accessibilityLabel={label.replaceAll("`", "")}
-      accessibilityState={{ disabled }}
-      disabled={disabled}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.pill,
-        { backgroundColor: colors.bg },
-        disabled ? styles.dimmed : undefined,
-        pressed ? { opacity: 0.7 } : undefined,
-      ]}
-    >
-      {icon === null ? null : <Icon name={icon} color={colors.fg} size={17} />}
-      <Text
-        maxFontSizeMultiplier={DENSE_FONT_SCALE}
-        style={[typography.headline, styles.pillLabel, { color: colors.fg }]}
-      >
-        {labelRuns(label).map((run, at) => (
-          <Text
-            // A run's position in its label is its identity.
-            // biome-ignore lint/suspicious/noArrayIndexKey: positional label runs
-            key={at}
-            style={run.code ? styles.code : undefined}
-          >
-            {run.text}
-          </Text>
-        ))}
-      </Text>
-    </Pressable>
-  );
+  /** The detent index the sheet is at (0 = peek), fed by the route's `sheetDetentChange`. */
+  readonly detent: number;
 }
 
 export function PermissionSheetView({
   sheet,
   state,
   palette,
-  held,
+  detent,
 }: PermissionSheetViewProps): JSX.Element {
-  // The age guard's release is the SHEET's own state change (it owns the clock and
-  // the scheduler, `permission-sheet.ts`): the screen only draws `armed`. A timer
-  // here was the bug flow 08 found — it re-rendered with a stale prop and the
-  // options stayed dimmed and `disabled` for ever.
-  const asking = state.kind === "asking" ? state : null;
-  const returned = state.kind === "returned" ? state : null;
-  // The session's shared auto-accept (docs/feat/session-auto-accept.md D6). Its
-  // VALUE is read here and now: the controller re-emits on the link's own change
-  // (a flip from the laptop arrives that way), so no timer lives in the screen.
+  const { width } = useWindowDimensions();
+  const cols = Math.max(10, Math.floor((width - CHROME_WIDTH) / (MONO_SIZE * MONO_ADVANCE)));
+  // The session's shared auto-accept (docs/feat/session-auto-accept.md D6): its
+  // VALUE is read here and now; the controller re-emits on the link's own change.
   const link = sheet.autoAccept;
-  // The reply field sits ABOVE "Send reply", and a pageSheet is not resized by
-  // the keyboard: with the field focused, the keyboard covered the button, so
-  // the reply could not be sent without first finding a way to dismiss a
-  // multiline field's keyboard (docs/fix/mobile-e2e-1121.md, flow 08c). The
-  // ScrollView insets itself by the keyboard (`automaticallyAdjustKeyboardInsets`)
-  // and, once the keyboard is up, scrolls its END — the button — into view.
+  const view = askCard(state, {
+    origin: state.kind === "asking" && state.origin !== undefined ? state.origin : { kind: "main" },
+    cols,
+    ageMs: null,
+    hasAutoAccept: link !== null,
+  });
+  const asking = state.kind === "asking" ? state : null;
+  // A pageSheet is not resized by the keyboard: the ScrollView insets itself by
+  // it and scrolls its END (the reply's Send) into view (flow 08c).
   const scroll = useRef<ComponentRef<typeof ScrollView>>(null);
   useEffect(() => {
     const shown = Keyboard.addListener("keyboardDidShow", () => {
@@ -142,215 +73,142 @@ export function PermissionSheetView({
     });
     return () => shown.remove();
   }, []);
+  if (view !== null && view.kind === "asking" && askSurface(detent) === "slim") {
+    return (
+      <View testID="perm-sheet" style={[styles.slim, { backgroundColor: palette.sheet }]}>
+        <AskSlim
+          testID="perm-slim"
+          palette={palette}
+          title={view.title}
+          originShort={view.origin.lead}
+          more={sheet.queued}
+          // Not a button: the sheet cannot be raised from code, so the row says
+          // how (a dimmed hint), never a tap that does nothing (finding 3).
+          actionLabel="Drag up"
+        />
+      </View>
+    );
+  }
   return (
     <ScrollView
       ref={scroll}
       testID="perm-sheet"
       automaticallyAdjustKeyboardInsets
       style={{ backgroundColor: palette.sheet }}
-      contentContainerStyle={styles.sheet}
       keyboardShouldPersistTaps="handled"
     >
-      {asking === null ? null : (
-        <>
-          <View style={styles.head}>
-            <View style={[styles.tile, { backgroundColor: palette.tint }]}>
-              <Icon name="hand.raised" color={palette.accent} size={22} />
-            </View>
-            <Text
-              accessibilityRole="header"
-              style={[typography.title2, styles.flex, { color: palette.label }]}
-            >
-              {asking.request.title}
-            </Text>
-          </View>
-          {asking.request.detail === undefined ? null : (
-            <View style={[styles.detailBox, { backgroundColor: palette.codeOnSheet }]}>
-              <Text style={[typography.monoInline, { color: palette.label }]}>
-                {asking.request.detail}
-              </Text>
-            </View>
-          )}
-          {asking.agent === null ? null : (
-            <Text style={[typography.subhead, { color: palette.sec }]}>
-              {`Asked by ${asking.agent.type}: ${asking.agent.description}`}
-            </Text>
-          )}
-          {asking.alsoAsked.length === 0 ? null : (
-            <Text testID="perm-also-asked" style={[typography.footnote, { color: palette.sec }]}>
-              {asking.alsoAsked.length === 1
-                ? `Also asked on ${asking.alsoAsked[0]} · the first answer wins`
-                : `Also asked on ${asking.alsoAsked[0]} (+${asking.alsoAsked.length - 1}) · the first answer wins`}
-            </Text>
-          )}
-          <View style={styles.options}>
-            {asking.options.map((option) => {
-              const look = optionStyle(option.optionId);
-              return (
-                <AnswerPill
-                  key={option.optionId}
-                  testID={`perm-${option.optionId}`}
-                  palette={palette}
-                  label={option.label}
-                  pill={look.pill}
-                  icon={look.icon}
-                  // The age guard's own decision, read at the tap (never a render
-                  // snapshot): `answer` ignores what is too early (P10).
-                  disabled={!asking.armed}
-                  onPress={() => sheet.answer(option.optionId)}
-                />
-              );
-            })}
-          </View>
-          {held ? (
-            <Text
-              testID="perm-hold"
-              style={[typography.footnote, styles.center, { color: palette.sec }]}
-            >
-              Answer to continue — or Not now
-            </Text>
-          ) : null}
+      {view !== null && view.kind === "asking" && asking !== null ? (
+        <AskCard
+          palette={palette}
+          view={view}
+          onAnswer={(optionId) => sheet.answer(optionId)}
+          onMenu={(id) => {
+            if (id === "auto_accept") {
+              if (link !== null) {
+                void link.set(!link.current())?.catch(() => {});
+              }
+              return;
+            }
+            sheet.answer(id);
+          }}
+        >
           {link === null ? null : (
-            <View style={[styles.autoRow, { borderTopColor: palette.sepSheet }]}>
-              <View style={styles.flex}>
-                <Text style={[typography.subhead, { color: palette.label }]}>Auto-accept</Text>
-                <Text style={[typography.footnote, { color: palette.sec }]}>
-                  {link.shared()
-                    ? "This session, on every device"
-                    : "Not shared by this computer — update tentacle"}
-                </Text>
-              </View>
+            <View style={styles.autoRow}>
+              <Text style={[typography.footnote, styles.flex, { color: palette.sec }]}>
+                {link.shared()
+                  ? "Auto-accept · this session, on every device"
+                  : "Auto-accept · not shared by this computer — update tentacle"}
+              </Text>
               <Switch
                 testID="perm-auto-accept"
                 accessibilityLabel="Auto-accept for this session, on every device"
                 value={link.current()}
                 disabled={!link.shared()}
-                // The session's link: every device follows, and it is never a
-                // stored approval (each ask is answered `allow_once`).
+                // The session's link, never a stored approval (each ask is `allow_once`).
                 onValueChange={(on) => {
                   void link.set(on)?.catch(() => {});
                 }}
               />
             </View>
           )}
-          {asking.replyText === "" && asking.request.reply === undefined ? null : (
-            <TextInput
-              testID="perm-reply-input"
-              style={[
-                typography.body,
-                styles.reply,
-                { color: palette.label, backgroundColor: palette.fill },
-              ]}
-              placeholder="Tell it what to do instead"
-              placeholderTextColor={palette.sec}
-              value={asking.replyText}
-              onChangeText={(text) => sheet.setReplyText(text)}
-              multiline
-            />
+          {asking.replyText === "" && !asking.replyOpen ? null : (
+            <>
+              <TextInput
+                testID="perm-reply-input"
+                style={[
+                  typography.body,
+                  styles.reply,
+                  { color: palette.label, backgroundColor: palette.fill },
+                ]}
+                placeholder={replyCopy(asking.request).placeholder}
+                placeholderTextColor={palette.sec}
+                value={asking.replyText}
+                onChangeText={(text) => sheet.setReplyText(text)}
+                multiline
+              />
+              <Pressable
+                testID="perm-reply-send"
+                accessibilityRole="button"
+                accessibilityLabel={replyCopy(asking.request).send}
+                accessibilityState={{ disabled: !asking.armed }}
+                disabled={!asking.armed}
+                onPress={() => sheet.sendReply()}
+                style={[styles.send, { backgroundColor: palette.tint }]}
+              >
+                <Text
+                  maxFontSizeMultiplier={DENSE_FONT_SCALE}
+                  style={[typography.headline, { color: palette.accent }]}
+                >
+                  {replyCopy(asking.request).send}
+                </Text>
+              </Pressable>
+            </>
           )}
-          {asking.request.reply === undefined ? null : (
-            <AnswerPill
-              testID="perm-reply-send"
-              palette={palette}
-              label="Send reply"
-              pill="secondary"
-              icon={null}
-              disabled={!asking.armed}
-              onPress={() => sheet.sendReply()}
-            />
-          )}
-          {asking.armed ? null : (
-            <Text
-              testID="perm-arming"
-              style={[typography.footnote, styles.center, { color: palette.sec }]}
-            >
-              Hold on…
-            </Text>
-          )}
-          {/* The ONE way out of a blocked sheet (D5): today's swipe
-                semantics made explicit — withdraw the ask, send nothing. */}
-          <Pressable
-            testID="perm-later"
-            accessibilityRole="button"
-            accessibilityLabel="Not now"
-            onPress={() => sheet.dismiss()}
-            style={({ pressed }) => [styles.later, pressed ? { opacity: 0.6 } : undefined]}
-          >
-            <Text style={[typography.subhead, { color: palette.accent }]}>Not now</Text>
-          </Pressable>
-        </>
-      )}
+        </AskCard>
+      ) : null}
       {sheet.autoAccepted === null ? null : (
-        <Text testID="perm-auto-accepted" style={[typography.footnote, { color: palette.sec }]}>
+        <Text
+          testID="perm-auto-accepted"
+          style={[typography.footnote, styles.pad, { color: palette.sec }]}
+        >
           {sheet.autoAccepted}
         </Text>
       )}
-      {returned === null ? null : (
-        <>
+      {view !== null && view.kind === "returned" ? (
+        <View style={styles.returned}>
           <Text testID="perm-returned" style={[typography.headline, { color: palette.red }]}>
-            {returned.notice}
+            {view.notice}
           </Text>
           <View style={[styles.detailBox, { backgroundColor: palette.codeOnSheet }]}>
-            <Text style={[typography.body, { color: palette.label }]}>{returned.text}</Text>
+            <Text style={[typography.body, { color: palette.label }]}>{view.text}</Text>
           </View>
-          <AnswerPill
+          <Pressable
             testID="perm-returned-dismiss"
-            palette={palette}
-            label="OK"
-            pill="neutral"
-            icon={null}
-            disabled={false}
+            accessibilityRole="button"
+            accessibilityLabel="OK"
             onPress={() => sheet.clearReturned()}
-          />
-        </>
-      )}
+            style={[styles.send, { backgroundColor: palette.fill }]}
+          >
+            <Text style={[typography.headline, { color: palette.label }]}>OK</Text>
+          </Pressable>
+        </View>
+      ) : null}
     </ScrollView>
   );
 }
 
-/** The options this component draws (exported so a test can pin the id list). */
-export const SHEET_OPTION_IDS: readonly SheetOptionId[] = [
-  "allow_once",
-  "allow_always",
-  "reject_once",
-  "reply",
-];
-
 const styles = StyleSheet.create({
-  autoRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    paddingTop: 12,
-    marginTop: 4,
-  },
   flex: { flex: 1 },
-  center: { textAlign: "center" },
-  sheet: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 40, gap: 16 },
-  head: { flexDirection: "row", alignItems: "center", gap: 12 },
-  tile: {
-    width: size.iconTileLarge,
-    height: size.iconTileLarge,
-    borderRadius: radius.iconTileLarge,
-    alignItems: "center",
-    justifyContent: "center",
-  },
+  pad: { paddingHorizontal: 20 },
+  slim: { paddingHorizontal: 12, paddingTop: 8 },
+  autoRow: { flexDirection: "row", alignItems: "center", gap: 12 },
+  returned: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 40, gap: 16 },
   detailBox: { borderRadius: radius.tile, padding: 14 },
-  options: { gap: 10 },
-  pill: {
+  reply: { borderRadius: radius.tile, padding: 14, minHeight: 96 },
+  send: {
     minHeight: size.bigButton,
     borderRadius: size.bigButton / 2,
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 8,
   },
-  pillLabel: { textAlign: "center", flexShrink: 1 },
-  code: { fontFamily: MONO },
-  dimmed: { opacity: 0.4 },
-  reply: { borderRadius: radius.tile, padding: 14, minHeight: 96 },
-  later: { alignSelf: "center", paddingVertical: 10, paddingHorizontal: 16 },
 });

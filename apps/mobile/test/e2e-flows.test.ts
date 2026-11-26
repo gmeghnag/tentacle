@@ -691,9 +691,9 @@ describe("N8's notification flows (docs/feat/mobile-notifications.md)", () => {
  *     pageSheet: its content no longer all fits, so a flow that reaches for a low
  *     item must SCROLL to it — an `assertVisible`/`tapOn` that assumes it is on
  *     screen is a flow that fails on the simulator;
- *  2. an unanswered ask cannot be swiped away (D5): the ONLY dismissals are the
- *     explicit `perm-later` and an answer, and a blocked swipe shows `perm-hold`.
- *     Nothing in the unit suite can prove a native gesture — it is driven here;
+ *  2. an unanswered ask is never blocking (docs/fix/mobile-ask-surfaces.md): a swipe
+ *     PARKS it (`ask-banner`), and the banner brings it back. Nothing in the unit
+ *     suite can prove a native gesture — it is driven here;
  *  3. the lock drains every sheet before the app leaves the screen (S3's L1): with
  *     a sheet up, backgrounding must still raise `lock-screen`, and the sheet must
  *     be back after the unlock (`desired` survives the drain).
@@ -729,9 +729,6 @@ describe("native sheets S6: a sheet's below-the-fold content is scrolled to", ()
     // Session info's MCP/skills sections start below it: each of these is reached
     // by a `scrollUntilVisible`, so the flow works whatever the detent ends up as.
     const lows: readonly (readonly [string, string])[] = [
-      ["08-permission", "perm-reply"],
-      ["08-permission", "perm-later"],
-      ["08c-permission-reply", "perm-reply"],
       ["08c-permission-reply", "perm-reply-send"],
       ["25-session-info", "session-info-mcp-demo"],
       ["34-hub-tools", "tools-mcp:demo"],
@@ -758,9 +755,8 @@ describe("native sheets S6: a sheet's below-the-fold content is scrolled to", ()
     // scroll moved nothing (gate run 1795466539487: 08, 08c, 25). `_sheet-expand`
     // is a slow drag on the sheet's one scroller, which takes it to L.
     const firsts: readonly (readonly [string, string])[] = [
-      ["08c-permission-reply", "perm-reply"],
+      ["08c-permission-reply", "perm-reply-send"],
       ["25-session-info", "session-info-mcp-demo"],
-      ["08-permission", "perm-hold"],
     ];
     for (const [flow, id] of firsts) {
       const expandAt = flowIndexOf(flow, "- runFlow: _sheet-expand.yaml");
@@ -790,35 +786,39 @@ describe("native sheets S6: a sheet's below-the-fold content is scrolled to", ()
   });
 });
 
-describe("native sheets S6: D5's blocked swipe is driven, not assumed", () => {
+describe("mobile-ask-surfaces: the swipe PARKS the ask, it is driven not assumed", () => {
   const body = readFileSync(join(FLOWS_DIR, "08-permission.yaml"), "utf8");
 
   const SWIPE = '- swipe:\n    start: "50%, 54%"\n    end: "50%, 99%"';
 
-  test("flow 08 swipes DOWN on the ask and asserts the held note", () => {
-    // A native gesture is the only proof that `gestureEnabled:false` holds: the
-    // unit tests pin the OPTION, not what UIKit does with a finger.
+  test("flow 08 swipes DOWN on the ask, then asserts the banner and no buttons", () => {
     const swipeAt = body.indexOf(SWIPE);
-    const holdAt = body.indexOf('- scrollUntilVisible:\n    element:\n      id: "perm-hold"');
+    const bannerAt = body.indexOf('      id: "ask-banner"');
     expect(swipeAt).toBeGreaterThan(-1);
-    expect(holdAt).toBeGreaterThan(swipeAt);
+    expect(bannerAt).toBeGreaterThan(swipeAt);
+    expect(body.indexOf('- assertNotVisible:\n    id: "perm-allow_once"')).toBeGreaterThan(swipeAt);
   });
 
-  test("the note is NOT there before the swipe (or its presence after proves nothing)", () => {
-    const absentAt = body.indexOf('- assertNotVisible:\n    id: "perm-hold"');
-    expect(absentAt).toBeGreaterThan(-1);
-    expect(absentAt).toBeLessThan(body.indexOf(SWIPE));
+  test("the banner's tap brings the ask back, BEFORE it is answered", () => {
+    const tapBanner = body.indexOf('- tapOn:\n    id: "ask-banner"');
+    const answerAt = body.lastIndexOf('- tapOn:\n    id: "perm-allow_once"');
+    expect(tapBanner).toBeGreaterThan(body.indexOf(SWIPE));
+    expect(answerAt).toBeGreaterThan(tapBanner);
   });
 
-  test("the swipe comes BEFORE the ask is answered (a held note is a pre-answer state)", () => {
-    const swipeAt = body.indexOf(SWIPE);
-    const answerAt = body.indexOf('- tapOn:\n    id: "perm-allow_once"');
-    expect(answerAt).toBeGreaterThan(-1);
-    expect(answerAt).toBeGreaterThan(swipeAt);
+  test("nothing of the old blocking surface is left in the sheet flows", () => {
+    for (const name of SHEET_FLOWS) {
+      const text = readFileSync(join(FLOWS_DIR, `${name}.yaml`), "utf8");
+      expect(text).not.toContain("perm-later");
+      expect(text).not.toContain("perm-hold");
+    }
   });
 
-  test("`perm-later` is the sheet's offered way out (D5's one explicit dismissal)", () => {
-    expect(body).toContain('id: "perm-later"');
+  test("the rare options are reached through the `…` menu", () => {
+    for (const name of ["08-permission", "08c-permission-reply"]) {
+      const text = readFileSync(join(FLOWS_DIR, `${name}.yaml`), "utf8");
+      expect(text).toContain('- tapOn:\n    id: "perm-menu"');
+    }
   });
 });
 

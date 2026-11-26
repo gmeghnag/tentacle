@@ -106,6 +106,28 @@ const decide = (
     ...over,
   });
 
+describe("a question push (docs/feat/a2a-client.md C6)", () => {
+  const questionMsg = message({
+    ask: {
+      requestId: "req-q",
+      tool: "reviewer",
+      title: "reviewer asks",
+      options: [{ optionId: "skip", name: "Skip", kind: "reject_once" }],
+      question: { maxChars: 2000 },
+    },
+  });
+
+  test.each(["tentacle.approve", "tentacle.deny", "tentacle.reply"])(
+    "%s never answers a question from the banner",
+    (actionId) => {
+      // Mutation: drop the question guard -> Deny sends a bare refusal through
+      // resolve_permission, which the daemon refuses (a question has its own method).
+      const decision = decide({ userInfo: envelopeOf(questionMsg), actionId });
+      expect(decision.do).toBe("refuse");
+    },
+  );
+});
+
 describe("the plaintext is the authority, never userInfo.tn (Design 3)", () => {
   test("a forged envelope (a sender key that is NOT the pinned computer) refuses `unverified`", () => {
     // Mutation: trust `userInfo.tn.requestId` (or skip opening the seal) → this

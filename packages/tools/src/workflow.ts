@@ -49,7 +49,7 @@ const workflowInput = z.object({
   run_id: z.string().max(32).optional(),
 });
 
-const DESCRIPTION = `Run a project workflow (${PROJECT_PATHS.workflows}/<name>.yaml): "run" (name, inputs) starts it and returns at once — the user approves it, its result arrives as a [workflow] note that wakes you; "status": the runs and their steps (read-only, never a way to wait); "stop" (run_id).`;
+const DESCRIPTION = `Run a project workflow (${PROJECT_PATHS.workflows}/<name>.yaml): "run" (name, inputs) starts it and returns at once — the user approves it, its result arrives as a [workflow] note that wakes you; "status": the runs and their steps (read-only, never a way to wait); "stop" (run_id). A workflow's agent step ends only by calling the step_verdict tool (pass|fail + reason) — a child that ends without it is asked once more, then the step fails \`no verdict\`. Write that into the step's prompt; never ask for a text PASS line.`;
 
 export function createWorkflowTool(
   driver: WorkflowToolDriver,

@@ -114,6 +114,45 @@ export const MODEL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const MODEL_NAME_MESSAGE =
   'models: a name may hold only letters, digits, "_" and "-" (at most 64 characters)';
 
+/** An `a2a` harness instance name; its sub-agent type is `a2a:<name>` (docs/feat/a2a-client.md C1). */
+export const A2A_INSTANCE_NAME = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+/**
+ * An agent card URL (C1): `https:`, or `http:` only for a loopback host (the
+ * owner's own machine). No userinfo: a token never rides in the URL.
+ */
+function cardUrlOk(value: string): boolean {
+  if (!URL.canParse(value)) return false;
+  const url = new URL(value);
+  if (url.username !== "" || url.password !== "") return false;
+  if (url.protocol === "https:") return true;
+  return (
+    url.protocol === "http:" &&
+    (url.hostname === "localhost" || url.hostname === "[::1]" || /^127\./.test(url.hostname))
+  );
+}
+
+/**
+ * The SHAPE of a network `run` may put its container on (feat/run-network D3),
+ * the one truth for the config file and the `--network` flag alike: a name, an
+ * engine mode (`none`, `bridge`, `host`, `default`) or docker's
+ * `container:<id>` form. Whether it EXISTS is the engine's — never cached here.
+ */
+export const NETWORK_VALUE = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
+const NETWORK_VALUE_MESSAGE =
+  'network: use a network name, "none", "bridge", "host" or "container:<id>" (letters, digits, "_", ".", ":", "-"; at most 128)';
+
+/**
+ * A malformed network value → one line naming it, else `null`. The CLI's
+ * `--network` and `TENTACLE_NETWORK` ask this before anything is created, so a
+ * typo never reaches an engine (the file's own check is `NETWORK_VALUE`).
+ */
+export function networkValueProblem(value: string): string | null {
+  return NETWORK_VALUE.test(value)
+    ? null
+    : `invalid network ${JSON.stringify(value)} — ${NETWORK_VALUE_MESSAGE.slice("network: ".length)}`;
+}
+
 /**
  * `__proto__` cannot be a name: the JSONC parser assigns it, swapping the map's
  * prototype (so the record check reads the entry's FIELDS as entries), and
@@ -379,33 +418,71 @@ const settingsShape = {
   harnesses: z
     .record(
       z.string().min(1),
-      z
-        .object({
-          /** The adapter; defaults to the instance name. */
-          adapter: z.literal("claude-code").optional(),
-          /** Default on: the `claude` sub-agent type is offered when `command` is on PATH. */
-          enabled: z.boolean().optional(),
-          /** The executable (default `claude`). */
-          command: z.string().min(1).optional(),
-          /** The model when a call names none (default `opus`); passed verbatim. */
-          model: z
-            .string()
-            .regex(
-              /^[A-Za-z0-9._:[\]][A-Za-z0-9._:[\]-]{0,63}$/,
-              "an alias or a model id: letters, digits, . _ : - [ ], at most 64, not starting with -",
-            )
-            .optional(),
-          /** Hang guard: no output for this many minutes ends the run (default 15). */
-          idleMinutes: z.number().positive().optional(),
-        })
-        .strict(),
+      z.union([
+        z
+          .object({
+            /** The adapter; defaults to the instance name. */
+            adapter: z.literal("claude-code").optional(),
+            /** Default on: the `claude` sub-agent type is offered when `command` is on PATH. */
+            enabled: z.boolean().optional(),
+            /** The executable (default `claude`). */
+            command: z.string().min(1).optional(),
+            /** The model when a call names none (default `opus`); passed verbatim. */
+            model: z
+              .string()
+              .regex(
+                /^[A-Za-z0-9._:[\]][A-Za-z0-9._:[\]-]{0,63}$/,
+                "an alias or a model id: letters, digits, . _ : - [ ], at most 64, not starting with -",
+              )
+              .optional(),
+            /** Hang guard: no output for this many minutes ends the run (default 15). */
+            idleMinutes: z.number().positive().optional(),
+          })
+          .strict(),
+        /**
+         * A remote A2A agent (docs/feat/a2a-client.md C1). No literal token
+         * field exists: the token only ever comes from `tokenCommand`.
+         */
+        z
+          .object({
+            adapter: z.literal("a2a"),
+            /** Default on: the `a2a:<name>` sub-agent type is offered. */
+            enabled: z.boolean().optional(),
+            /** The agent card URL: `https:`, or `http:` only for a loopback host. */
+            card: z
+              .string()
+              .min(1)
+              .refine(cardUrlOk, "an https URL (http only for localhost / 127.0.0.1 / [::1])"),
+            /** Prints the bearer token on stdout; run lazily, held in memory only. */
+            tokenCommand: z.string().min(1).optional(),
+            /** The owner's words, shown to the model first (C5). */
+            description: z.string().min(1).max(500).optional(),
+            /** Who answers the agent's questions (Owner A9); default `user`. */
+            inputFrom: z.enum(["parent", "user", "both"]).optional(),
+            /** Hang guard, minutes (default 30). */
+            idleMinutes: z.number().positive().optional(),
+          })
+          .strict(),
+      ]),
     )
     .superRefine((harnesses, ctx) => {
-      for (const name of Object.keys(harnesses)) {
-        if (name !== "claude-code") {
+      for (const [name, entry] of Object.entries(harnesses)) {
+        if (name === "claude-code") {
+          if (entry.adapter === "a2a") {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `harnesses: "claude-code" is the Claude Code harness, not an a2a agent`,
+            });
+          }
+        } else if (entry.adapter !== "a2a") {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
-            message: `harnesses: unknown instance "${name}" (only "claude-code" in this version)`,
+            message: `harnesses: unknown instance "${name}" (only "claude-code", or an entry with adapter "a2a")`,
+          });
+        } else if (!A2A_INSTANCE_NAME.test(name)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `harnesses: a2a instance name "${name}" must match [a-z0-9][a-z0-9-]{0,31}`,
           });
         }
       }
@@ -508,6 +585,13 @@ const settingsShape = {
    * `--engine` flag and `TENTACLE_ENGINE` win. Unset: `kubernetes`.
    */
   engine: z.enum(["kubernetes", "docker", "podman"]).optional(),
+  /**
+   * The network `run` puts its container on (feat/run-network): a name, or
+   * `none` for an air-gapped workload. `--network` and `TENTACLE_NETWORK` win.
+   * Unset: no `NetworkMode` in the create body (the engine's own default).
+   * Refused on `--engine kubernetes` (a pod's network is the cluster's).
+   */
+  network: z.string().regex(NETWORK_VALUE, NETWORK_VALUE_MESSAGE).optional(),
   /**
    * Whether `run` removes its pod/container when the run ends (fix/run-rm-flag;
    * docs/feat/docker-engine-cli.md); `--rm[=true|false]` wins. Unset: false (kept).

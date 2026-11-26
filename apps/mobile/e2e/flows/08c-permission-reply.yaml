@@ -39,10 +39,10 @@ appId: so.tentacle.app
 # is dragged to LARGE first (Maestro's scroll starts at the screen's centre, which
 # at M is the backdrop), then each is scrolled to before it is touched.
 - runFlow: _sheet-expand.yaml
-- scrollUntilVisible:
-    element:
-      id: "perm-reply"
-    direction: DOWN
+# The reply is a RARE option: it sits behind the card's `…` menu
+# (docs/fix/mobile-ask-surfaces.md D4), never beside Deny / Allow once.
+- tapOn:
+    id: "perm-menu"
 - tapOn:
     id: "perm-reply"
 - scrollUntilVisible:

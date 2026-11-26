@@ -12,6 +12,7 @@ import type { ArtifactMeta } from "@tentacle/protocol";
 import { type JSX, type RefObject, memo } from "react";
 import type { LabelMode } from "../../chart-layout-kit.ts";
 import type { DiagramStyle } from "../../diagram-settings-store.ts";
+import type { CopyVia } from "../../message-copy.ts";
 import { rowErrorFields } from "../../row-guard.ts";
 import { rowTimeLabel } from "../../row-swipe.ts";
 import type { Palette } from "../../theme.ts";
@@ -31,6 +32,17 @@ export interface CellActions {
   readonly onSpeak: (row: { readonly key: string; readonly text: string }) => void;
   readonly onArtifact: (meta: ArtifactMeta) => void;
   readonly onRowError: (fields: ReturnType<typeof rowErrorFields>) => void;
+  /**
+   * A long-press on a message (docs/feat/mobile-copy-text.md D2): the screen
+   * decides what the row copies and owns the clipboard and the pill, so a
+   * skipped cell still reaches the latest handler (this handle's rule).
+   */
+  readonly onCopy: (row: Row, via: CopyVia) => void;
+  /**
+   * The press that copied a message ended (docs/feat/mobile-copy-text.md D3):
+   * the pill's countdown starts at the release, never under the finger.
+   */
+  readonly onCopyRelease: () => void;
 }
 
 export interface TranscriptCellProps extends CellData<Row, Palette, ThumbnailState> {
@@ -57,6 +69,8 @@ function TranscriptCellView(props: TranscriptCellProps): JSX.Element {
           onLink={(href) => actions.current.onLink(href)}
           thumbnails={props.thumbnails}
           chartLabels={props.chartLabels}
+          onCopy={(row, via) => actions.current.onCopy(row, via)}
+          onCopyRelease={() => actions.current.onCopyRelease()}
           {...(props.look === undefined ? {} : { look: props.look })}
           step={{
             cell: props.cell,

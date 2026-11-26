@@ -709,7 +709,7 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
       "Only `claude-code` exists in this version, and it is on by default: when its `command` is on PATH the agent is offered an `agent_task` type `claude` (Claude Code, run headless in its own git worktree holding a snapshot of your tree). Laptop and `serve` only: a pod (`run`/`attach`) never offers it and ignores this key. No spending cap; each report ends with the run's list-price cost, the 5 h / 7 d plan usage and the `claude --resume` session.",
   },
   "harnesses.*": {
-    summary: "One harness instance's settings (`claude-code`).",
+    summary: "One harness instance's settings (`claude-code`, or a remote `a2a` agent).",
     kind: "section",
     scope: "both",
     carried: "no",
@@ -718,10 +718,53 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     summary: "Which adapter the instance runs on; defaults to the instance name.",
     kind: "leaf",
     type: "enum",
-    values: ["claude-code"],
+    values: ["claude-code", "a2a"],
     scope: "both",
     carried: "no",
-    example: '"claude-code"',
+    details:
+      'Any instance other than `claude-code` must say `"a2a"`: a remote A2A agent, offered as the `agent_task` type `a2a:<name>` (name: lowercase letters, digits and `-`, at most 32). Every task sent to it is asked first through the permission prompt (auto mode answers it; "always" covers that agent for the session); secrets in the text are masked; only the task text leaves, never the session.',
+    example: '"a2a"',
+  },
+  "harnesses.*.card": {
+    summary: "An `a2a` agent's card URL (`https:`; `http:` only for localhost).",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    details:
+      "The agent card (`/.well-known/agent-card.json`). Its JSON-RPC 1.x interface must be on the card's own origin, the only place the token is ever sent. No user:password in the URL.",
+    example: '"https://agents.acme.dev/.well-known/agent-card.json"',
+  },
+  "harnesses.*.tokenCommand": {
+    summary: "A command printing an `a2a` agent's bearer token (never the token itself).",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    details:
+      "Run the first time the agent is used; its output is held in memory only. There is no field for a literal token. Unset: no token is sent.",
+    example: '"op read op://dev/acme/token"',
+  },
+  "harnesses.*.description": {
+    summary: "Your description of an `a2a` agent, shown to the model first.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    details:
+      "At most 500 characters. The model also reads the card's own name, description and skills, cut short and marked as remote text.",
+    example: '"Reviews Go PRs against our style guide"',
+  },
+  "harnesses.*.inputFrom": {
+    summary: "Who answers an `a2a` agent's questions: `user` (default), `parent` or `both`.",
+    kind: "leaf",
+    type: "enum",
+    values: ["user", "parent", "both"],
+    scope: "both",
+    carried: "no",
+    details:
+      "`parent`: the agent that started it, for a background run with `subagents.twoWay` on. `both`: the first answer wins. A reply passes the same send prompt as the task.",
+    example: '"both"',
   },
   "harnesses.*.enabled": {
     summary: "Offer this harness's sub-agent type (default on).",
@@ -752,7 +795,8 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     example: '"sonnet"',
   },
   "harnesses.*.idleMinutes": {
-    summary: "Hang guard: a run with no output for this many minutes is stopped (unset: 15).",
+    summary:
+      "Hang guard: a run with no output for this many minutes is stopped (unset: 15; `a2a`: 30).",
     kind: "leaf",
     type: "number",
     scope: "both",
@@ -1025,6 +1069,20 @@ const FILE_KEYS: Readonly<Record<string, KeyDoc>> = {
     details:
       "Not resolved into the config: the CLI layers `--engine` › `TENTACLE_ENGINE` › profile › this file › kubernetes, and refuses an unknown value instead of falling through.",
     example: '"docker"',
+  },
+  network: {
+    summary:
+      "Network of `run`'s container: a name, or `none` for air-gapped runs; `--network` wins.",
+    kind: "leaf",
+    type: "string",
+    scope: "both",
+    carried: "no",
+    env: "TENTACLE_NETWORK",
+    sample: "none",
+    flag: "--network",
+    details:
+      "Not resolved into the config: the CLI layers `--network` › `TENTACLE_NETWORK` › profile › this file › the engine's own default (no `NetworkMode` at all). The SHAPE is checked here (a name, `none`, `bridge`, `host`, `container:<id>`); whether the network EXISTS is the engine's. Refused on `--engine kubernetes` (a pod's network is the cluster's); `run` only — `attach` never creates.",
+    example: '"none"',
   },
   rm: {
     summary: "Whether `run` removes its pod/container when the run ends.",

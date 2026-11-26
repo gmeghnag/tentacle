@@ -537,6 +537,9 @@ describe("S7 · stepBody: the never-run sentence, and an approve step's asked/an
       ["Outcome", "Denied"],
       ["Reason", "denied: not this time"],
     ]);
+    // The answer block is the ONE place a denial's reason is drawn: a second `Reason`
+    // row in the kv list would read as two reasons (docs/fix/workflow-no-verdict).
+    expect(body.kv.some(([k]) => k === "Reason")).toBe(false);
     // A missing read never invents a question.
     expect(body.asked).toBeNull();
   });
@@ -551,5 +554,44 @@ describe("S7 · stepBody: the never-run sentence, and an approve step's asked/an
       0,
     );
     expect(body).toMatchObject({ asked: null, answer: [] });
+  });
+
+  // docs/fix/workflow-no-verdict (b): the reason reaches the phone as a kv ROW.
+  test("a failed step's reason is a `Reason` row, final before the read lands", () => {
+    const failed = step("review", {
+      state: "error",
+      reason: "no verdict — the step ended without calling step_verdict",
+    });
+    const before = stepBody(projection, failed, undefined, kindWord, stateWord, 0);
+    const after = stepBody(
+      projection,
+      failed,
+      { kind: "loaded", detail: detail() },
+      kindWord,
+      stateWord,
+      0,
+    );
+    expect(before.kv).toContainEqual([
+      "Reason",
+      "no verdict — the step ended without calling step_verdict",
+    ]);
+    // The kv list comes from the ROW, so the read cannot move it (no reflow).
+    expect(before.kv).toEqual(after.kv);
+    // The log block is the read's, never a second copy of the reason.
+    expect(before.log).toEqual([]);
+  });
+
+  test("a multi-line reason is ONE row: flattened, never a second row", () => {
+    const body = stepBody(
+      projection,
+      step("review", { state: "error", reason: "REQUEST-CHANGES\n1. missing abort" }),
+      undefined,
+      kindWord,
+      stateWord,
+      0,
+    );
+    expect(body.kv.filter(([k]) => k === "Reason")).toEqual([
+      ["Reason", "REQUEST-CHANGES 1. missing abort"],
+    ]);
   });
 });

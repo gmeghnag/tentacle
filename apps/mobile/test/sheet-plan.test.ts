@@ -12,27 +12,28 @@ import {
   DETENT_MEMORY_MAX,
   type DetentMemory,
   INTENT_SHEET,
+  PEEK,
   PRESENTED_SHEET_KINDS,
   SHEET_DETENTS,
-  SHEET_HOLDS,
   SHEET_KINDS,
   SHEET_ROUTE,
   SHEET_SPEC,
   type SheetEntry,
   type SheetKind,
+  askPresentable,
   askRouteId,
   askRouteParams,
   askingParamUpdate,
   clampDetent,
   createDetentMemory,
-  createSheetHolds,
   desiredStack,
   dismissedNatively,
   drainPops,
-  holdKey,
   initialDetent,
   managedStack,
   openingDetent,
+  ownRunOnTop,
+  ownRunTopId,
   queueAfterDismiss,
   readyIntents,
   reconcile,
@@ -82,10 +83,10 @@ describe("SHEET_SPEC — the RNS dev asserts must be unreachable", () => {
     });
   }
 
-  test("every sheet opens at the middle detent and is dimmed throughout", () => {
+  test("every sheet opens at the middle detent; all but the ask are dimmed throughout", () => {
     for (const kind of SHEET_KINDS) {
       expect(initialDetent(kind, CALM)).toBe(1);
-      expect(SHEET_SPEC[kind].dimmed).toBe(-1);
+      expect(SHEET_SPEC[kind].dimmed).toBe(kind === "permission" ? 0 : -1);
       expect(SHEET_SPEC[kind].grabber).toBe(true);
     }
   });
@@ -153,24 +154,25 @@ describe("sheetOptions — always accepted by RNS", () => {
   });
 });
 
-describe("sheetGestureEnabled — blocked only for an ask in progress", () => {
-  test("permission while asking is held; permission returned is free", () => {
-    expect(sheetGestureEnabled("permission", true)).toBe(false);
-    expect(sheetGestureEnabled("permission", false)).toBe(true);
-  });
-
-  test("every other sheet is always dismissible", () => {
+describe("sheetGestureEnabled — an ask never blocks (a swipe parks it)", () => {
+  test("every sheet is always dismissible, asking or not", () => {
     for (const kind of SHEET_KINDS) {
-      if (kind === "permission") continue;
       expect(sheetGestureEnabled(kind, true)).toBe(true);
       expect(sheetGestureEnabled(kind, false)).toBe(true);
     }
   });
 
   test("reaching sheetOptions", () => {
-    expect(sheetOptions("permission", { ...CALM, asking: true }).gestureEnabled).toBe(false);
+    expect(sheetOptions("permission", { ...CALM, asking: true }).gestureEnabled).toBe(true);
     expect(sheetOptions("permission", CALM).gestureEnabled).toBe(true);
     expect(sheetOptions("tools", { ...CALM, asking: true }).gestureEnabled).toBe(true);
+  });
+
+  test("behind the peek row the screen is live (dimmed 0), and the peek holds the slim row", () => {
+    expect(sheetOptions("permission", CALM).sheetLargestUndimmedDetentIndex).toBe(0);
+    expect(SHEET_SPEC.permission.dimmed).toBe(0);
+    expect(SHEET_SPEC.permission.detents[0]).toBe(PEEK);
+    expect(PEEK * 667).toBeGreaterThanOrEqual(76);
   });
 });
 
@@ -509,6 +511,56 @@ describe("sessionInFront — this session is what the person sees", () => {
   test("blurred with no sheet up is behind", () => {
     expect(sessionInFront(false, [])).toBe(false);
   });
+
+  test("S8: an own run on top keeps the session in front", () => {
+    expect(sessionInFront(false, [], true)).toBe(true);
+  });
+});
+
+describe("S8 — the run screen over a session (docs/fix/mobile-ask-surfaces.md D6)", () => {
+  const owner = { computerId: "c", sessionId: "s" };
+  const session = { key: "k0", name: "Session", params: { computerId: "c", sessionId: "s" } };
+  const run = (sessionId: string, runId = "wf-1") => ({
+    key: "k1",
+    name: "WorkflowRun",
+    params: { computerId: "c", sessionId, runId, title: "t" },
+  });
+  const sheetRoute = {
+    key: "k2",
+    name: "Sheet",
+    params: { kind: "permission", computerId: "c", sessionId: "s" },
+  };
+
+  test("ownRunOnTop: this session's run on top is true, another session's is false", () => {
+    expect(ownRunOnTop([session, run("s")], owner)).toBe(true);
+    expect(ownRunOnTop([session, run("t")], owner)).toBe(false);
+    expect(ownRunOnTop([session], owner)).toBe(false);
+    expect(ownRunOnTop([], owner)).toBe(false);
+  });
+
+  test("a sheet over the run keeps it on top; another screen above it does not", () => {
+    expect(ownRunOnTop([session, run("s"), sheetRoute], owner)).toBe(true);
+    expect(ownRunOnTop([session, run("s"), { key: "k3", name: "Other" }], owner)).toBe(false);
+    expect(ownRunTopId([session, run("s", "wf-7"), sheetRoute], owner)).toBe("wf-7");
+    expect(ownRunTopId([session, run("t")], owner)).toBeNull();
+  });
+
+  test("askPresentable (Q1): over a run only THAT run's ask is presented", () => {
+    const wf = (runId: string | null) => ({
+      kind: "workflow" as const,
+      name: "n",
+      runId,
+      stepId: "a",
+      position: null,
+    });
+    expect(askPresentable({ kind: "main" }, null)).toBe(true);
+    expect(askPresentable(wf("wf-2"), null)).toBe(true);
+    expect(askPresentable(wf("wf-1"), "wf-1")).toBe(true);
+    expect(askPresentable(wf("wf-2"), "wf-1")).toBe(false);
+    expect(askPresentable(wf(null), "wf-1")).toBe(false);
+    expect(askPresentable({ kind: "main" }, "wf-1")).toBe(false);
+    expect(askPresentable({ kind: "subagent", type: "x", task: "y" }, "wf-1")).toBe(false);
+  });
 });
 
 describe("sheetHidden — the drain's trigger, both legs", () => {
@@ -719,60 +771,6 @@ describe("recordDetent — only a STABLE change is remembered (S3)", () => {
     recordDetent(memory, "tools", null, { index: 2, stable: true });
     expect(recordDetent(memory, "tools", null, { index: 0, stable: false })).toBe(false);
     expect(rememberedDetent(memory, "tools", null)).toBe(2);
-  });
-});
-
-describe("SHEET_HOLDS — the blocked-dismissal note (D5)", () => {
-  test("one note per ask: the sequence is monotonic and the store notifies", () => {
-    // Mutation: `note` not notifying (or a key shared across asks) → red.
-    const holds = createSheetHolds();
-    let seen = 0;
-    const off = holds.subscribe(() => {
-      seen++;
-    });
-    const key = holdKey("c1", "s1", "ask-7");
-    expect(holds.sequence(key)).toBe(0);
-    holds.note(key);
-    expect(holds.sequence(key)).toBe(1);
-    holds.note(key);
-    expect(holds.sequence(key)).toBe(2);
-    expect(seen).toBe(2);
-    off();
-    holds.note(key);
-    expect(seen).toBe(2);
-  });
-
-  test("a new ask never inherits the previous one's note", () => {
-    const holds = createSheetHolds();
-    holds.note(holdKey("c1", "s1", "ask-7"));
-    expect(holds.sequence(holdKey("c1", "s1", "ask-7"))).toBe(1);
-    // The SAME ask on another session, and the next ask on this one: both clean.
-    expect(holds.sequence(holdKey("c1", "s2", "ask-7"))).toBe(0);
-    expect(holds.sequence(holdKey("c1", "s1", "ask-8"))).toBe(0);
-    expect(holds.sequence(holdKey("c2", "s1", "ask-7"))).toBe(0);
-  });
-
-  test("forget drops the note, and only notifies when there was one", () => {
-    const holds = createSheetHolds();
-    const key = holdKey("c1", "s1", "ask-7");
-    let seen = 0;
-    holds.subscribe(() => {
-      seen++;
-    });
-    holds.forget(key); // nothing there: no notification
-    expect(seen).toBe(0);
-    holds.note(key);
-    holds.forget(key);
-    expect(holds.sequence(key)).toBe(0);
-    expect(seen).toBe(2);
-  });
-
-  test("the app's ONE store is live (the navigator writes, the screen reads)", () => {
-    const key = holdKey("app", "one", "ask-1");
-    SHEET_HOLDS.note(key);
-    expect(SHEET_HOLDS.sequence(key)).toBe(1);
-    SHEET_HOLDS.forget(key);
-    expect(SHEET_HOLDS.sequence(key)).toBe(0);
   });
 });
 

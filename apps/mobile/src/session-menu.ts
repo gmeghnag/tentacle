@@ -7,6 +7,7 @@
  * React-free (AGENTS §7): `SessionScreen.tsx` draws the sheet and copies the
  * returned text.
  */
+import { messageText } from "./message-copy.ts";
 import type { Row } from "./transcript-rows.ts";
 
 export type SessionMenuId = "info" | "scheduled" | "copy-last" | "copy-all";
@@ -18,12 +19,24 @@ export interface SessionMenuAction {
   readonly text: string;
 }
 
-/** The conversation's words: the person's prompts and the answers (no tools, no reasoning). */
+/**
+ * The conversation's words: the person's prompts and the answers (no tools, no
+ * reasoning). What each one's text IS comes from `messageText` — the same rule a
+ * long-press uses (docs/feat/mobile-copy-text.md D1), so "Copy last answer" and
+ * copying that message by hand can never give different bytes.
+ *
+ * A fired wake stays in here (`messageText` does not apply the wake rule, which
+ * needs a clock): "Copy conversation" has always carried it.
+ */
 function said(rows: readonly Row[]): readonly { who: "You" | "tentacle"; text: string }[] {
   const out: { who: "You" | "tentacle"; text: string }[] = [];
   for (const row of rows) {
-    if ((row.kind === "user" || row.kind === "assistant") && row.text.trim() !== "") {
-      out.push({ who: row.kind === "user" ? "You" : "tentacle", text: row.text });
+    if (row.kind !== "user" && row.kind !== "assistant") {
+      continue;
+    }
+    const text = messageText(row);
+    if (text !== null && text.trim() !== "") {
+      out.push({ who: row.kind === "user" ? "You" : "tentacle", text });
     }
   }
   return out;

@@ -8,6 +8,10 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import {
+  type A2AAdapter,
+  type A2AAgentCard,
+  type A2ACommandRunner,
+  type A2ALookup,
   Agent,
   type AgentType,
   type AskHooksTrust,
@@ -18,6 +22,7 @@ import {
   CLAUDE_TYPE_DESCRIPTION,
   EMPTY_SKILL_LISTING,
   type HarnessDeps,
+  type HarnessInstance,
   HookRunner,
   NO_CAPABILITIES,
   PermissionGate,
@@ -31,17 +36,25 @@ import {
   type WorkflowContainerOutcome,
   type WorkflowContainerTarget,
   WorkflowDriver,
+  cardBlurb,
   claudeModelNote,
   collapseRepeatedLines,
+  createA2AAdapter,
   createClaudeCodeCodec,
   createProcessAdapter,
+  createProposedAgent,
   createSubagentRunner,
   createToolOutputStore,
   exemptTools,
+  fetchA2ACard,
+  inspectProposedAgent,
   isModelShape,
   mergeAgentTypes,
   parseAgentDefinition,
+  proposedAgentName,
+  proposedAgentsFor,
   redactSecrets,
+  reportHeader,
   resolveToolOutputRoot,
   resolveToolOutputTmpRoot,
   runResultHooks,
@@ -91,6 +104,7 @@ import {
   WorkloadShells,
   builtinTools,
   chartTool,
+  createA2AAddAgentTool,
   createAgentControlTool,
   createContextResetTool,
   createFsReadTool,
@@ -324,7 +338,7 @@ export function claudeHarness(
   options: NonNullable<BuildAgentOptions["harnesses"]>,
 ): { readonly deps: HarnessDeps; readonly type: AgentType; readonly note: string } | undefined {
   const h = config.harnesses[CLAUDE_CODE_ID];
-  if (h === undefined || !h.enabled) {
+  if (h === undefined || h.adapter !== "claude-code" || !h.enabled) {
     return undefined;
   }
   const path = (options.which ?? ((command: string) => Bun.which(command)))(h.command);
@@ -364,6 +378,169 @@ export function claudeHarness(
     },
     note: claudeModelNote(h.model),
   };
+}
+
+/** C5: how long the cards' text for the model may take, all cards together. */
+export const A2A_CARD_BUDGET_MS = 2_000;
+
+/** Card texts for the model (C5), by instance name: `undefined` = not loaded in time. */
+export type A2ACards = ReadonlyMap<string, A2AAgentCard | undefined>;
+
+function a2aEntries(config: TentacleConfig) {
+  return Object.entries(config.harnesses).flatMap(([name, h]) =>
+    h.adapter === "a2a" && h.enabled ? [{ name, h }] : [],
+  );
+}
+
+/**
+ * Read every enabled `adapter: "a2a"` instance's card for the model's type
+ * list (docs/feat/a2a-client.md C5): in parallel, through the adapter's own
+ * pinned-origin `fetch` (no token), and for at most `budgetMs` in total. The
+ * map returned is a snapshot taken at the deadline: a card that arrives later
+ * is not in it. The build freezes it into the `agent_task` text.
+ */
+export async function prefetchA2ACards(
+  config: TentacleConfig,
+  opts: {
+    readonly fetch?: typeof fetch;
+    readonly lookup?: A2ALookup;
+    readonly budgetMs?: number;
+  } = {},
+): Promise<A2ACards> {
+  const entries = a2aEntries(config);
+  const got = new Map<string, A2AAgentCard>();
+  if (entries.length === 0) return got;
+  const stop = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      stop.abort();
+      resolve();
+    }, opts.budgetMs ?? A2A_CARD_BUDGET_MS);
+  });
+  const reads = entries.map(async ({ name, h }) => {
+    try {
+      const card = await fetchA2ACard({
+        cardUrl: h.card,
+        signal: stop.signal,
+        ...(opts.fetch ? { fetch: opts.fetch } : {}),
+        ...(opts.lookup ? { lookup: opts.lookup } : {}),
+      });
+      if (!stop.signal.aborted) got.set(name, card);
+    } catch {
+      // Unreadable: «(remote card not loaded)»; the probe reads it again at first use.
+    }
+  });
+  await Promise.race([Promise.all(reads), deadline]);
+  clearTimeout(timer);
+  stop.abort();
+  return new Map(entries.map(({ name }) => [name, got.get(name)]));
+}
+
+/** A long-lived host's card texts (docs/feat/a2a-client.md, owner decision (c)). */
+export interface A2ACardCache {
+  /** The snapshot the next build freezes into its `agent_task` text. */
+  readonly cards: () => A2ACards;
+  /** Read the cards again in the background (one read at a time); the NEXT build sees it. */
+  readonly refresh: () => Promise<void>;
+}
+
+/**
+ * Owner decision (c) for C5: a worker / `serve` awaits this ONCE before its
+ * `SessionHost` (≤ the budget, and only when an `a2a` instance is configured:
+ * none ⇒ no read, no wait), passes `cards()` into every build and calls
+ * `refresh()` after each. A card a refresh cannot read keeps its last text:
+ * a transient failure never turns a loaded card back into «not loaded».
+ */
+export async function startA2ACards(
+  config: TentacleConfig,
+  opts: Parameters<typeof prefetchA2ACards>[1] = {},
+): Promise<A2ACardCache> {
+  if (a2aEntries(config).length === 0) {
+    const none: A2ACards = new Map();
+    return { cards: () => none, refresh: () => Promise.resolve() };
+  }
+  let current = await prefetchA2ACards(config, opts);
+  let inFlight: Promise<void> | undefined;
+  const refresh = (): Promise<void> => {
+    inFlight ??= prefetchA2ACards(config, opts).then(
+      (fresh) => {
+        current = new Map([...fresh].map(([name, card]) => [name, card ?? current.get(name)]));
+        inFlight = undefined;
+      },
+      () => {
+        inFlight = undefined;
+      },
+    );
+    return inFlight;
+  };
+  return { cards: () => current, refresh };
+}
+
+/**
+ * The `a2a:<name>` sub-agent types and their harness instances
+ * (docs/feat/a2a-client.md C1/C2/C5): one per enabled `adapter: "a2a"`
+ * instance. Each type's text is the owner's description, then the card's text
+ * from `cards` (marked remote, one line, capped) — FROZEN here for the
+ * session, so the `agent_task` text stays byte-stable. The caller gates it on
+ * `!tunnelled` (C8), like `claudeHarness`.
+ */
+export function a2aHarnesses(
+  config: TentacleConfig,
+  options: NonNullable<BuildAgentOptions["harnesses"]>,
+  notice?: (line: string) => void,
+): { readonly instances: ReadonlyMap<string, HarnessInstance>; readonly types: AgentType[] } {
+  const instances = new Map<string, HarnessInstance>();
+  const types: AgentType[] = [];
+  for (const { name, h } of a2aEntries(config)) {
+    let adapter: A2AAdapter;
+    try {
+      adapter = createA2AAdapter({
+        name,
+        cardUrl: h.card,
+        ...(h.tokenCommand !== undefined ? { tokenCommand: h.tokenCommand } : {}),
+        ...(options.fetch ? { fetch: options.fetch } : {}),
+        ...(options.lookup ? { lookup: options.lookup } : {}),
+        ...(options.runCommand ? { runCommand: options.runCommand } : {}),
+      });
+    } catch (err) {
+      notice?.(`harnesses.${name}: ${err instanceof Error ? err.message : String(err)}`);
+      continue;
+    }
+    const blurbOf = (card: A2AAgentCard | undefined): string =>
+      cardBlurb({
+        name,
+        ...(h.description !== undefined ? { ownerDescription: h.description } : {}),
+        ...(card !== undefined ? { card } : {}),
+        origin: adapter.origin,
+      });
+    const frozenCard = options.a2aCards?.get(name);
+    const frozen = blurbOf(frozenCard);
+    const header = reportHeader(name, adapter.origin);
+    instances.set(adapter.id, {
+      adapter,
+      idleMinutes: h.idleMinutes,
+      inputFrom: h.inputFrom,
+      origin: adapter.origin,
+      // C5: the security checks read the LIVE card at first use; when its text
+      // is not the one the model was shown this session, the report says so.
+      reportHeader: () => {
+        const live = adapter.card();
+        return frozenCard !== undefined && live !== undefined && blurbOf(live) !== frozen
+          ? `${header}\n(the remote card changed since this session started)`
+          : header;
+      },
+    });
+    types.push({
+      name: adapter.id,
+      // The type list reads `- <name>: <description>`: the blurb without its name.
+      description: frozen.slice(adapter.id.length).replace(/^(?: — |\. )/, ""),
+      prompt: "",
+      tools: [],
+      harness: { adapter: adapter.id, mode: "remote" },
+    });
+  }
+  return { instances, types };
 }
 
 /**
@@ -469,6 +646,16 @@ export interface BuildAgentOptions {
     readonly which?: (command: string) => string | null;
     readonly spawner?: Spawner;
     readonly groups?: ProcessGroups;
+    /**
+     * The `a2a` instances' cards for the model's type list
+     * (docs/feat/a2a-client.md C5), read by `prefetchA2ACards`; frozen into
+     * this build's `agent_task` text. Absent → «(remote card not loaded)».
+     */
+    readonly a2aCards?: A2ACards;
+    /** The `a2a` adapters' network and token command (tests inject; default real). */
+    readonly fetch?: typeof fetch;
+    readonly lookup?: A2ALookup;
+    readonly runCommand?: A2ACommandRunner;
   };
   /**
    * Daemon-side log for hook failures (`onFailure: "ignore"`). Never the
@@ -849,13 +1036,33 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       !tunnelled && options.harnesses !== undefined
         ? claudeHarness(config, options.harnesses)
         : undefined;
+    // Remote A2A agents (docs/feat/a2a-client.md C8): the same gate, ONE
+    // instances map with `claude`'s.
+    const remote =
+      !tunnelled && options.harnesses !== undefined
+        ? a2aHarnesses(config, options.harnesses, options.notice)
+        : undefined;
+    // Remote agents the model proposes and the owner approves (C11): the same
+    // gate — never in a pod. ONE registry per approvals store: a settings
+    // rebuild keeps it, `/clear` empties it with the grants.
+    const proposed =
+      !tunnelled && options.harnesses !== undefined ? proposedAgentsFor(grants) : undefined;
+    const harnessDeps: HarnessDeps | undefined =
+      harness !== undefined ||
+      proposed !== undefined ||
+      (remote !== undefined && remote.instances.size > 0)
+        ? {
+            ...(harness?.deps ?? { cwd: config.cwd }),
+            instances: new Map([...(harness?.deps.instances ?? []), ...(remote?.instances ?? [])]),
+          }
+        : undefined;
     if (tunnelled && Object.values(config.harnesses).some((h) => h.configured)) {
       options.notice?.(
         "harnesses: ignored in a pod — a harness sub-agent runs only on the laptop or a serve you own",
       );
     }
     const agentTypes = mergeAgentTypes(
-      harness ? [...BUILTIN_AGENT_TYPES, harness.type] : BUILTIN_AGENT_TYPES,
+      [...BUILTIN_AGENT_TYPES, ...(harness ? [harness.type] : []), ...(remote?.types ?? [])],
       loadUserAgentTypes(config.configDir, config.packageAgentDirs).types,
     );
     const published = tunnelled ? config.publishedModels : undefined;
@@ -900,12 +1107,17 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       // (docs/feat/session-capabilities.md): read at each child round, so
       // `agent` (built below) is always set by the time a child runs.
       capabilities: () => agent.capabilities(),
-      ...(harness ? { harness: harness.deps } : {}),
+      ...(harnessDeps ? { harness: harnessDeps } : {}),
+      ...(proposed ? { proposed } : {}),
     };
     const { run, types, readOnlyType } = createSubagentRunner(runnerDeps);
     // The types a harness runs (an `agents/*.md` of the same name replaces one):
     // their `model` is the harness's own string, shape-checked only (D3).
-    const harnessTypeNames = types.filter((t) => t.harness !== undefined).map((t) => t.name);
+    // A remote agent chooses its own model (C5): its types take none.
+    const harnessTypeNames = types
+      .filter((t) => t.harness !== undefined && t.harness.mode !== "remote")
+      .map((t) => t.name);
+    const remoteTypeNames = types.filter((t) => t.harness?.mode === "remote").map((t) => t.name);
     if (published) {
       // Said here because only the pod knows its own types (the laptop cannot).
       for (const line of unknownTypeModelWarnings(
@@ -930,6 +1142,8 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
               harnessModels: { types: harnessTypeNames, note: harness.note, isModel: isModelShape },
             }
           : {}),
+        ...(remoteTypeNames.length > 0 ? { remoteTypes: remoteTypeNames } : {}),
+        ...(proposed ? { proposedTypes: (name: string) => proposed.get(name) !== undefined } : {}),
         models: tunnelled
           ? publishedOptions(published)
           : config.selectableModels.map((name) => {
@@ -938,6 +1152,42 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
             }),
       }),
     );
+    if (proposed !== undefined) {
+      const net = options.harnesses;
+      const typeNames = new Set([
+        ...types.map((t) => t.name),
+        ...Object.keys(config.harnesses).map((name) => `a2a:${name}`),
+      ]);
+      tools.register(
+        createA2AAddAgentTool({
+          inspect: (cardUrl, signal) =>
+            inspectProposedAgent(cardUrl, {
+              signal,
+              ...(net?.fetch ? { fetch: net.fetch } : {}),
+              ...(net?.lookup ? { lookup: net.lookup } : {}),
+            }),
+          existing: (origin) => {
+            const agent = proposed.forOrigin(origin);
+            return agent && { type: agent.type.name, summary: agent.summary };
+          },
+          register: (checked) => {
+            const agent = createProposedAgent({
+              name: proposedAgentName(
+                checked.host,
+                (t) => typeNames.has(t) || proposed.get(t) !== undefined,
+              ),
+              checked,
+              ...(net?.fetch ? { fetch: net.fetch } : {}),
+              ...(net?.lookup ? { lookup: net.lookup } : {}),
+            });
+            proposed.add(agent);
+            return { type: agent.type.name, summary: agent.summary };
+          },
+          // The add ask goes to the session's ONE broker (AGENTS §7).
+          ask: (req, opts) => permissions.request(req, opts),
+        }),
+      );
+    }
     // The model's ONE handle on a child it launched (docs/feat/agent-status.md,
     // "Merge into agent_control"): see it (`status`, read-only), write to it
     // (`message`) or stop it (`kill`). Registered only here, where `background`

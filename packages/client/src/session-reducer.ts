@@ -233,7 +233,11 @@ function pendingIn(held: Held, seq: number): string[] {
     if (params.seq <= seq) continue;
     const update = params.update as { type: string; requestId?: unknown };
     if (typeof update.requestId !== "string") continue;
-    if (update.type === "permission_request" && !pending.includes(update.requestId)) {
+    // A remote question is an ask too (docs/feat/a2a-client.md C6).
+    if (
+      (update.type === "permission_request" || update.type === "question_request") &&
+      !pending.includes(update.requestId)
+    ) {
       pending.push(update.requestId);
     } else if (update.type === "permission_resolved") {
       const at = pending.indexOf(update.requestId);
@@ -308,6 +312,7 @@ class Stepper {
         else turn = null;
         break;
       case "permission_request":
+      case "question_request":
         if (!this.state.pending.includes(update.requestId)) {
           this.set({ pending: [...this.state.pending, update.requestId] });
         }

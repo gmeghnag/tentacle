@@ -272,12 +272,14 @@ describe("the skeleton holds the LOADED layout (`no reflow`)", () => {
       "Attempts",
       "Round",
       "Duration",
+      // docs/fix/workflow-no-verdict (b): the step's WHY, from the row itself.
+      "Reason",
     ]);
     // English, like the rest of the app (owner, docs/feat/workflows-ui.md Q3).
     expect(view.kv.find(([k]) => k === "Round")?.[1]).toMatch(/^\d+ of \d+$/);
     expect(
       skeletonBars(view, width, false).filter((b) => b.key.startsWith("bar-kv-")),
-    ).toHaveLength(7);
+    ).toHaveLength(8);
   });
 
   test("an absent field is ABSENT, not an empty row", () => {
@@ -311,9 +313,14 @@ describe("the skeleton holds the LOADED layout (`no reflow`)", () => {
   });
 
   test("the log area is drawn in the mono token's own line height", () => {
-    const logBoxes = detailLayout(view, width).filter((b) => b.section === "log");
-    // The reason is three lines (the verdict, then the two findings).
-    expect(logBoxes).toHaveLength(3);
+    // `detailBlocks` gives the kv rows; the log block is the READ's (`detailLog`),
+    // so the fixture supplies one — three lines, whatever their words.
+    const withLog = {
+      ...view,
+      log: logLines("prompt:\nreview the diff\nreport:\ntask.ts:380 misses an abort"),
+    };
+    const logBoxes = detailLayout(withLog, width).filter((b) => b.section === "log");
+    expect(logBoxes).toHaveLength(4);
     for (const box of logBoxes) {
       expect(box.height).toBe(typography.mono.lineHeight);
     }

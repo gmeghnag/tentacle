@@ -621,7 +621,12 @@ export class AgentJobs {
       };
     }
     // The hint names `agent_notify`: only a child that HAS it is told to use it.
-    const pushed = entry.inbox.push(inboxText(from, text, this.twoWay && entry.notifiable), from);
+    // `text` itself kept as `raw`: a remote agent's reply is the sender's words.
+    const pushed = entry.inbox.push(
+      inboxText(from, text, this.twoWay && entry.notifiable),
+      from,
+      text,
+    );
     if (pushed.ok) {
       return { ok: true, index: pushed.index };
     }

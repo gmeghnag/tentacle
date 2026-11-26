@@ -551,6 +551,11 @@ const FIXTURES: Record<string, Json[]> = {
     { sessionId: "s", requestId: "r", optionId: "allow_once" },
   ],
   "methods/session~1resolve_permission/result": [{}],
+  "methods/session~1answer_question/params": [
+    { sessionId: "s", requestId: "r", answer: "main" },
+    { sessionId: "s", requestId: "r" },
+  ],
+  "methods/session~1answer_question/result": [{}],
   "methods/mcp~1status/params": [{}],
   "methods/mcp~1status/result": [
     { servers: [] },

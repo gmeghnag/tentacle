@@ -153,6 +153,12 @@ export function stepPermissionKey(
     }
     return answer(choice?.response ?? { allowed: false });
   }
+  // A question's approving row is the FIELD: `y` opens it, `a` has no meaning —
+  // a bare allow would be an empty answer.
+  const answersByText = choices.some((c) => c.reply === true && c.response.allowed === true);
+  if (answersByText && (char === "y" || char === "a")) {
+    return char === "y" ? { state: open(state), action: NONE } : { state, action: NONE };
+  }
   if (char === "y") {
     return answer({ allowed: true, scope: "once" });
   }
@@ -188,8 +194,11 @@ function stepField(
     case "submit": {
       const text = editor.value;
       // Empty or blank: a plain No (owner Q2). The client normalizes the rest.
+      // A QUESTION's field is its answer (`allowed: true + message`); every
+      // other reply is a refusal with words (a2a-client C6).
+      const answers = ctx.choices.find((c) => c.reply === true)?.response.allowed === true;
       const response: PermissionResponse =
-        text.trim() === "" ? { allowed: false } : { allowed: false, message: text };
+        text.trim() === "" ? { allowed: false } : { allowed: answers, message: text };
       return { state, action: { kind: "answer", response } };
     }
     case "newline":

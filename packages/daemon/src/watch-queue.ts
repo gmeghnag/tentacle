@@ -48,6 +48,7 @@ export const WATCH_COALESCE_MS = 250;
 const FLUSH_NOW: ReadonlySet<SessionUpdate["type"]> = new Set<SessionUpdate["type"]>([
   "permission_request",
   "permission_resolved",
+  "question_request",
   "turn_start",
   "turn_end",
   "session_closed",

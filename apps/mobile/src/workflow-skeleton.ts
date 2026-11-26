@@ -266,5 +266,18 @@ export function detailBlocks(
   if (step.durationMs !== undefined) {
     kv.push(["Duration", `${Math.round(step.durationMs / 100) / 10}s`]);
   }
-  return { kv, log: logLines(step.reason), actions: actionCount };
+  // WHY the step ended as it did, as its own row (docs/fix/workflow-no-verdict (b)):
+  // the daemon sends it ON THE ROW, so it is visible before any read lands, and it
+  // wraps like the approve path's own `Reason`. An `approve` step is excluded — its
+  // answer block already carries the denial's `Reason`, and two identical rows
+  // would read as two reasons.
+  if (step.kind !== "approve" && step.reason !== undefined) {
+    const why = oneLine(step.reason);
+    if (why !== "") {
+      kv.push(["Reason", why]);
+    }
+  }
+  // No log block from the row: the reason has its row now, and the log block is the
+  // READ's (prompt, then report — `detailLog`), which `stepBlocks` puts here.
+  return { kv, log: [], actions: actionCount };
 }

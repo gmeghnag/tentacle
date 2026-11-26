@@ -590,10 +590,10 @@
   color: var(--c-label);
 }
 .k-sheet[data-permission] {
-  padding: var(--m-permission-sheet-sheet-padding-top)
-    var(--m-permission-sheet-sheet-padding-horizontal)
-    var(--m-permission-sheet-sheet-padding-bottom);
-  gap: var(--m-permission-sheet-sheet-gap);
+  padding: var(--m-permission-sheet-returned-padding-top)
+    var(--m-permission-sheet-returned-padding-horizontal)
+    var(--m-permission-sheet-returned-padding-bottom);
+  gap: var(--m-permission-sheet-returned-gap);
 }
 .k-grabber {
   align-self: center;
@@ -602,51 +602,238 @@
   border-radius: var(--m-sheet-grabber-border-radius);
   background: var(--c-sep-sheet);
 }
-.k-perm-head {
-  display: flex;
-  align-items: center;
-  gap: var(--m-permission-sheet-head-gap);
-}
-.k-perm-tile {
-  width: var(--m-permission-sheet-tile-width);
-  height: var(--m-permission-sheet-tile-height);
-  border-radius: var(--m-permission-sheet-tile-border-radius);
-  background: var(--c-fill);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.k-perm-detail {
-  border-radius: var(--m-permission-sheet-detail-box-border-radius);
-  padding: var(--m-permission-sheet-detail-box-padding);
-  background: var(--c-code-on-sheet);
-  font: var(--t-mono-size) / var(--t-mono-lh) var(--t-mono-family);
-  white-space: pre-wrap;
-  overflow: hidden;
-}
-.k-perm-options {
+/* ── THE ask (D4: `ui/AskCard.tsx` + `ui/AskSlim.tsx`) ─────────────────────
+   One component in the session sheet and on the workflow run screen. Every
+   metric is the app's (`--m-ask-card-*` / `--m-ask-slim-*`), read off those two
+   components' `StyleSheet.create`. */
+.k-ask {
   display: flex;
   flex-direction: column;
-  gap: var(--m-permission-sheet-options-gap);
+  gap: var(--m-ask-card-card-gap);
+  min-height: 0;
+  color: var(--c-label);
 }
-.k-perm-pill {
-  min-height: var(--m-permission-sheet-pill-min-height);
-  border-radius: var(--m-permission-sheet-pill-border-radius);
-  padding: var(--m-permission-sheet-pill-padding-vertical)
-    var(--m-permission-sheet-pill-padding-horizontal);
+/* In the sheet the CARD carries the padding (the app's `card` style); the frame adds none. */
+.k-ask[data-on="sheet"] {
+  padding: var(--m-ask-card-card-padding-top) var(--m-ask-card-card-padding-horizontal)
+    var(--m-ask-card-card-padding-bottom);
+}
+.k-ask-o {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: var(--m-permission-sheet-pill-gap);
-  box-sizing: border-box;
-  background: var(--c-fill);
+  gap: var(--m-ask-card-origin-gap);
+  font: var(--t-footnote-size) / var(--t-footnote-lh) var(--font-ui);
+  color: var(--c-sec);
+  min-width: 0;
+}
+/* The glyph's box is the SVG's own width/height (`askGlyph(size)`), as in the
+   app; only its ink is CSS. */
+.k-ask-o .k-sym {
   color: var(--c-label);
+  flex: none;
+}
+/* Polpetto, a template in the row's ink: the mask as runs, the eyes its holes. */
+.k-ask-p {
+  position: relative;
+  flex: none;
+  color: var(--c-label);
+}
+.k-ask-p i {
+  position: absolute;
+  background: currentColor;
+}
+.k-ask-lead {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.k-ask-lead b {
+  color: var(--c-label);
+  font-weight: 600;
+}
+.k-ask-age {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+.k-ask-t {
   font: var(--t-headline-weight) var(--t-headline-size) / var(--t-headline-lh)
     var(--t-headline-family);
 }
-.k-perm-pill[data-primary] {
+.k-ask-c {
+  background: var(--c-code-on-sheet);
+  border-radius: var(--m-ask-card-box-border-radius);
+  padding: var(--m-ask-card-box-padding);
+  display: flex;
+  flex-direction: column;
+  gap: var(--m-ask-card-box-gap);
+  font: var(--t-mono-code-size) / var(--t-mono-code-lh) var(--t-mono-code-family);
+  min-height: 0;
+}
+.k-ask-c .bd {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+/* Expanded: the command scrolls INSIDE the box, the actions stay below it. */
+.k-ask-c[data-x] .bd {
+  max-height: var(--m-ask-card-box-scroll-max-height);
+  overflow: auto;
+}
+.k-ask-ln {
+  white-space: pre;
+}
+.k-ask-ft {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--m-ask-card-origin-gap);
+  font: var(--t-footnote-size) / var(--t-footnote-lh) var(--font-ui);
+  color: var(--c-sec);
+}
+.k-ask-ft .lk {
+  color: var(--c-accent);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--m-step-line-gap);
+}
+.k-ask-also,
+.k-ask-arming {
+  font: var(--t-footnote-size) / var(--t-footnote-lh) var(--font-ui);
+  color: var(--c-sec);
+}
+/* The actions sit OUTSIDE the command box, so they are reachable at any detent. */
+.k-ask-a {
+  display: flex;
+  align-items: center;
+  gap: var(--m-ask-card-actions-gap);
+  justify-content: flex-end;
+  flex: none;
+}
+.k-ask-sp {
+  margin-right: auto;
+}
+.k-ask-mo {
+  margin-right: auto;
+  width: var(--m-ask-card-more-width);
+  height: var(--m-ask-card-more-height);
+  border-radius: var(--m-ask-card-more-border-radius);
+  background: var(--c-fill);
+  color: var(--c-accent);
+  display: inline-grid;
+  place-items: center;
+}
+.k-ask-b {
+  min-height: var(--m-ask-card-capsule-min-height);
+  border-radius: var(--m-ask-card-capsule-border-radius);
+  padding: 0 var(--m-ask-card-capsule-padding-horizontal);
+  display: inline-grid;
+  place-items: center;
+  background: var(--c-fill);
+  color: var(--c-label);
+  font: var(--t-subhead-strong-weight) var(--t-subhead-strong-size) / var(--t-subhead-strong-lh)
+    var(--t-subhead-strong-family);
+  white-space: nowrap;
+}
+/* Allow once is the only accent; Deny stays grey — the WORDS carry the meaning. */
+.k-ask-b[data-primary] {
   background: var(--c-accent-fill);
   color: var(--c-on-accent);
+}
+.k-ask-menu {
+  border: var(--m-row-separator-height) solid var(--c-glass-border);
+  box-shadow: var(--shadow-glass);
+  border-radius: var(--r-tile);
+  background: var(--c-glass);
+  overflow: hidden;
+  font: var(--t-body-size) / var(--t-body-lh) var(--font-ui);
+}
+.k-ask-menu div {
+  padding: var(--m-ask-card-menu-item-padding-vertical)
+    var(--m-ask-card-menu-item-padding-horizontal);
+}
+.k-ask-menu div + div {
+  border-top: var(--m-row-separator-height) solid var(--c-sep);
+}
+/* The one-row form: the peek detent and the banner. It never draws an answer. */
+.k-ask-slim {
+  display: flex;
+  align-items: center;
+  gap: var(--m-ask-slim-row-gap);
+  min-height: var(--m-ask-slim-row-min-height);
+  padding: var(--m-ask-slim-row-padding-vertical) var(--m-ask-slim-row-padding-horizontal);
+  border-radius: var(--m-ask-slim-row-border-radius);
+  background: var(--c-tint);
+  box-sizing: border-box;
+  color: var(--c-label);
+}
+.k-ask-slim .hd {
+  width: var(--s-icon-tile);
+  height: var(--s-icon-tile);
+  border-radius: 50%;
+  background: var(--c-warn-bg);
+  color: var(--c-warn-text);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.k-ask-slim .tx {
+  flex: var(--m-ask-slim-text-flex);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.k-ask-slim .tx > b {
+  font: var(--t-subhead-strong-weight) var(--t-subhead-strong-size) / var(--t-subhead-strong-lh)
+    var(--font-ui);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.k-ask-slim .tx .k-ask-o {
+  font-size: var(--t-caption-size);
+  line-height: var(--t-caption-lh);
+}
+.k-ask-slim .go {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--m-ask-card-box-gap);
+  color: var(--c-accent);
+  font: var(--t-subhead-strong-weight) var(--t-subhead-strong-size) / var(--t-subhead-strong-lh)
+    var(--font-ui);
+  flex: none;
+}
+/* The sheet frame: the grabber and the caller's content. */
+.k-ask-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  background: var(--c-page);
+}
+/* Only ABOVE the peek: at the peek detent the screen behind stays usable. */
+.k-ask-wrap[data-dim] {
+  background: var(--c-scrim);
+}
+.k-ask-sheet {
+  background: var(--c-sheet);
+  border-radius: var(--r-sheet) var(--r-sheet) 0 0;
+  padding: var(--m-sheet-sheet-padding-top) var(--m-sheet-sheet-padding-horizontal)
+    var(--frame-safe-bottom);
+  display: flex;
+  flex-direction: column;
+  gap: var(--m-sheet-sheet-gap);
+  box-shadow: var(--shadow-glass);
+  color: var(--c-label);
+}
+.k-ask-sheet[data-detent="peek"] {
+  gap: 0;
+  padding-top: var(--m-permission-sheet-slim-padding-top);
+}
+.k-ask-sheet[data-detent="large"] {
+  min-height: calc(var(--frame-h) - var(--frame-safe-top));
+  box-sizing: border-box;
 }
 
 /* ── pill / toast / banner ───────────────────────────────────────────────── */

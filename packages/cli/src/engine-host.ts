@@ -75,6 +75,13 @@ export interface EngineRawExec {
 export interface EngineCreateOptions {
   /** docker/podman: the laptop folder to mount (k8s: refused — never mounts). */
   readonly workspace?: WorkspaceMount;
+  /**
+   * docker/podman: the engine network to put the workload on (feat/run-network
+   * D3: `none`, `bridge`, `host` or a name, passed through verbatim — no
+   * tentacle-side special case). Absent: no `NetworkMode` at all, so the
+   * engine's own default applies. k8s: refused (a pod's network is the cluster's).
+   */
+  readonly network?: string;
   /** Extra workload labels (slice E: `ps`); the host's own labels win a clash. */
   readonly labels?: Readonly<Record<string, string>>;
   /** Free-text metadata (slice E): k8s annotations; docker/podman add them as labels. */

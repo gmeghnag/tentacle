@@ -191,14 +191,15 @@ appId: so.tentacle.app
     id: "workflow-start-run"
 - extendedWaitUntil:
     visible:
-      id: "workflow-ask-run"
+      id: "perm-sheet"
     timeout: 20000
-# The run's hash approval is INLINE on the run screen (WorkflowRun `workflow-ask-run`,
-# Allow once / Deny), not a `perm-sheet` (e2e fix round 3).
+# The run's hash approval is the ask sheet, presented by the Session screen over
+# its own run (docs/fix/mobile-ask-surfaces.md D6); the run screen keeps only the
+# slim row (`workflow-ask-run`) behind it.
 - assertVisible:
-    id: "workflow-ask-run-allow"
+    id: "perm-allow_once"
 - tapOn:
-    id: "workflow-ask-run-deny"
+    id: "perm-reject_once"
 # Daemon truth: the file the Review listed is on the daemon's disk.
 - runScript:
     file: "44-workflow-editor.js"
