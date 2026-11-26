@@ -372,3 +372,24 @@ Reviewer: same model family as a likely Opus executor — fresh context only; sh
 
 *— claude-opus-5-5, 2026-11-26*
 
+### Round 3
+
+**Verdict: PASS.** Scope: `ef19f199`.
+
+- R2 HIGH (wrapped phrase not copied): **resolved** — `isDeliberate`
+  (`selection.ts:84-87`) is now direction-free physical travel: `|Δrow| ≥ 2 ||
+  |Δcol| ≥ 3`. Pinned by the pure rule (both directions), the integration test
+  press (10,1) → drag (2,2) (copies, contains `\n`, status bar says "Copied"),
+  and the dispatch seam (`mk(5, 1, 40)`).
+- Mutations (reverted; `git status` clean): forward-only travel restored → 4 fail
+  (incl. the wrapped-phrase integration test); one row counts alone
+  (`rows >= 1`) → 3 fail (pure, jitter integration, dispatch). Both properties bite.
+- Regressions: none found. Accepted trade-off: a one-row crossing with < 3 columns
+  of travel (e.g. (0,40) → (1,38)) does not copy — physically indistinguishable
+  from the jitter; changelog wording matches the rule.
+- Gate: accidental-copy + mouse-stream + app + selection = 169 pass / 0 fail;
+  `bun run lint` clean; `bun run typecheck` 0 errors. Full `bun run test` left to
+  the orchestrator's merge gate.
+
+*— claude-opus-5-5, 2026-11-26*
+
