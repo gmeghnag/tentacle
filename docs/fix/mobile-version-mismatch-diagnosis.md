@@ -1,6 +1,6 @@
 # fix/mobile-version-mismatch-diagnosis — A phone on an older protocol must read "Update the app", not "Stopped"
 
-> **Status:** implementation (approved)
+> **Status:** execution (done — awaiting Review)
 > **Branch:** `fix/mobile-version-mismatch-diagnosis`
 > **Type:** fix · **Size:** S · **Blast:** contained · **Suited:** DeepSeek executes; standard in-context Review (pure/leaf mobile modules, no §7 invariant, no protocol/persistence change)
 > **Changelog:** `changelog.d/mobile-version-mismatch-diagnosis.fixed.md`
@@ -419,7 +419,141 @@ double quotes, trailing commas, no `!` assertions.
 
 ## Execution
 
-*— (pending — the executor fills this in after implementing)*
+*— Claude (Anthropic), 2026-11-26. Model snapshot string is not surfaced to the agent; the doc header expected DeepSeek to execute this one.*
+
+**Load-bearing check (re-run first, as the brief demands).** The Context repro, run
+unchanged on this branch's base (`a257d85d`, `main`), reproduced the bug byte for
+byte — same two lines as recorded in Context:
+
+```
+== two projects, one answered (app protocol 25, serve 28) ==
+  tentacle: "New · no sessions yet"  [state=new]
+  notes: "Stopped · run `tentacle serve` in /Users/me/notes"  [state=stopped]
+
+== one project (app protocol 25, serve 28) ==
+  tentacle: "Not reachable"  [state=unreachable]
+```
+
+Two claims of the §3 chain were also checked against the source before editing:
+`explainVersionMismatch` returns **the same object** when `data` is present
+(`packages/client/src/version-mismatch.ts:31-34`), and `RemoteClient.handshake`
+throws `explainVersionMismatch(error, this.daemonKind) ?? error`
+(`packages/client/src/remote-client.ts:3457-3460`). A9 pins that hop.
+
+**Drift from the Implementation (2 items, both fixture/mechanics — no design change):**
+
+1. **The Context repro's numbers could not exercise the fix.** It simulated an
+   older phone by hard-coding `APP_PROTOCOL = PROTOCOL_VERSION - 3` while leaving
+   `daemon.protocol = PROTOCOL_VERSION`, i.e. it asked the derivation to read the
+   *app's* number from `data.client.protocol` — the very thing decision 7 and rule
+   7 of `protocolSkewOf` forbid (our own compiled-in number wins). With the design
+   implemented, that fixture correctly lands on the "report contradicts itself"
+   rule (equal numbers ⇒ no claim) and still prints «Stopped». Repro corrected to
+   express the owner's 25-vs-28 shape in this tree's numbers —
+   `APP_PROTOCOL = PROTOCOL_VERSION`, `SERVE_PROTOCOL = PROTOCOL_VERSION + 3` — and
+   it then shows the fix end to end. The design was not changed. The repro's only
+   change (script at `.tentacle/tmp/mobile-version-mismatch-diagnosis/repro.ts`,
+   gitignored, so kept here):
+
+   ```ts
+   const APP_PROTOCOL = PROTOCOL_VERSION;
+   const SERVE_PROTOCOL = PROTOCOL_VERSION + 3; // the newer side
+   // …
+   daemon: { protocol: SERVE_PROTOCOL, tentacle: "0.5.1" },
+   ```
+2. **`protocolSkewOf` reports the pair; `skewState` alone decides the side.** The
+   Design's rule list put the `>` / `<` comparison inside `protocolSkewOf`; since
+   `skewState` is defined by that same comparison, having both would be two
+   derivations that can disagree (the exact thing Orchestrator decision 3 rules
+   out). Behaviour is identical; `protocolSkewOf` keeps `serve` as sent and still
+   returns `undefined` for an equal pair. A1/A2/M1/M2 pin it.
+
+**As built, in the Implementation's order:**
+
+1. `apps/mobile/src/link-diagnosis.ts:87-138` — `ProtocolSkew`, `protocolSkewOf`
+   (`:100`)
+   (code first, then report presence, then `VersionMismatchDataSchema.safeParse`,
+   then the equal-protocol "no claim"; `data.client.protocol` and `data.update`
+   ignored), `skewState`, `protocolSkewNote`, a private `skewNote`;
+   `diagnosisMessage` gained the optional `skew` and appends the note only to
+   `update-app` / `update-computer` (`:207-210`).
+2. `apps/mobile/src/project-rows.ts` — `NEEDS_ACTION` (`:171-176`, used ONLY at the
+   band, `:334`); `failedState`'s skew branch before the `stopped`/`unreachable`
+   fallback (`:193-211`, helper `skewOfProbe` at `:209`); `detailOf`'s two update
+   arms append `skewNoteOf(probe)` (`:236-238`, helper at `:214`).
+3. `apps/mobile/src/session-list.ts:402-412` — `describeError`'s skew branch after
+   `Unauthorized`, before the generic `retry: true`: the diagnosis sentence with a
+   `computerName`, else the daemon's own message (and the module's existing
+   fallback text when that message is empty), always `retry: false`.
+4. Tests: `apps/mobile/test/link-diagnosis.test.ts` (9 new, A1-A9),
+   `apps/mobile/test/project-rows.test.ts` (6 new, B10-B16),
+   `apps/mobile/test/session-list.test.ts` (3 new, C17-C19).
+5. `changelog.d/mobile-version-mismatch-diagnosis.fixed.md` — one bullet.
+
+No change to `connection.ts`, `App.tsx`, `computer-rows.ts`, `drawer-list.ts`,
+`pairing-flow.ts`, the protocol, the daemon, or `PROTOCOL_VERSION` — nothing rides
+the wire, so no `protocol.d/` note and no `protocol.json` regeneration. `TODO.md`
+untouched (the orchestrator's).
+
+**Red before green, per slice (narrow files, §4):**
+
+- **A** — red as an absent export (`SyntaxError: Export named 'protocolSkewNote'
+  not found`, 1 error): unavoidable for a brand-new API, so A's non-vacuity rests
+  on the mutations M1/M3/M4 below, which are red **on the assertions**.
+- **B** — red on the reported bug itself, four failures on unmodified code:
+  `Expected: "update-app" / Received: "stopped"` (twice, incl. the sibling-answered
+  screenshot case), `Expected: "update-computer" / Received: "unreachable"`,
+  `Expected: "attention" / Received: "offline"`.
+- **C** — red on the exact property: `Expected to contain: "update the app" /
+  Received: "protocol version mismatch"` and `Expected: false / Received: true`
+  (the Retry offer for a skew no retry can fix).
+
+**Mutation checks (§9 non-vacuity), each applied to the finished code, run, and
+reverted from a scratch backup — every one red on the target assertion:**
+
+| # | Mutation | Result |
+| --- | --- | --- |
+| M1 | `skewState` comparison flipped | 3 fail — incl. «serve newer → update-app» |
+| M2 | `skewState` never returns `update-computer` | 1 fail — B12 «serve older → update-computer» |
+| M3 | an unreadable report treated as an absent one | 1 fail — A4 |
+| M4 | `app` taken from `data.client.protocol` | 2 fail — A1, A7 |
+| M5 | skew branch moved after the `stopped`/`unreachable` fallback | 2 fail — B10 (sibling answered → stopped), B13 (4404 → stopped) |
+| M6 | the row's detail drops the protocol numbers | 2 fail — B10, B12 |
+| M7 | `describeError`'s skew branch removed | 2 fail — C17, C18 |
+
+Restored and green afterwards (21 pass). Script and outputs:
+`.tentacle/tmp/mobile-version-mismatch-diagnosis/mutations.sh` (gitignored).
+
+**End-to-end evidence after the fix** (same repro, corrected fixture):
+
+```
+== two projects, one answered (app protocol 28, serve 31) ==
+  tentacle: "New · no sessions yet"  [state=new]
+  notes: "Update the app · it runs a newer tentacle than this app (app protocol 28, serve 31)"  [state=update-app]
+
+== one project (app protocol 28, serve 31) ==
+  tentacle: "Update the app · it runs a newer tentacle than this app (app protocol 28, serve 31)"  [state=update-app]
+```
+
+**Failure-mode table, as built:** serve newer → `update-app` (B10, B11, C17);
+serve older → `update-computer` (A2, B12, C17); no `data` → `update-computer` with
+the «predates the version report» note (A3, A9); unparseable `data` → no claim,
+today's fallback (A4); equal protocols → no claim (A5); an authenticated diagnosis
+wins (B14); an e2e skew keeps its numberless detail (B15, proving the note comes
+from the report, not the state); `Unauthorized` / `MethodNotFound` / any other
+error unchanged (A6, C19). Re-probe stability needs no code: the derivation is a
+pure function of the same object, and the diagnoser is never called.
+
+**Narrow verification run here** (the full gate is the orchestrator's script):
+`bun test` on the three touched files → **77 pass, 0 fail**;
+`bunx biome check` on the six changed files → clean;
+`bunx tsc -p apps/mobile --noEmit` → clean. Changelog fragment written; `TODO.md`
+and `CHANGELOG.md` untouched.
+
+**Not verified here:** the iOS/Android surface (no simulator) — the change is pure
+view-model, so the screens render the new `word`/`detail` with no code change; and
+nothing was run against a real `serve` on a different `PROTOCOL_VERSION` (the
+report path is pinned by A9's object identity plus the daemon-side schema).
 
 ## Review
 

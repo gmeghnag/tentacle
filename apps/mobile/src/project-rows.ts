@@ -17,7 +17,13 @@
  */
 import type { SessionListEntry } from "@tentacle/protocol";
 import type { ComputerProbe } from "./computer-rows.ts";
-import type { LinkDiagnosis } from "./link-diagnosis.ts";
+import {
+  type LinkDiagnosis,
+  type ProtocolSkew,
+  protocolSkewNote,
+  protocolSkewOf,
+  skewState,
+} from "./link-diagnosis.ts";
 import { projectLabel } from "./session-list.ts";
 
 export type ProjectState =
@@ -155,6 +161,19 @@ export function reprobeDelay(
 
 const NEEDS_PAIRING: ReadonlySet<ProjectState> = new Set(["revoked", "maybe-reset", "broken"]);
 
+/**
+ * States whose section band is «Needs attention»: the ones above, plus the two
+ * update verdicts — that computer DID answer, so «Offline» would be as false as
+ * «Stopped» was (docs/fix/mobile-version-mismatch-diagnosis.md). Used for the
+ * band ONLY: the row's tone and its menu stay keyed on `NEEDS_PAIRING`, because
+ * "pair again / remove" is the wrong offer for an update.
+ */
+const NEEDS_ACTION: ReadonlySet<ProjectState> = new Set([
+  ...NEEDS_PAIRING,
+  "update-app",
+  "update-computer",
+]);
+
 function sessionsOf(entries: readonly SessionListEntry[], more: boolean): string {
   if (entries.length === 0) {
     return "no sessions yet";
@@ -176,7 +195,25 @@ function failedState(observation: ProjectObservation, siblingAnswered: boolean):
   if (d === "revoked" || d === "maybe-reset" || d === "update-app" || d === "update-computer") {
     return d;
   }
+  // A protocol skew (`initialize` refused after the handshake succeeded) proves
+  // the computer ANSWERED — so it must never fall through to `stopped` ("run
+  // `tentacle serve`" for a daemon that is running) or `unreachable`.
+  const skew = skewOfProbe(observation);
+  if (skew !== undefined) {
+    return skewState(skew);
+  }
   return observation.absent || siblingAnswered ? "stopped" : "unreachable";
+}
+
+/** The protocol skew a failed probe carries, if that is what it failed with. */
+function skewOfProbe(observation: ProjectObservation): ProtocolSkew | undefined {
+  return observation.probe.ok ? undefined : protocolSkewOf(observation.probe.error);
+}
+
+/** The numbers of a protocol skew, in parentheses — nothing for an e2e skew (no numbers there). */
+function skewNoteOf(probe: ComputerProbe): string {
+  const skew = probe.ok ? undefined : protocolSkewOf(probe.error);
+  return skew === undefined ? "" : ` (${protocolSkewNote(skew)})`;
 }
 
 function detailOf(state: ProjectState, record: ProjectRecordLike, probe: ComputerProbe): string {
@@ -196,9 +233,9 @@ function detailOf(state: ProjectState, record: ProjectRecordLike, probe: Compute
     case "broken":
       return "pair again or remove";
     case "update-app":
-      return "it runs a newer tentacle than this app";
+      return `it runs a newer tentacle than this app${skewNoteOf(probe)}`;
     case "update-computer":
-      return "tentacle on it is older than this app";
+      return `tentacle on it is older than this app${skewNoteOf(probe)}`;
     case "unreachable":
       return "";
   }
@@ -294,7 +331,7 @@ export function projectSections(
     const sectionState: SectionState =
       answered > 0
         ? "online"
-        : rows.every((row) => NEEDS_PAIRING.has(row.state))
+        : rows.every((row) => NEEDS_ACTION.has(row.state))
           ? "attention"
           : rows.some((row) => row.state === "checking")
             ? // Nothing has answered YET, but something has not been asked yet

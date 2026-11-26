@@ -5,7 +5,12 @@
  */
 import { describe, expect, test } from "bun:test";
 import { ChannelError } from "@tentacle/client";
-import { DomainErrorCode, JsonRpcErrorCode, type SessionListEntry } from "@tentacle/protocol";
+import {
+  DomainErrorCode,
+  JsonRpcErrorCode,
+  PROTOCOL_VERSION,
+  type SessionListEntry,
+} from "@tentacle/protocol";
 import { RpcError } from "@tentacle/transport";
 import {
   type SessionListState,
@@ -293,7 +298,43 @@ describe("projectLabel", () => {
   });
 });
 
+/** The `initialize` rejection: the daemon's `VersionMismatch` carrying its report. */
+const versionMismatch = (serve: number) =>
+  new RpcError(DomainErrorCode.VersionMismatch, "protocol version mismatch", {
+    client: { protocol: PROTOCOL_VERSION },
+    daemon: { protocol: serve },
+    update: serve > PROTOCOL_VERSION ? "client" : "daemon",
+  });
+
 describe("describeError", () => {
+  test("a protocol skew names the side to update and offers no retry", () => {
+    // On main: the daemon's own text with `retry: true` — a Retry button for a
+    // version skew no retry can fix (docs/fix/mobile-version-mismatch-diagnosis.md).
+    const described = describeError(versionMismatch(PROTOCOL_VERSION + 1), {
+      computerName: "Mac",
+    });
+    expect(described.message).toContain("update the app");
+    expect(described.message).toContain(`app protocol ${PROTOCOL_VERSION}`);
+    expect(described.message).toContain(`serve ${PROTOCOL_VERSION + 1}`);
+    expect(described.retry).toBe(false);
+    const older = describeError(versionMismatch(PROTOCOL_VERSION - 1), { computerName: "Mac" });
+    expect(older.message).toContain("older than this app");
+    expect(older.retry).toBe(false);
+  });
+
+  test("a skew with no computer name keeps the daemon's own words, still without a retry", () => {
+    const described = describeError(versionMismatch(PROTOCOL_VERSION + 1));
+    expect(described.message).toBe("protocol version mismatch");
+    expect(described.retry).toBe(false);
+  });
+
+  test("the other RpcError codes are unchanged", () => {
+    expect(describeError(new RpcError(-32603, "boom"))).toEqual({ message: "boom", retry: true });
+    expect(describeError(new RpcError(DomainErrorCode.Unauthorized, "x"))).toEqual({
+      message: "This app is not authorized on that computer",
+      retry: false,
+    });
+  });
   test("MethodNotFound → too old, no retry", () => {
     const described = describeError(
       new RpcError(JsonRpcErrorCode.MethodNotFound, "unknown method: session/list"),

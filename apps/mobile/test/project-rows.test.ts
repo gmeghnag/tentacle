@@ -4,7 +4,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { ChannelError } from "@tentacle/client";
-import type { SessionListEntry } from "@tentacle/protocol";
+import { DomainErrorCode, PROTOCOL_VERSION, type SessionListEntry } from "@tentacle/protocol";
+import { RpcError } from "@tentacle/transport";
 import type { ComputerProbe } from "../src/computer-rows.ts";
 import {
   JUST_PAIRED_MS,
@@ -44,6 +45,19 @@ const answered = (
 const failed = (over: Partial<ProjectObservation> = {}): ProjectObservation => ({
   probe: { ok: false, error: new ChannelError("unreachable", "x") } as ComputerProbe,
   diagnosis: "unreachable",
+  absent: false,
+  ...over,
+});
+/** The `initialize` rejection: the daemon's `VersionMismatch` carrying its report. */
+const skewError = (serve: number) =>
+  new RpcError(DomainErrorCode.VersionMismatch, "protocol version mismatch", {
+    client: { protocol: PROTOCOL_VERSION },
+    daemon: { protocol: serve },
+    update: serve > PROTOCOL_VERSION ? "client" : "daemon",
+  });
+const skew = (serve: number, over: Partial<ProjectObservation> = {}): ProjectObservation => ({
+  probe: { ok: false, error: skewError(serve) } as ComputerProbe,
+  diagnosis: "ok",
   absent: false,
   ...over,
 });
@@ -129,6 +143,71 @@ describe("projectSections", () => {
     expect(projectSections(pair, [answered(), failed()])[0]?.rows[1]?.detail).toBe(
       "run `tentacle serve` in /u/website",
     );
+  });
+
+  test('a protocol skew names the side to update, never "stopped" (docs/fix/mobile-version-mismatch-diagnosis.md)', () => {
+    // Two projects of ONE computer: the sibling answered, this one's `initialize`
+    // was refused with `VersionMismatch`. On main this read "Stopped · run
+    // `tentacle serve`" — a daemon that was running and answering.
+    const pair = [rec("p", "mac", "tentacle"), rec("q", "mac", "notes")];
+    const newer = projectSections(pair, [answered(), skew(PROTOCOL_VERSION + 1)])[0];
+    const row = newer?.rows[1];
+    expect(row?.state).toBe("update-app");
+    expect(row?.word).toBe("Update the app");
+    expect(row?.detail).toContain(`app protocol ${PROTOCOL_VERSION}`);
+    expect(row?.detail).toContain(`serve ${PROTOCOL_VERSION + 1}`);
+    // One project alone: today "Not reachable" — also false, it answered.
+    const alone = projectSections([rec("p", "mac", "tentacle")], [skew(PROTOCOL_VERSION + 1)])[0];
+    expect(alone?.rows[0]?.state).toBe("update-app");
+    expect(alone?.rows[0]?.detail).toContain(`serve ${PROTOCOL_VERSION + 1}`);
+  });
+
+  test("a serve OLDER than the app → update-computer (mutation: always update-app → red)", () => {
+    const older = projectSections([rec("p", "mac", "tentacle")], [skew(PROTOCOL_VERSION - 2)])[0];
+    expect(older?.rows[0]?.state).toBe("update-computer");
+    expect(older?.rows[0]?.word).toBe("Update tentacle");
+    expect(older?.rows[0]?.detail).toContain(`serve ${PROTOCOL_VERSION - 2}`);
+  });
+
+  test('the relay\'s 4404 does not turn a skew into "stopped" (mutation: skew branch after the fallback → red)', () => {
+    const absentSkew = projectSections(
+      [rec("p", "mac", "tentacle")],
+      [skew(PROTOCOL_VERSION + 1, { absent: true })],
+    )[0];
+    expect(absentSkew?.rows[0]?.state).toBe("update-app");
+  });
+
+  test("an authenticated diagnosis still wins over a skew", () => {
+    const revoked = projectSections(
+      [rec("p", "mac", "tentacle")],
+      [skew(PROTOCOL_VERSION + 1, { diagnosis: "revoked" })],
+    )[0];
+    expect(revoked?.rows[0]?.state).toBe("revoked");
+  });
+
+  test("an e2e skew keeps its detail WITHOUT numbers (the note comes from the protocol report)", () => {
+    // Non-vacuity for the note: the same state reached from a `ChannelError` has
+    // no protocol numbers to show, so its detail must stay the bare sentence.
+    const e2e = (remote: number): ProjectObservation => ({
+      probe: {
+        ok: false,
+        error: new ChannelError("rejected", "secure channel: version mismatch", undefined, remote),
+      } as ComputerProbe,
+      diagnosis: "update-app",
+      absent: false,
+    });
+    const row = projectSections([rec("p", "mac", "tentacle")], [e2e(3)])[0]?.rows[0];
+    expect(row?.state).toBe("update-app");
+    expect(row?.detail).toBe("it runs a newer tentacle than this app");
+  });
+
+  test('a section whose only row is an update reads "Needs attention", not "Offline" (red on main)', () => {
+    const section = projectSections([rec("p", "mac", "tentacle")], [skew(PROTOCOL_VERSION + 1)])[0];
+    expect(section?.state).toBe("attention");
+    expect(section?.status).toBe("Needs attention");
+    // The ROW's tone stays keyed on pairing (nothing to pair again here) — only
+    // the band joins the update states.
+    expect(section?.rows[0]?.tone).toBe("off");
   });
 
   test("section state + 'N of M projects running' only for M ≥ 2", () => {
