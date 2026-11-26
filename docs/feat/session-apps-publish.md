@@ -658,4 +658,55 @@ test failed once beside the protocol suite and passed on re-run.
 
 ## Review
 
-*(empty until review)*
+*— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner, different from the executor)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Gate.** `bun run typecheck` clean; `bun run lint` clean (2699 files). `bun run test`:
+20576 pass · 5 skip · **6 fail** / 20587. When re-run alone, `scripts/test/release.test.ts` and
+`packages/cli/test/attach-run.test.ts` pass (timeouts under parallel load, not this
+branch). **One failure is this branch's**: finding 1.
+
+**Findings**
+
+1. **HIGH: the worker runtime never forwards the apps feed or Stop; the gate is red.**
+   `packages/cli/test/subagent-panel-controller.test.ts:361` (GUARD, exact set) fails
+   with `+ "onApps", + "unpublishApp"`. Cause: `SessionController` in
+   `packages/cli/src/local-runtime.ts:379-382` and `persistingController` (`:980-985`)
+   forward `onSchedules`/`deleteSchedule` but not `onApps`/`unpublishApp`.
+   Scenario: in a plain `tentacle` TUI (the in-process worker, a D1 runtime) with
+   `apps.enabled`, the agent publishes a page. `/apps` stays empty, there is no
+   status segment, the quit warning «quitting takes 1 live app offline» never shows, and
+   `s` reports unsupported (`usePanels.ts:438`). Only `connect` works.
+   `tui/test/apps-panel-app.test.tsx` misses this because it hands the App a raw session,
+   not the runtime wrapper. Fix: forward both, add them to the GUARD list, and add a
+   worker-runtime test.
+2. **MEDIUM: an unbounded secret scan runs before the ask and blocks the daemon.**
+   `packages/daemon/src/session-apps.ts:277` runs `findSecrets(text)` synchronously
+   inside `prepare`, before any human is asked. It is quadratic on crafted input (measured
+   here: `"a."` × 64 KiB 331 ms, 128 KiB 1.3 s, 256 KiB 5.2 s → 10 MiB ≈ 2 h).
+   Scenario: a prompt-injected model `present`s a crafted 10 MiB page and calls
+   `app_publish`. The `serve` event loop is frozen for hours: every session stalls, and
+   every app's renewal stops, so all of them go `down`. Real bundles are fine (mermaid.min
+   3.4 MiB: 24 ms; d3, katex, cytoscape ≤ 3 ms). Fix: bound the scan (cap the line
+   length or the input scanned, use linear-safe scan-only patterns, or run it off-thread
+   with a deadline) and say so in the ask.
+
+**Mutations (mine, each reverted; `git status` clean after):** without the `DELETE`
+on a session that ended mid-create → `session-apps.test.ts` red. Without the
+`daemonWakes` gate on the snapshot's `apps` → `client/test/apps.test.ts` red. Without
+the close reply's wait → `apps-connection.test.ts` 2 red. The executor's seven
+planned mutations are recorded in Execution; I did not re-run them.
+
+**Attacks tried, with no finding:** whether an "always" rule or a rule matched by tool
+name could answer the ask. The tool is `permission: "none"`, the broker goes straight to
+`awaitDecision`, and `autoAnswers` only uses `browserAutoAnswers` and `autoApproves`
+(`hosted-session.ts:1927-1943`). The worker's broker before
+`setRequester`: none of the agent's turns run before `hosted-session.ts:1456`. Persisting on
+close, archive and `serve` stop: `endAll` drops the rows first, so the archive record has
+no apps; `dispose` keeps the records for the restart. External A2A: `owner-only`.
+Sub-agents: both filters. Pods: `tunnelledAgent` gets no link.
+
+**Executor behaviour.** Execution is honest: the scan's cost and the gate it had not run
+are both stated. The "script gate failures" commit still left the GUARD test red: the
+full gate was not re-run before review.
