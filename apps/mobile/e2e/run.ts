@@ -1868,6 +1868,9 @@ export const FLOWS: readonly string[] = [
   "34-hub-scheduled",
   "34-hub-dictate",
   "34-hub-new",
+  // docs/feat/mobile-project-new-session.md: New session from a project's session
+  // list. It needs no seeded session.
+  "47-project-new-session",
   // docs/feat/mobile-mascot-scenes.md: Polpetto's random scene on new empty sessions, light + dark (visual).
   "40-mascot-shots",
   // docs/feat/mobile-file-view.md: the coloured file bodies (Write, Read of an

@@ -175,6 +175,21 @@ describe("S4 · Sessions · running/idle/archived, and the trailing Load more", 
     expect(sessions).toContain("testID={`session-${row.sessionId}`}");
   });
 
+  test("New session is the drawer's pill, pinned under the list (never scrolled away)", () => {
+    // docs/feat/mobile-project-new-session.md D1.
+    const scrollEnd = sessions.indexOf("</ScrollView>");
+    expect(scrollEnd).toBeGreaterThan(-1);
+    expect(sessions.indexOf('testID="sessions-new-error"')).toBeGreaterThan(scrollEnd);
+    expect(sessions.indexOf('testID="sessions-new-bar"')).toBeGreaterThan(scrollEnd);
+    expect(sessions.indexOf('testID="sessions-new"')).toBeGreaterThan(scrollEnd);
+    const pill = tags(sessions, "PillButton").find((tag) => tag.includes('testID="sessions-new"'));
+    expect(pill).toBeDefined();
+    expect(pill).toContain('icon="plus"');
+    expect(pill).toContain('label="New session"');
+    expect(pill).toContain("height={40}");
+    expect(pill).toContain("disabled={!newSession.enabled}");
+  });
+
   test("`sessions-more` is a STANDALONE band: it has no label of its own", () => {
     const at = sessions.indexOf('testID="sessions-more"');
     expect(at).toBeGreaterThan(-1);

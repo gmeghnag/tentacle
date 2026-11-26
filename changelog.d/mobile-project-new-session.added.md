@@ -1,0 +1,1 @@
+- **New session from a project's session list.** The phone's list of a project's sessions now has a New session button at the bottom — the same one as in the drawer: it starts a session in that project and opens it ready to type; while the computer is offline it stays dimmed and says why.
