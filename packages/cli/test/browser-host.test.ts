@@ -62,6 +62,15 @@ describe("browser hub: origin, stale socket, second profile", () => {
     expect(originAllowed(undefined)).toBe(false);
   });
 
+  test("with a store id, the dev AND the store copy may spawn the host — no other", () => {
+    const ids = [BROWSER_EXTENSION_ID, "abcdefghijklmnopabcdefghijklmnop"];
+    expect(originAllowed(`chrome-extension://${BROWSER_EXTENSION_ID}/`, ids)).toBe(true);
+    expect(originAllowed("chrome-extension://abcdefghijklmnopabcdefghijklmnop/", ids)).toBe(true);
+    expect(originAllowed("chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/", ids)).toBe(false);
+    expect(originAllowed("chrome-extension://abcdefghijklmnopabcdefghijklmnop", ids)).toBe(false);
+    expect(originAllowed(undefined, ids)).toBe(false);
+  });
+
   test("a stale socket file is replaced; a LIVE hub makes the second host exit", async () => {
     mkdirSync(browserDir(dir), { recursive: true });
     writeFileSync(hubSocketPath(dir), "stale");

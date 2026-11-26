@@ -23,6 +23,7 @@
     "docs:config": "bun scripts/config-docs.ts",
     "e2e:mobile": "bun apps/mobile/e2e/run.ts",
     "compile": "bun run scripts/build.ts",
+    "browser-extension:pack": "bun scripts/browser-extension-pack.ts",
     "voice:build": "bun run scripts/voice-build.ts",
     "voice:test": "swift test --package-path native/voice-mac",
     "release": "bun run scripts/release.ts",

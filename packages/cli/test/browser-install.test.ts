@@ -14,6 +14,7 @@ import {
   BROWSER_EXTENSION_ID,
   BROWSER_HOST_NAME,
   BROWSER_HOST_SUBCOMMAND,
+  browserExtensionIds,
 } from "@tentacle/browser";
 import { EXTENSION_ASSETS } from "../src/browser-extension-assets.ts";
 import {
@@ -111,10 +112,53 @@ describe("tentacle browser install / status / uninstall", () => {
       description: "tentacle browser host",
       path: wrapperPath(env.configDir),
       type: "stdio",
-      allowed_origins: [`chrome-extension://${BROWSER_EXTENSION_ID}/`],
+      allowed_origins: browserExtensionIds().map((id) => `chrome-extension://${id}/`),
     });
+    expect(m.allowed_origins[0]).toBe(`chrome-extension://${BROWSER_EXTENSION_ID}/`);
     expect(m.path.startsWith("/")).toBe(true);
     expect(JSON.stringify(m)).not.toContain("*");
+  });
+
+  test("store id known → the manifest allows BOTH the dev and the store copy, nothing else", () => {
+    const STORE = "abcdefghijklmnopabcdefghijklmnop";
+    const both = { ...env, extensionIds: browserExtensionIds(STORE) };
+    installBrowser(both);
+    const m = JSON.parse(readFileSync(manifestPath(env.home), "utf8"));
+    expect(m.allowed_origins).toEqual([
+      `chrome-extension://${BROWSER_EXTENSION_ID}/`,
+      `chrome-extension://${STORE}/`,
+    ]);
+    expect(JSON.stringify(m)).not.toContain("*");
+  });
+
+  test("install points at the store copy only once its id is known; keep ONE copy", () => {
+    const STORE = "abcdefghijklmnopabcdefghijklmnop";
+    const before = installBrowser({ ...env, extensionIds: [BROWSER_EXTENSION_ID] }).join("\n");
+    expect(before).not.toContain("chromewebstore");
+    const after = installBrowser({ ...env, extensionIds: browserExtensionIds(STORE) }).join("\n");
+    expect(after).toContain(`https://chromewebstore.google.com/detail/${STORE}`);
+    expect(after).toContain("only one");
+  });
+
+  test("status: a manifest written before the store id was known is stale (reinstall adds it)", async () => {
+    const STORE = "abcdefghijklmnopabcdefghijklmnop";
+    installBrowser({ ...env, extensionIds: [BROWSER_EXTENSION_ID] });
+    const both = { ...env, extensionIds: browserExtensionIds(STORE) };
+    expect((await statusBrowser(both))[0]).toContain("stale");
+    installBrowser(both);
+    expect((await statusBrowser(both))[0]).toBe("native host: installed");
+    // An extra origin we did not write is stale too (only ours, exactly).
+    const m = JSON.parse(readFileSync(manifestPath(env.home), "utf8"));
+    m.allowed_origins.push("chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/");
+    writeFileSync(manifestPath(env.home), JSON.stringify(m));
+    expect((await statusBrowser(both))[0]).toContain("stale");
+    // Same count, wrong second origin: stale too.
+    m.allowed_origins = [
+      m.allowed_origins[0],
+      "chrome-extension://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/",
+    ];
+    writeFileSync(manifestPath(env.home), JSON.stringify(m));
+    expect((await statusBrowser(both))[0]).toContain("stale");
   });
 
   test("the wrapper is executable, quotes the command, pins the config dir, forwards argv", () => {
