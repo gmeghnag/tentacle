@@ -519,3 +519,49 @@ not re-run them.
 **Executor behaviour:** the work was clean and followed the plan. Drift was
 disclosed honestly, and the red-then-green tests are real. The executor
 inherited the plan's wrong D7 claim and did not test the cap edge.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26* (same fresh-context reviewer as round 1)
+
+**Verdict: PASS.** Finding 1 is fixed.
+
+`releaseArtifact` (`a2a-map.ts:207-215`) runs on both replace paths: the
+`artifactUpdate` path (`:348-351`) and the D5 snapshot path (`:301-304`). It
+subtracts the text this artifact was charged from `outChars`, and it lifts
+`truncated` only when this same artifact had tripped it (`truncatedBy`).
+
+**The round-1 repro now passes.** It uses the branch's real mapper and
+`report.ts` (`.tentacle/tmp/a2a-stream-duplicate/cap.test.ts`):
+- a 40 000-character answer gives a report of length 40 000, with no
+  "truncated" note;
+- a 70 000-character answer gives a report of length 65 536, where it was 0.
+
+**Mutations** (each one reverted afterwards; `git status` is clean):
+
+| Mutation | Result |
+|---|---|
+| M1: never subtract the charge (`- charged * 0`) | **5 fail** — all 5 new tests |
+| M2: never lift the truncation (`truncated = !false`) | **2 fail** — both >64 KiB tests |
+| M3: drop the release on the D5 snapshot path only | **1 fail** — the snapshot-budget test |
+
+**Gate:** the touched test files (agent `harness-report`, `harness-a2a-map`,
+`harness-remote-fit`, `harness-a2a`, daemon `a2a-executor`) give 125 pass /
+0 fail. `bun run lint` is clean (2581 files) and `bun run typecheck` is clean.
+I did not run the full `bun run test`.
+
+**Regression attacks on this diff (none blocking):**
+- **A 70 KiB answer loses its truncation note.** With the budget returned, the
+  closing text fits within `takeText`'s room. Only `sanitizeRemote`'s
+  single-part `…` (`a2a-map.ts:25-27`) shows the cut. A single >64 KiB part on
+  `main` behaves the same way, so this is not new to this diff. NIT.
+- **A replaced artifact can be lost when a different artifact tripped the cap.**
+  Example: A streams 30 K, B streams 40 K and trips the cap, then A is replaced
+  with `append:false`. A's text drops out completely, and B's truncation note
+  stays. Probe: `cross.test.ts`.
+  - It cannot happen with our daemon, which sends only the one `response`
+    artifact. The note is still there, so the loss is not silent. LOW.
+  - To fix it later, `takeText` could reopen when room is above 0.
+- **`charged` counts the truncation note**, so a release can give back about
+  25 characters more than the cap actually took. The cap stays a bound and
+  `Math.max(0, …)` keeps it from going negative. NIT.
