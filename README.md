@@ -433,7 +433,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `harnesses.*.adapter` | — | — | Which adapter the instance runs on; defaults to the instance name. |
 | `harnesses.*.card` | — | — | An `a2a` agent's card URL (`https:`; `http:` only for localhost). |
 | `harnesses.*.command` | — | — | The executable to run (unset: `claude`). |
-| `harnesses.*.description` | — | — | Your description of an `a2a` agent, shown to the model first. |
+| `harnesses.*.description` | — | — | Your description of an `a2a` agent, shown to the model first and listed in the system prompt's environment block. |
 | `harnesses.*.enabled` | — | — | Offer this harness's sub-agent type (default on). |
 | `harnesses.*.idleMinutes` | — | — | Hang guard: a run with no output for this many minutes is stopped (unset: 15; `a2a`: 30). |
 | `harnesses.*.inputFrom` | — | — | Who answers an `a2a` agent's questions: `user` (default), `parent` or `both`. |

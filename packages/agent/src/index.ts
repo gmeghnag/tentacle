@@ -34,11 +34,11 @@ export {
   createA2AAdapter,
   fetchA2ACard,
 } from "./harness/a2a.ts";
-export { cardBlurb, reportHeader } from "./harness/a2a-map.ts";
+export { cardBlurb, oneLine, reportHeader } from "./harness/a2a-map.ts";
 export * from "./harness/registry.ts";
 export * from "./hooks.ts";
 export * from "./round-plan.ts";
 export * from "./capabilities.ts";
-export type { PromptEnvironment } from "./environment-prompt.ts";
+export type { PromptEnvironment, RemoteAgentLine } from "./environment-prompt.ts";
 export * from "./workflow-driver.ts";
 export * from "./workflow-status-line.ts";

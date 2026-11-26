@@ -7,10 +7,16 @@
  * remote is the SDK's real server behind an in-memory `fetch`.
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type ModelProvider, PermissionBroker, type PermissionRequest } from "@tentacle/core";
+import {
+  type ChatRequest,
+  type ModelProvider,
+  PermissionBroker,
+  type PermissionRequest,
+  type StreamEvent,
+} from "@tentacle/core";
 import type { ToolContext } from "@tentacle/core";
 import { createFakeA2A, fakeCard } from "../../agent/test/support/fake-a2a.ts";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
@@ -237,5 +243,143 @@ describe("a2a wiring (C1/C5/C8)", () => {
     expect(result.content).toContain("a remote agent chooses its own model");
     expect(asks).toEqual([]);
     expect(r.fake.requests).toEqual([]);
+  });
+});
+
+// docs/fix/remote-agents-discoverable.md D4: the system head lists what `agent_task` offers.
+describe("remote agents in the system head", () => {
+  class RecordingModel implements ModelProvider {
+    readonly id = "recording";
+    readonly requests: ChatRequest[] = [];
+    async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
+      this.requests.push(structuredClone({ ...request, signal: undefined }));
+      yield { type: "text", delta: "ok" };
+      yield { type: "done" };
+    }
+  }
+
+  const SECTION = [
+    "<remote_agents>",
+    "Remote agents (A2A) you can delegate to: call agent_task with subagent_type set to the name below. Your prompt is sent to that agent's host. Each agent's own card text is in agent_task's type list, marked as remote data.",
+    "- a2a:acme — Reviews Go PRs · agents.acme.dev",
+    "</remote_agents>",
+  ].join("\n");
+
+  const todaysHead = (config: TentacleConfig): string =>
+    `${config.systemPrompt.trimEnd()}\n\n<cwd>\n${config.cwd}\n</cwd>\n<platform>${process.platform}</platform>\n`;
+
+  /** One turn of the main agent: the head of its first request. */
+  async function firstHead(config: TentacleConfig, opts: { tunnelled?: boolean } = {}) {
+    const r = remote();
+    const cards = await prefetchA2ACards(config, { fetch: r.fetch });
+    const model = new RecordingModel();
+    const wired = buildAgent(config, {
+      harnesses: { ...NOT_ON_PATH, fetch: r.fetch, a2aCards: cards },
+      ...(opts.tunnelled ? { modelOverride: model } : { createProvider: () => model }),
+    });
+    for await (const _ of wired.agent.run("s", wired.agent.startConversation())) {
+      // drain
+    }
+    return { head: String(model.requests[0]?.messages[0]?.content), wired };
+  }
+
+  /** `withAgent` on `card`, with `extra` over the `acme` instance. */
+  function acmeWith(extra: Record<string, unknown>, card = remote().fake.cardUrl): TentacleConfig {
+    const config = withAgent(card);
+    return {
+      ...config,
+      harnesses: { ...config.harnesses, acme: { ...config.harnesses.acme, ...extra } },
+    } as TentacleConfig;
+  }
+
+  test("(a) the first request's head ends with the list: owner text and host only", async () => {
+    const config = acmeWith({ tokenCommand: "print-the-acme-token" });
+    const { head } = await firstHead(config);
+    expect(head).toBe(`${todaysHead(config).trimEnd()}\n${SECTION}\n`);
+    expect(head).not.toContain("Card text v1");
+    expect(head).not.toContain("print-the-acme-token");
+    expect(head).not.toContain(new URL(remote().fake.cardUrl).pathname);
+  });
+
+  test("(a) the owner description is one-lined; an unloaded card is still listed", async () => {
+    // The fake answers nothing at this path: «not loaded», still callable.
+    const config = acmeWith(
+      { description: "  Reviews\n\n`Go`   PRs " },
+      `${ORIGIN}/secret-path/agent-card.json`,
+    );
+    const { head, wired } = await firstHead(config);
+    expect(taskText(wired)).toContain("(remote card not loaded)");
+    expect(head).toContain("\n- a2a:acme — Reviews 'Go' PRs · agents.acme.dev\n");
+    expect(head).not.toContain("secret-path");
+  });
+
+  test("(b) tunnelled (a pod): no section", async () => {
+    const config = withAgent(remote().fake.cardUrl);
+    const { head } = await firstHead(config, { tunnelled: true });
+    expect(head).toBe(todaysHead(config));
+  });
+
+  test("(c) a disabled instance is not listed", async () => {
+    const config = acmeWith({ enabled: false });
+    const { head, wired } = await firstHead(config);
+    expect(taskText(wired)).not.toContain("a2a:acme");
+    expect(head).toBe(todaysHead(config));
+  });
+
+  test("(c) an instance whose adapter cannot be built is not listed", async () => {
+    const config = withAgent("not a url");
+    const { head, wired } = await firstHead(config);
+    expect(taskText(wired)).not.toContain("a2a:acme");
+    expect(head).toBe(todaysHead(config));
+  });
+
+  test("(c) a user type of the same name replaces it: not listed", async () => {
+    const configDir = join(dir, "override");
+    await mkdir(join(configDir, "agents"), { recursive: true });
+    await writeFile(
+      join(configDir, "agents", "acme.md"),
+      "---\nname: a2a:acme\ndescription: my own\n---\nYou are local.\n",
+    );
+    const config = { ...withAgent(remote().fake.cardUrl), configDir };
+    const { head, wired } = await firstHead(config);
+    expect(taskText(wired)).toContain("- a2a:acme: my own");
+    expect(head).toBe(todaysHead(config));
+  });
+
+  test("(d) no a2a instance: the head is today's", async () => {
+    const { head, wired } = await firstHead(base);
+    expect(head).toBe(todaysHead(base));
+    expect(taskText(wired)).not.toContain("a2a:");
+  });
+
+  test("sub-agents off: no section", async () => {
+    const config = { ...withAgent(remote().fake.cardUrl), subagentsEnabled: false };
+    const { head } = await firstHead(config);
+    expect(head).toBe(todaysHead(config));
+  });
+
+  test("(e) a native child spawned through the real wiring gets no list", async () => {
+    const config = withAgent(remote().fake.cardUrl);
+    const model = new RecordingModel();
+    const wired = buildAgent(config, {
+      harnesses: { ...NOT_ON_PATH, fetch: remote().fetch },
+      createProvider: () => model,
+    });
+    const result = await wired.tools.execute(
+      "agent_task",
+      JSON.stringify({ description: "d", prompt: "look", subagent_type: "general" }),
+      ctx(),
+    );
+    expect(result.isError).toBeFalsy();
+    const head = String(model.requests[0]?.messages[0]?.content);
+    expect(head).toContain(`<cwd>\n${config.cwd}\n</cwd>`);
+    expect(head).not.toContain("<remote_agents>");
+  });
+
+  test("(f) systemPromptEnvironment off: no section, the paragraph stays in agent_task", async () => {
+    const config = { ...withAgent(remote().fake.cardUrl), systemPromptEnvironment: false };
+    const { head, wired } = await firstHead(config);
+    expect(head).toBe(config.systemPrompt);
+    expect(taskText(wired)).toContain("Types named a2a:<name> are remote agents");
   });
 });

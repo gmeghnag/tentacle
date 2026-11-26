@@ -28,6 +28,7 @@ import {
   PermissionGate,
   type ProcessGroups,
   type PromptEnvironment,
+  type RemoteAgentLine,
   type ResultTransform,
   SessionGrants,
   type SessionSkills,
@@ -51,6 +52,7 @@ import {
   inspectProposedAgent,
   isModelShape,
   mergeAgentTypes,
+  oneLine,
   parseAgentDefinition,
   proposedAgentName,
   proposedAgentsFor,
@@ -488,16 +490,23 @@ export async function startA2ACards(
  * (docs/feat/a2a-client.md C1/C2/C5): one per enabled `adapter: "a2a"`
  * instance. Each type's text is the owner's description, then the card's text
  * from `cards` (marked remote, one line, capped) — FROZEN here for the
- * session, so the `agent_task` text stays byte-stable. The caller gates it on
- * `!tunnelled` (C8), like `claudeHarness`.
+ * session, so the `agent_task` text stays byte-stable. `agents` is the same set
+ * for the system head's list (docs/fix/remote-agents-discoverable.md D4): the
+ * owner's config only, never card text. The caller gates it on `!tunnelled`
+ * (C8), like `claudeHarness`.
  */
 export function a2aHarnesses(
   config: TentacleConfig,
   options: NonNullable<BuildAgentOptions["harnesses"]>,
   notice?: (line: string) => void,
-): { readonly instances: ReadonlyMap<string, HarnessInstance>; readonly types: AgentType[] } {
+): {
+  readonly instances: ReadonlyMap<string, HarnessInstance>;
+  readonly types: AgentType[];
+  readonly agents: RemoteAgentLine[];
+} {
   const instances = new Map<string, HarnessInstance>();
   const types: AgentType[] = [];
+  const agents: RemoteAgentLine[] = [];
   for (const { name, h } of a2aEntries(config)) {
     let adapter: A2AAdapter;
     try {
@@ -545,8 +554,13 @@ export function a2aHarnesses(
       tools: [],
       harness: { adapter: adapter.id, mode: "remote" },
     });
+    agents.push({
+      type: adapter.id,
+      ...(h.description !== undefined ? { ownerDescription: oneLine(h.description, 300) } : {}),
+      host: new URL(adapter.origin).host,
+    });
   }
-  return { instances, types };
+  return { instances, types, agents };
 }
 
 /**
@@ -1031,6 +1045,10 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       ? new WorkloadShells(options.workloadShell.backend)
       : undefined;
 
+  // The remote types `agent_task` offers, for the main agent's system head
+  // (docs/fix/remote-agents-discoverable.md D4). None without sub-agents.
+  let remoteAgents: readonly RemoteAgentLine[] = [];
+
   // Sub-agents: when enabled, register the `agent_task` delegation tool. Children
   // inherit the same confined env + permission requester; the runner filters
   // out `agent_task` itself so a sub-agent cannot spawn further sub-agents.
@@ -1130,6 +1148,8 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       .filter((t) => t.harness !== undefined && t.harness.mode !== "remote")
       .map((t) => t.name);
     const remoteTypeNames = types.filter((t) => t.harness?.mode === "remote").map((t) => t.name);
+    // Listed ⇔ callable: a user type that replaced one is not remote any more.
+    remoteAgents = (remote?.agents ?? []).filter((a) => remoteTypeNames.includes(a.type));
     if (published) {
       // Said here because only the pod knows its own types (the laptop cannot).
       for (const line of unknownTypeModelWarnings(
@@ -1465,7 +1485,10 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     resultTransforms,
     toolOutput,
     systemPrompt: config.systemPrompt,
-    ...(environment ? { environment } : {}),
+    // The remote agents are the main agent's alone: a child has no `agent_task`.
+    ...(environment
+      ? { environment: remoteAgents.length > 0 ? { ...environment, remoteAgents } : environment }
+      : {}),
     maxIterations: config.maxIterations,
     requestPermission: (req, options) => permissions.request(req, options),
     ...(userSkills.activator ? { skills: userSkills.activator } : {}),
