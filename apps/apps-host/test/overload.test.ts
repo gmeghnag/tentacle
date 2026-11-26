@@ -178,7 +178,10 @@ describe("request bodies held at once", () => {
         body: `app=${id}&reason=other&details=${"d".repeat(600)}`,
       });
     const held = await hold(host, 1000);
-    await untilStatus(503, report);
+    // `hold` resolves once the bytes are sent, not once the server has charged
+    // them: wait, with a request that stores nothing, until the budget is held.
+    await untilStatus(503, () => host.signed(publisher, "POST", "/v1/apps", page));
+    expect((await report()).status).toBe(503);
     expect(host.memory.reports).toHaveLength(0);
     held.abort();
     await untilStatus(303, report);
