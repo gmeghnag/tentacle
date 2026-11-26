@@ -22,6 +22,7 @@ import {
   parseFragments,
   readFragmentDir,
 } from "./changelog.ts";
+import { measureRepo, withBadges } from "./coverage-badges.ts";
 import {
   ReleaseError,
   bumpBunLock,
@@ -39,6 +40,12 @@ export interface ReleaseDeps {
   readonly gate: () => Promise<boolean>;
   /** Today's date as `YYYY-MM-DD` (the CHANGELOG heading). */
   readonly today: () => string;
+  /**
+   * Measure coverage + the passing-test count and render the README badges
+   * (`measureRepo` in coverage-badges.ts: a second full run, with coverage).
+   * Injected in tests.
+   */
+  readonly badges: () => Promise<{ readonly block: string; readonly summary: string }>;
   readonly write: (text: string) => void;
 }
 
@@ -128,6 +135,8 @@ export async function runRelease(argv: readonly string[], deps: ReleaseDeps): Pr
     const fragments = parseFragments(fragmentFiles);
     refuseUnreleasedEntries(changelog);
     planned.set("CHANGELOG.md", assemble(changelog, version, date, fragments));
+    const readme = readFileSync(join(root, "README.md"), "utf8");
+    withBadges(readme, ""); // its badge markers, checked before anything runs
 
     // 4) The gate.
     write("running the gate (bun run check)…\n");
@@ -141,10 +150,23 @@ export async function runRelease(argv: readonly string[], deps: ReleaseDeps): Pr
       throw new ReleaseError(`the working tree changed while the gate ran:\n${after}`);
     }
 
+    // 4b) The README badges, measured on the tree being released.
+    write("measuring coverage for the README badges…\n");
+    let badges: { readonly block: string; readonly summary: string };
+    try {
+      badges = await deps.badges();
+    } catch (error) {
+      throw new ReleaseError(
+        `the badges could not be measured: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    planned.set("README.md", withBadges(readme, badges.block));
+
     const message = `chore(release): ${tag}\n`;
     const summary = [
       ...files.map((f) => `  ${f}: ${current} → ${version}`),
       `  bun.lock: ${files.length - 1} workspace versions ${current} → ${version}`,
+      `  README.md: badges → ${badges.summary}`,
       `  CHANGELOG.md: ${fragments.length} fragment${fragments.length === 1 ? "" : "s"} → [${version}] - ${date} ([Unreleased] stays empty)`,
       `  ${FRAGMENT_DIR}/: ${fragments.length} fragment${fragments.length === 1 ? "" : "s"} deleted`,
       `  commit: chore(release): ${tag}`,
@@ -165,7 +187,12 @@ export async function runRelease(argv: readonly string[], deps: ReleaseDeps): Pr
 
     // 5) Write, commit, tag. A failed commit restores the originals — including
     // the fragments, whose DELETION is not a write and so needs its own restore.
-    const originals = new Map([...texts, ["bun.lock", lock], ["CHANGELOG.md", changelog]]);
+    const originals = new Map([
+      ...texts,
+      ["bun.lock", lock],
+      ["CHANGELOG.md", changelog],
+      ["README.md", readme],
+    ]);
     for (const [f, text] of planned) {
       writeFileSync(join(root, f), text);
     }
@@ -253,6 +280,7 @@ if (import.meta.main) {
       return (await proc.exited) === 0;
     },
     today: () => localDate(),
+    badges: () => measureRepo(root),
     write: (text) => process.stdout.write(text),
   });
   process.exit(code);
