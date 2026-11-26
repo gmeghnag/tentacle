@@ -622,3 +622,33 @@ change. Each screen's requester is still withdrawn by identity.
 
 **Executor.** Honest about what it did not do (simulator, e2e). It found real
 plan gaps itself (N3, N4, `consumed`). It over-claimed mutation coverage on N2.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26* (fresh context; the fix round was written by
+claude-sonnet-5-5)
+
+**Verdict: PASS** for the code. **Condition before merge:** flow 48 has never run
+on a simulator. The orchestrator runs `--only 06,45,48`, or waives it explicitly.
+
+- **Finding 1: FIXED, verified.**
+  - Mutation: drop `pop: true` from the run route (`App.tsx:3845`) → the
+    run-route test goes red (1 of 19). Reverted.
+  - The anchor `name="WorkflowRun"` first matches `App.tsx:3822`. It cannot match
+    `name="WorkflowRuns"` at `:3803` (the closing quote differs). The span is
+    asserted to hold no `createRouteQueue`.
+- **Finding 2: PARTIAL, honestly stated.**
+  - Flow 48 + `RUN_SEEDED_FLOWS` + the `OPENSESSION_ID` var are present. The hooks
+    it calls exist (`e2e/hooks.ts:330,336`).
+  - Mutation: drop 48 from `RUN_SEEDED_FLOWS` → 1 red. Reverted.
+  - The flow's UI steps are unverified, and so are N4 (push tap) and the step-0
+    simulator rate.
+- **Regressions in the fix diff.** None found:
+  - `run.ts`: 45 is still seeded with runs; the set changes only which flows
+    get the run seed.
+  - Production code is unchanged in this round.
+- **Gate.**
+  - Wiring + e2e-flows tests: 94 pass / 0 fail.
+  - `bun run lint`: clean (2748 files).
+  - `bun run typecheck`: clean.
+  - The tree is byte-identical after every mutation.
