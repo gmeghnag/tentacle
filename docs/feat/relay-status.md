@@ -375,3 +375,16 @@ proxies only 4100 / 4200; gate against rebinding / foreign `Host` / proxy header
 
 **Unverified:** busy port on Linux; 4101 / 4201 on the box. The exec commit says
 `(deepseek)` while Execution is signed `claude-sonnet-5-5`: check the attribution.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26* · `eb6f5119`
+
+**Verdict: PASS.** Finding 1 is fixed, test only; no new HIGH/MEDIUM on `git diff HEAD~1`.
+
+- Mutation (`.tentacle/tmp/relay-status/review-round2.ts`, restored): `sample()` removed
+  from `sweepOnce` → 10 pass, 1 fail; the `liveApps` gauge not recorded → 10 pass,
+  1 fail (both the sweep test); restored → 11 pass, 0 fail.
+- Regressions: the diff is that assertion plus the Fix round 1 notes; the clock is
+  injected and the sweep timer is 1 h, so `history[0]` is deterministic.
+- `bun run typecheck` and `bun run lint` clean. Full `bun run check` not run.
