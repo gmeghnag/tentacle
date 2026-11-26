@@ -1,10 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -2 9 11" width="180" height="220" shape-rendering="crispEdges">
   <title>Polpetto, the tentacle mascot</title>
-  <!-- Pixels from MASCOT_BITMAP (packages/tui/src/mascot.ts), cyan tones (packages/tui/src/theme.ts).
-       A 4 s loop: a blink (the upper eye row shut, as the app draws "closed", 150 ms),
-       a whole-pixel hop, a second blink. CSS only, so GitHub animates it in an img;
-       still under prefers-reduced-motion. -->
+  <!-- Pixels from MASCOT_BITMAP (packages/tui/src/mascot.ts); the nine palettes of the
+       tentacle.so mascot (packages/tui/src/theme.ts tones). A 4 s loop: a blink (the upper
+       eye row shut, as the app draws "closed", 150 ms), a whole-pixel hop, a second blink;
+       at the top of each hop the next palette lands (9 palettes, 36 s). CSS only, so
+       GitHub animates it in an img; cyan and still under prefers-reduced-motion. -->
   <style>
+    .K { fill: #0E8AA8; animation: tone-K 36s infinite; }
+    .E { fill: #083A47; animation: tone-E 36s infinite; }
+    .F { fill: #5FE0F2; animation: tone-F 36s infinite; }
+    .S { fill: #3FCFE6; animation: tone-S 36s infinite; }
+    .B { fill: #B7F3FB; animation: tone-B 36s infinite; }
     .body { animation: hop 4s infinite; }
     .lids { opacity: 0; animation: blink 4s infinite; }
     @keyframes hop {
@@ -22,83 +28,148 @@
       86.01% { opacity: 1; animation-timing-function: step-end; }
       89.75%, 100% { opacity: 0; }
     }
+    @keyframes tone-K {
+      0% { fill: #0E8AA8; animation-timing-function: step-end; }
+      7.111% { fill: #14857A; animation-timing-function: step-end; }
+      18.222% { fill: #C2475A; animation-timing-function: step-end; }
+      29.333% { fill: #3C9A5C; animation-timing-function: step-end; }
+      40.444% { fill: #B7791F; animation-timing-function: step-end; }
+      51.556% { fill: #3A6FD0; animation-timing-function: step-end; }
+      62.667% { fill: #7B3FC0; animation-timing-function: step-end; }
+      73.778% { fill: #6E36AE; animation-timing-function: step-end; }
+      84.889% { fill: #C9A6F2; animation-timing-function: step-end; }
+      96.000% { fill: #0E8AA8; animation-timing-function: step-end; }
+      100% { fill: #0E8AA8; }
+    }
+    @keyframes tone-E {
+      0% { fill: #083A47; animation-timing-function: step-end; }
+      7.111% { fill: #0A3B36; animation-timing-function: step-end; }
+      18.222% { fill: #5A1622; animation-timing-function: step-end; }
+      29.333% { fill: #163D24; animation-timing-function: step-end; }
+      40.444% { fill: #4A2E07; animation-timing-function: step-end; }
+      51.556% { fill: #13285A; animation-timing-function: step-end; }
+      62.667% { fill: #3E1A5E; animation-timing-function: step-end; }
+      73.778% { fill: #3E1A5E; animation-timing-function: step-end; }
+      84.889% { fill: #3E1A5E; animation-timing-function: step-end; }
+      96.000% { fill: #083A47; animation-timing-function: step-end; }
+      100% { fill: #083A47; }
+    }
+    @keyframes tone-F {
+      0% { fill: #5FE0F2; animation-timing-function: step-end; }
+      7.111% { fill: #5CD6C4; animation-timing-function: step-end; }
+      18.222% { fill: #F58C93; animation-timing-function: step-end; }
+      29.333% { fill: #8FE0A6; animation-timing-function: step-end; }
+      40.444% { fill: #F7C35C; animation-timing-function: step-end; }
+      51.556% { fill: #8DB4F7; animation-timing-function: step-end; }
+      62.667% { fill: #B387EA; animation-timing-function: step-end; }
+      73.778% { fill: #A267DB; animation-timing-function: step-end; }
+      84.889% { fill: #8E4BC4; animation-timing-function: step-end; }
+      96.000% { fill: #5FE0F2; animation-timing-function: step-end; }
+      100% { fill: #5FE0F2; }
+    }
+    @keyframes tone-S {
+      0% { fill: #3FCFE6; animation-timing-function: step-end; }
+      7.111% { fill: #40C2AF; animation-timing-function: step-end; }
+      18.222% { fill: #EC7480; animation-timing-function: step-end; }
+      29.333% { fill: #73D28E; animation-timing-function: step-end; }
+      40.444% { fill: #EEB043; animation-timing-function: step-end; }
+      51.556% { fill: #73A0F0; animation-timing-function: step-end; }
+      62.667% { fill: #A274DE; animation-timing-function: step-end; }
+      73.778% { fill: #9258CF; animation-timing-function: step-end; }
+      84.889% { fill: #8143B8; animation-timing-function: step-end; }
+      96.000% { fill: #3FCFE6; animation-timing-function: step-end; }
+      100% { fill: #3FCFE6; }
+    }
+    @keyframes tone-B {
+      0% { fill: #B7F3FB; animation-timing-function: step-end; }
+      7.111% { fill: #B5EEE4; animation-timing-function: step-end; }
+      18.222% { fill: #FFC6C2; animation-timing-function: step-end; }
+      29.333% { fill: #CFF5D9; animation-timing-function: step-end; }
+      40.444% { fill: #FFE3A8; animation-timing-function: step-end; }
+      51.556% { fill: #CFE0FF; animation-timing-function: step-end; }
+      62.667% { fill: #DDBFF8; animation-timing-function: step-end; }
+      73.778% { fill: #CFA8F3; animation-timing-function: step-end; }
+      84.889% { fill: #B583E0; animation-timing-function: step-end; }
+      96.000% { fill: #B7F3FB; animation-timing-function: step-end; }
+      100% { fill: #B7F3FB; }
+    }
     @media (prefers-reduced-motion: reduce) {
-      .body, .lids { animation: none; }
+      .body, .lids, .K, .E, .F, .S, .B { animation: none; }
     }
   </style>
   <g class="body">
-    <rect x="2" y="0" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="3" y="0" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="4" y="0" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="5" y="0" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="6" y="0" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="1" y="1" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="2" y="1" width="1" height="1" fill="#3FCFE6"/>
-    <rect x="3" y="1" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="4" y="1" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="5" y="1" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="6" y="1" width="1" height="1" fill="#3FCFE6"/>
-    <rect x="7" y="1" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="0" y="2" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="1" y="2" width="1" height="1" fill="#3FCFE6"/>
-    <rect x="2" y="2" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="3" y="2" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="4" y="2" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="5" y="2" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="6" y="2" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="7" y="2" width="1" height="1" fill="#3FCFE6"/>
-    <rect x="8" y="2" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="0" y="3" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="1" y="3" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="2" y="3" width="1" height="1" fill="#083A47"/>
-    <rect x="3" y="3" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="4" y="3" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="5" y="3" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="6" y="3" width="1" height="1" fill="#083A47"/>
-    <rect x="7" y="3" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="8" y="3" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="0" y="4" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="1" y="4" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="2" y="4" width="1" height="1" fill="#083A47"/>
-    <rect x="3" y="4" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="4" y="4" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="5" y="4" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="6" y="4" width="1" height="1" fill="#083A47"/>
-    <rect x="7" y="4" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="8" y="4" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="0" y="5" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="1" y="5" width="1" height="1" fill="#B7F3FB"/>
-    <rect x="2" y="5" width="1" height="1" fill="#B7F3FB"/>
-    <rect x="3" y="5" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="4" y="5" width="1" height="1" fill="#3FCFE6"/>
-    <rect x="5" y="5" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="6" y="5" width="1" height="1" fill="#B7F3FB"/>
-    <rect x="7" y="5" width="1" height="1" fill="#B7F3FB"/>
-    <rect x="8" y="5" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="1" y="6" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="2" y="6" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="3" y="6" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="4" y="6" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="5" y="6" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="6" y="6" width="1" height="1" fill="#5FE0F2"/>
-    <rect x="7" y="6" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="0" y="7" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="1" y="7" width="1" height="1" fill="#3FCFE6"/>
-    <rect x="2" y="7" width="1" height="1" fill="#3FCFE6"/>
-    <rect x="3" y="7" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="4" y="7" width="1" height="1" fill="#3FCFE6"/>
-    <rect x="5" y="7" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="6" y="7" width="1" height="1" fill="#3FCFE6"/>
-    <rect x="7" y="7" width="1" height="1" fill="#3FCFE6"/>
-    <rect x="8" y="7" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="1" y="8" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="2" y="8" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="4" y="8" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="6" y="8" width="1" height="1" fill="#0E8AA8"/>
-    <rect x="7" y="8" width="1" height="1" fill="#0E8AA8"/>
+    <rect x="2" y="0" width="1" height="1" class="K"/>
+    <rect x="3" y="0" width="1" height="1" class="K"/>
+    <rect x="4" y="0" width="1" height="1" class="K"/>
+    <rect x="5" y="0" width="1" height="1" class="K"/>
+    <rect x="6" y="0" width="1" height="1" class="K"/>
+    <rect x="1" y="1" width="1" height="1" class="K"/>
+    <rect x="2" y="1" width="1" height="1" class="S"/>
+    <rect x="3" y="1" width="1" height="1" class="F"/>
+    <rect x="4" y="1" width="1" height="1" class="F"/>
+    <rect x="5" y="1" width="1" height="1" class="F"/>
+    <rect x="6" y="1" width="1" height="1" class="S"/>
+    <rect x="7" y="1" width="1" height="1" class="K"/>
+    <rect x="0" y="2" width="1" height="1" class="K"/>
+    <rect x="1" y="2" width="1" height="1" class="S"/>
+    <rect x="2" y="2" width="1" height="1" class="F"/>
+    <rect x="3" y="2" width="1" height="1" class="F"/>
+    <rect x="4" y="2" width="1" height="1" class="F"/>
+    <rect x="5" y="2" width="1" height="1" class="F"/>
+    <rect x="6" y="2" width="1" height="1" class="F"/>
+    <rect x="7" y="2" width="1" height="1" class="S"/>
+    <rect x="8" y="2" width="1" height="1" class="K"/>
+    <rect x="0" y="3" width="1" height="1" class="K"/>
+    <rect x="1" y="3" width="1" height="1" class="F"/>
+    <rect x="2" y="3" width="1" height="1" class="E"/>
+    <rect x="3" y="3" width="1" height="1" class="F"/>
+    <rect x="4" y="3" width="1" height="1" class="F"/>
+    <rect x="5" y="3" width="1" height="1" class="F"/>
+    <rect x="6" y="3" width="1" height="1" class="E"/>
+    <rect x="7" y="3" width="1" height="1" class="F"/>
+    <rect x="8" y="3" width="1" height="1" class="K"/>
+    <rect x="0" y="4" width="1" height="1" class="K"/>
+    <rect x="1" y="4" width="1" height="1" class="F"/>
+    <rect x="2" y="4" width="1" height="1" class="E"/>
+    <rect x="3" y="4" width="1" height="1" class="F"/>
+    <rect x="4" y="4" width="1" height="1" class="F"/>
+    <rect x="5" y="4" width="1" height="1" class="F"/>
+    <rect x="6" y="4" width="1" height="1" class="E"/>
+    <rect x="7" y="4" width="1" height="1" class="F"/>
+    <rect x="8" y="4" width="1" height="1" class="K"/>
+    <rect x="0" y="5" width="1" height="1" class="K"/>
+    <rect x="1" y="5" width="1" height="1" class="B"/>
+    <rect x="2" y="5" width="1" height="1" class="B"/>
+    <rect x="3" y="5" width="1" height="1" class="F"/>
+    <rect x="4" y="5" width="1" height="1" class="S"/>
+    <rect x="5" y="5" width="1" height="1" class="F"/>
+    <rect x="6" y="5" width="1" height="1" class="B"/>
+    <rect x="7" y="5" width="1" height="1" class="B"/>
+    <rect x="8" y="5" width="1" height="1" class="K"/>
+    <rect x="1" y="6" width="1" height="1" class="K"/>
+    <rect x="2" y="6" width="1" height="1" class="F"/>
+    <rect x="3" y="6" width="1" height="1" class="F"/>
+    <rect x="4" y="6" width="1" height="1" class="F"/>
+    <rect x="5" y="6" width="1" height="1" class="F"/>
+    <rect x="6" y="6" width="1" height="1" class="F"/>
+    <rect x="7" y="6" width="1" height="1" class="K"/>
+    <rect x="0" y="7" width="1" height="1" class="K"/>
+    <rect x="1" y="7" width="1" height="1" class="S"/>
+    <rect x="2" y="7" width="1" height="1" class="S"/>
+    <rect x="3" y="7" width="1" height="1" class="K"/>
+    <rect x="4" y="7" width="1" height="1" class="S"/>
+    <rect x="5" y="7" width="1" height="1" class="K"/>
+    <rect x="6" y="7" width="1" height="1" class="S"/>
+    <rect x="7" y="7" width="1" height="1" class="S"/>
+    <rect x="8" y="7" width="1" height="1" class="K"/>
+    <rect x="1" y="8" width="1" height="1" class="K"/>
+    <rect x="2" y="8" width="1" height="1" class="K"/>
+    <rect x="4" y="8" width="1" height="1" class="K"/>
+    <rect x="6" y="8" width="1" height="1" class="K"/>
+    <rect x="7" y="8" width="1" height="1" class="K"/>
     <g class="lids">
-      <rect x="2" y="3" width="1" height="1" fill="#5FE0F2"/>
-      <rect x="6" y="3" width="1" height="1" fill="#5FE0F2"/>
+      <rect x="2" y="3" width="1" height="1" class="F"/>
+      <rect x="6" y="3" width="1" height="1" class="F"/>
     </g>
   </g>
 </svg>
