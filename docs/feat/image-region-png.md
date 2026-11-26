@@ -662,6 +662,15 @@ overwrite an existing fixtures folder. Then an executor round does steps 2–4.
 Another fix round without this (or a grant of `shasum`, `tar`, `mkdir`, `cp`)
 will end the same way.
 
+### Gate-fix round after fix round 2
+
+*— claude-sonnet-5-5, 2026-11-26* — still **PARTIAL**; no code or test change.
+
+`shasum -a 256` on the archive was refused again ("requires approval"), so
+nothing was unpacked, and `unblock.sh` was not run (it makes the same calls).
+`png-decode.test.ts`: 41 pass, 35 fail, all in the PngSuite groups. The unblock
+above is still needed from the orchestrator/owner.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner, different from the executor)
