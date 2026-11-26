@@ -581,4 +581,60 @@ streaming turn's follow-scroll leaves the hub at full strength.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-26* (fresh context; scope `git diff main...HEAD`)
+
+**Verdict: APPROVE** (PASS). No HIGH or MEDIUM findings.
+
+**Gate (run here):** `bun run lint` clean (2621 files, 0 errors, 0 warnings).
+`bun run typecheck` clean (root + `apps/mobile` + `apps/relay`). The touched
+tests plus `e2e-flows` and `hub-session`: **288 pass / 0 fail, 10 files**. I did
+not run the full parallel suite (the orchestrator runs it at merge).
+
+**Premises:**
+- TRUE: the only direct `.edge` reads in `apps/mobile/src` are
+  `activity-settings-store.ts:79,85`, `floating-button.ts:121`,
+  `hub-fan.ts:265-269` and `hub-session.ts:156`.
+- TRUE: `snap` has one caller (`FloatingActivity.tsx:268`), followed by
+  `place`.
+- TRUE (O4), checked in RN Fabric's `RCTScrollViewComponentView.mm`:
+  - `onMomentumScrollBegin` fires only from `scrollViewWillBeginDecelerating`
+    (`:816-824`), so a user fling causes it and a programmatic scroll does not.
+  - A programmatic animated scroll sends only `onMomentumScrollEnd`
+    (`scrollViewDidEndScrollingAnimation`, `:842-863`). The reducer treats that
+    as a no-op in `rest`.
+
+**Mutations** (each reverted; `git status` clean afterwards):
+- Swap the centre label's sides (`hub-fan.ts:266-268`): 3 `labelPlacement`
+  tests fail.
+- Drop `scrollEvent("end")` from `onScrollEndDrag`: the wiring test "the two
+  ends dispatch `end`" fails.
+- I did not repeat the executor's four mutations. The tests that would catch
+  them exist and are specific (`hub-native-driver-wiring.test.ts:49-50`,
+  `session-screen-follow-wiring.test.ts:288`).
+
+**Attacks tried:**
+1. **Another site that branches on `edge`:** none found (grep above).
+2. **Follow-scroll dims Stop during a turn:** no. See O4 in the premises.
+3. **Velocity or other projection in the drop that skips the centre:** none.
+   The drop is `snap(centre)` → `place` (`FloatingActivity.tsx:265-269`).
+4. **Dim stuck after a sheet covers the hub:** the reset runs on `!floatShown`
+   and is pinned. A lost end event is the stated residual risk.
+5. **Fade or unmount race:** the unmount rule is still `finished && !shown`.
+   While hidden, the level is always 0, so 20 % never unmounts.
+6. **e2e flows that tap a pending bubble's actions, now that `footClearance` is
+   gone:** none do (flow 13 uses `composer-send-now`).
+
+**Nits (not blocking):**
+- `SettingsScreen.tsx` `activityListEnd ?? true` is a second place for the
+  default. It is harmless, because `App.tsx` always passes `listEndOn(…)`.
+- In header mode, every scroll begin and end still changes `scrollDim` and
+  re-renders `SessionScreen`, although no button is drawn.
+- The Execution signs "claude (executor session)", but the commit says
+  `exec (deepseek)`. The signature should name the real executor.
+
+**Still unverified:** the simulator QA (centre at rest, fan from the centre,
+the dim mid-scroll, the switch). Check it on the 2-simulator gate before merge.
+
+**Executor:** followed the plan. Both drifts (where the D7 row sits, and the
+inline `elapsed` step) are disclosed and reasonable. It showed red before
+green, and added an extra wiring test for D7.
