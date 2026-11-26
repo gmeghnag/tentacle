@@ -109,7 +109,7 @@ export interface KeyDoc {
    * printed as a value: `tools.writableDirs` resolves to `["/tmp"]` here, but
    * its real default is the system temp dir (`$TMPDIR`) and `/tmp`, computed
    * per machine. Shown instead of `JSON.stringify(default())` wherever a
-   * default is rendered (the README table, the `explain` card and list).
+   * default is rendered (the config guide's table, the `explain` card and list).
    */
   readonly defaultText?: string;
   /**
@@ -1817,7 +1817,7 @@ export function keyDoc(path: string): KeyDoc | undefined {
   return KEY_DOCS[path];
 }
 
-/** Paths whose leaf really is a value (`--all`, the README table). */
+/** Paths whose leaf really is a value (`--all`, the config guide's table). */
 export function leafPaths(): readonly string[] {
   return Object.keys(KEY_DOCS)
     .filter((path) => KEY_DOCS[path]?.kind === "leaf")
@@ -1873,7 +1873,7 @@ export function topLevelKeys(): readonly string[] {
 }
 
 /**
- * A default rendered short, for a one-line list or the README table: its
+ * A default rendered short, for a one-line list or the config guide's table: its
  * `defaultText` when the real default is runtime state, else the value.
  */
 export function renderDefault(doc: KeyDoc): string | undefined {
@@ -1894,7 +1894,7 @@ export function renderDefault(doc: KeyDoc): string | undefined {
 const cell = (text: string): string => text.replace(/\|/g, "\\|").replace(/\n/g, " ");
 
 /**
- * The README's config table, generated from the registry (docs/feat/config-
+ * The config table of docs/guide/configuration.md, generated from the registry (docs/feat/config-
  * explain.md task 3). Leaves only — a section is a grouping, not a setting —
  * and the `profiles.*` mirror is left out: it documents the same keys.
  */

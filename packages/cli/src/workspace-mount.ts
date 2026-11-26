@@ -203,7 +203,7 @@ function relativeTo(path: string, root: string, home: string): string {
 
 /**
  * Why case-reachable file masks refuse the mount — TWO lines (the long
- * explanation is in the README): which file, and the fix. `overridable`: the
+ * explanation is in docs/guide/running.md): which file, and the fix. `overridable`: the
  * gate's, with `--confirm-mount` (the API key file never is).
  */
 function caseMessage(

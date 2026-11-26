@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { leafPaths, renderConfigKeysTable } from "@tentacle/config";
 
-const README = join(import.meta.dir, "..", "..", "..", "README.md");
+const README = join(import.meta.dir, "..", "..", "..", "docs", "guide", "configuration.md");
 const START = "<!-- config-keys:start -->";
 const END = "<!-- config-keys:end -->";
 
@@ -20,7 +20,7 @@ function committedBlock(): string | undefined {
 
 const normalize = (block: string): string => block.replace(/^\n+|\n+$/g, "").trimEnd();
 
-describe("T4: the README's config table is the registry's", () => {
+describe("T4: the config guide's table is the registry's", () => {
   test("both markers are present, once each, in order", () => {
     const text = readFileSync(README, "utf8");
     expect(text.split(START).length - 1).toBe(1);
@@ -35,7 +35,7 @@ describe("T4: the README's config table is the registry's", () => {
     const generated = renderConfigKeysTable();
     if (normalize(committed) !== normalize(generated)) {
       throw new Error(
-        "README's config table is stale — run `bun run docs:config` and commit the diff",
+        "docs/guide/configuration.md's config table is stale — run `bun run docs:config` and commit the diff",
       );
     }
   });
