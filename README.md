@@ -357,6 +357,15 @@ one; an ended session is reopened), `--continue` takes the newest. In the TUI,
 starts a fresh one. `connect` keeps no laptop copy: the daemon's record is
 the truth.
 
+A `serve` with no reachable address can be driven the way a paired phone does
+it, through the mobile relay: run `tentacle pair` on the host, `tentacle
+connect --pair '<tentacle://pair?…>'` once on the laptop (answer `y` on the host
+after comparing the code), then `tentacle connect <name>` — direct addresses
+are tried first, the relay last. The laptop gets a phone's rights on that one
+project; its key is kept in the macOS Keychain, else a `0600` file. `connect
+--forget <name>` drops it here; revoke it on the host with `tentacle devices
+revoke`.
+
 A non-loopback `--host` requires a token. TLS: `--tls-cert`/`--tls-key` on
 `serve`; `--ca-cert FILE` on `connect` for a private CA. Details:
 [`docs/architecture/F3-remote-control.md`](./docs/architecture/F3-remote-control.md).

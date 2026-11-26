@@ -289,7 +289,8 @@ connect --pair '<payload>'          connect <name>
   parsePairingPayload                 readRecord(name) → record + KeyStore.get(id)
   generateStaticKeypair               deviceDial(record, key) ─┐
   KeyStore.put(id, priv)   (1)          firstAnswering(addresses, steps, memory)
-  pairDevice({..., onCompare→print SAS})  open:   webSocketCarrierFactory(addr)()
+  pairDevice({..., perProject: true,      open:   webSocketCarrierFactory(addr)()
+              onCompare→print SAS})
   createRecord(wx)          (2)           confirm: secureChannelFactory(→carrier,
   print name                                       {staticKey, remoteStatic, random})()
                                        connectTui({url: name}, err, {dial: () => deviceDial, startTui,
@@ -334,7 +335,8 @@ connect --pair '<payload>'          connect <name>
      one-line hints: `unauthorized` gets "this laptop's key was refused
      (revoked?) — pair again", and unreachable gets "no address answered — is
      `serve` running there?".
-4. `packages/cli/src/connect.ts`: add the optional `ConnectDeps.onClient`. It is
+4. `packages/cli/src/connect.ts`: add the optional
+   `ConnectDeps.onClient(client, report)` (`report`: the error sink). It is
    called once, after `client.initialize()` and before Ink mounts (§7 terminal
    rule).
 5. `packages/cli/src/flags.ts`: `ARGS.connect` gains `values: pair, forget` and
@@ -435,7 +437,78 @@ connect --pair '<payload>'          connect <name>
 
 ## Execution
 
-*(empty until executed)*
+*— claude-sonnet-5-5, 2026-11-26* (the metadata line suggested Opus execution;
+this ran on Sonnet 5.5, so weigh that in the mandatory security review).
+
+**Load-bearing check re-run:** `bun test` on `secure-channel`, `relay-link` and
+`serve-devices` → `46 pass, 0 fail`. The cited `connect.ts` lines matched.
+
+**⚠ T0 NOT RUN (open before merge).** Running the throwaway-keychain script
+needed a permission this session did not get; it was not worked around, and no
+`security` command ever ran. So `security -i` stdin storage and the exit code
+`44` for a missing item are **unverified**. Run
+`sh .tentacle/tmp/connect-via-relay/kc.sh` (the T0 script, plus one add to a
+bad keychain path): `find` must print `c2VjcmV0`, `missing rc` non-zero,
+`del rc=0`. Drift: Keychain support was **kept**, not dropped, because `put` now
+reads the item back and throws on any mismatch, so a `security` that stores
+nothing falls back to the `0600` file with one notice line. If T0 fails, drop
+the `keychain` entry in `defaultKeyStores`.
+
+**As built.**
+- Slice 1: `cli/src/connect-store.ts`, `cli/src/connect-keys.ts`.
+- Slice 2: `cli/src/connect-device.ts` (routing, dial, hints, refresh, pair,
+  connect, forget); `connect.ts` `ConnectDeps.onClient`; `flags.ts`
+  `ARGS.connect` + `USAGE`; `main.ts` dispatch, `connectKeys` seam, help;
+  `README.md`; `changelog.d/connect-via-relay.added.md`.
+- No protocol, daemon, client, relay or mobile change; `protocol.json` untouched.
+
+**Drift from the plan.**
+1. `pairDevice` is called with `perProject: true`. The plan omitted it; a current
+   daemon then refuses with `update_app` (shown by mutation below).
+2. `onClient(client, report)`: the second argument is the error sink, which the
+   F13 refresh failure has no other way to reach.
+3. A remembered **relay** `lastAddress` does not start the race (owner: direct
+   first, relay last); a remembered direct one does.
+4. The device dial bounds the OPEN at `PAIRING_OPEN_DEADLINE_MS` (15 s), else a
+   hanging TCP connect holds the first dial.
+5. `foldDiscovery` adopts the announced project when a record has none.
+6. `writeRecord` also refuses a forgotten or replaced record.
+7. Tests: pure and pairing cases are in `connect-pair.test.ts`. Added, not in the
+   plan: a real `serve` + `tentacle pair` + `pairLaptop` + connect e2e; the
+   in-process relay leg through `deviceDial`; `spawnRun` on `cat`/`false`.
+
+**Red first** (stubs returning wrong values): store 12/14 red (this module was
+written before its stub, which was swapped in afterwards); keys 13/14; device
+11/11 (mostly the stub's throw, not an assertion); pairing red; `onClient` red on
+its order assertion; main dispatch 8/10 before wiring.
+
+**Mutations** (each applied, seen red, reverted):
+
+| Break | Red test(s) |
+|---|---|
+| secret added to `security` argv | "NO argv element of any call" |
+| `isTerminal: () => false` | "a refused key stops the race" |
+| relay `lastAddress` allowed to start | "remembered RELAY address" |
+| key not removed on a failed pair | F3, "unreachable host removes the key" |
+| `onClient` before `initialize` | the `onClient` test |
+| `perProject` removed | real pairing: «this computer pairs per project» |
+
+A wrong device key (`unauthorized`) and a wrong pinned computer key (handshake
+failure) are tests against a real daemon.
+
+**Checks.** Nine covering files: `156 pass, 0 fail`. `biome check
+packages/cli/src packages/cli/test`: clean. A `tsc` scoped to the `connect*`
+files and `main.ts` reported nothing in them (two errors in unrelated files,
+from the narrow include). Full gate: **not run here** (orchestrator's script).
+
+**Unverified:** the live `relay.tentacle.so` hop and a real Ink TUI on the device
+path (`startTui` is faked) → the owner's live test.
+
+**Debt.** A TLS failure on a `wss://` direct address still gets `connectTui`'s
+`--ca-cert` hint, a flag device mode refuses (`NODE_EXTRA_CA_CERTS` works).
+Ctrl+C during pairing leaves an orphan key. Re-pairing a project makes
+`<name>-2`. `foldDiscovery` duplicates the phone's `discoveryPatch`. A Keychain
+item made by `security` is readable by any same-user process (D2).
 
 ## Review
 

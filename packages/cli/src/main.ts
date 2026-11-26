@@ -52,6 +52,8 @@ import {
   unknownTypeModelWarnings,
   withRunModel,
 } from "./config.ts";
+import { connectComputer, forgetComputer, pairLaptop, routeConnect } from "./connect-device.ts";
+import { type KeyStores, defaultKeyStores } from "./connect-keys.ts";
 import { connectTui } from "./connect.ts";
 import { logDaemonError } from "./daemon-log.ts";
 import "./pdf-worker-url.ts";
@@ -380,8 +382,9 @@ Usage:
                            cannot show (a tailnet name, a tunnel): paired
                            phones and this computer's other daemons are told
                            it. A serve also announces its live siblings
-  tentacle connect <url> [--resume [id]|--continue]
-                           drive a remote daemon with the TUI; quitting
+  tentacle connect <url|name> [--resume [id]|--continue]
+                           drive a remote daemon with the TUI (a ws(s) URL, or
+                           a computer paired with connect --pair); quitting
                            detaches (the session keeps running there)
   tentacle hooks trust --list | --revoke <folder>
                            list / revoke stored project-hooks trust decisions
@@ -454,6 +457,14 @@ Remote control:
   tentacle connect ws(s)://host:port [--token T|--token-command CMD]
                       [--ca-cert FILE | --insecure-skip-tls-verify]
                       [--resume [id] | --continue]
+  tentacle connect --pair '<tentacle://pair?…>'   (- reads the line from stdin)
+  tentacle connect <name> [--resume [id] | --continue]
+                      drive a serve with no reachable address, like a paired
+                      phone (direct addresses first, the relay last): run
+                      tentacle pair there and --pair its line once.
+                      --forget <name> drops it here (revoke it on that host).
+                      No pairing: a tailnet plus serve --address does it too
+                      (connect ws://<tailnet-name>:<port> --token T).
   connect: quitting detaches — the session (and a running turn) stays on the
   daemon; --resume picks one of its sessions (or names one), --continue takes
   the newest; in the TUI /sessions switches, /close ends one, /clear = close + new.
@@ -634,6 +645,8 @@ export interface CliIO {
   logsDial?: (url: string, options: ConnectOptions) => () => Promise<DuplexChannel>;
   /** Test seam: `logs -f <run-name>`'s engine host (a fake, never a real engine). */
   logsHostFor?: (entry: KeptEntry) => EngineHost;
+  /** Test seam: where `connect <name>` keeps its keys (a test never touches the Keychain). */
+  connectKeys?: (configDir: string) => KeyStores;
 }
 
 /**
@@ -811,11 +824,33 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
 
   // `connect` drives a remote daemon; it needs no local model configuration.
   if (mode === "connect") {
-    const { positional, flags, bools } = parsed;
-    const url = positional[0] ?? "";
+    const { flags, bools } = parsed;
+    // A URL is the token path; anything else is a paired computer
+    // (docs/feat/connect-via-relay.md D8).
+    const route = routeConnect(parsed);
+    if (route.kind === "error") {
+      err(`[error] ${route.message}\nusage: ${USAGE.connect}\n`);
+      return 1;
+    }
     try {
-      const token = await resolveToken(flags);
-      const tls = await resolveTls(url, flags, bools);
+      if (route.kind === "pair" || route.kind === "forget") {
+        const configDir = configDirFromEnv();
+        const keys = (io.connectKeys ?? defaultKeyStores)(configDir);
+        const deps = { configDir, keys, write: err };
+        if (route.kind === "forget") {
+          await forgetComputer(route.name, deps);
+          return 0;
+        }
+        let line = route.payload;
+        if (line === "-") {
+          if (!io.readStdin && terminal.stdin) {
+            err("[connect] paste the pairing line, then Enter and Ctrl+D\n");
+          }
+          line = await (io.readStdin ?? (() => Bun.stdin.text()))();
+        }
+        await pairLaptop(line, deps);
+        return 0;
+      }
       const id = flags.get("resume");
       const resume =
         id !== undefined || bools.has("resume") || bools.has("continue")
@@ -825,6 +860,20 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
               latest: bools.has("continue"),
             }
           : undefined;
+      if (route.kind === "device") {
+        const configDir = configDirFromEnv();
+        await connectComputer(route.name, resume ? { resume } : {}, {
+          configDir,
+          keys: (io.connectKeys ?? defaultKeyStores)(configDir),
+          write: err,
+          startTui,
+          ...(pick ? { pick } : {}),
+        });
+        return 0;
+      }
+      const { url } = route;
+      const token = await resolveToken(flags);
+      const tls = await resolveTls(url, flags, bools);
       await connectTui(
         {
           url,

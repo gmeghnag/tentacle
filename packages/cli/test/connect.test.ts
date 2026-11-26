@@ -187,6 +187,41 @@ describe("connect: buffered peer-error sink (never a raw write while Ink owns th
     expect(written).toEqual(["[connect] error: invalid params for notification session/update\n"]);
   });
 
+  // docs/feat/connect-via-relay.md D9: the device path's address refresh hangs
+  // off `onClient`. Its `report` is the sink (AGENTS §7: no raw write under Ink).
+  test("onClient: once, after initialize, before the TUI; its report waits for exit", async () => {
+    const [daemonCh, clientCh] = createChannelPair();
+    new Connection(
+      daemonCh,
+      new SessionHost({
+        defaultCwd: "/tmp",
+        createAgent: () => {
+          throw new Error("no session expected");
+        },
+      }),
+    );
+    const order: string[] = [];
+    const written: string[] = [];
+    let writtenDuringTui = -1;
+    await connectTui({ url: "fake" }, (line) => written.push(line), {
+      dial: () => async () => clientCh,
+      onClient: (client, report) => {
+        // `daemon/discover` is refused before `initialize`.
+        order.push("onClient");
+        void client.discover(() => {}).then(() => order.push("discovered"));
+        report(new Error("refresh failed"));
+      },
+      startTui: async () => {
+        order.push("startTui");
+        await new Promise((r) => setTimeout(r, 10));
+        writtenDuringTui = written.length;
+      },
+    });
+    expect(order).toEqual(["onClient", "startTui", "discovered"]);
+    expect(writtenDuringTui).toBe(0);
+    expect(written).toEqual(["[connect] error: refresh failed\n"]);
+  });
+
   // Fix round 1, finding 1 (docs/feat/images-off-reason.md): `connect` reaches a
   // `serve` host that runs ITS OWN model from ITS OWN config, so an images-off
   // reason must name that model and send the user to the daemon's config — never
