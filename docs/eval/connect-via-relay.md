@@ -246,3 +246,14 @@ not as the answer.
 6. **CLI:** **Rec:** pair with `tentacle connect --pair '<tentacle://pair?…>'`
    once, then use `tentacle connect <computer-name>` (direct first, relay last).
    Token `connect ws(s)://…` stays unchanged.
+
+## Owner answers (2026-11-26, one at a time)
+
+1. **Shape:** option A — `connect` device mode (pair like a phone; direct address first, relay last; no daemon/relay/protocol change, one session path).
+2. **Rights:** the same as a paired phone, per project.
+3. **Key:** macOS Keychain, else a 0600 file; one key per computer.
+4. **Remote revoke:** yes, as a FOLLOW-UP task — a paired device may revoke others, never add.
+5. **Pairing approval:** on the serve host's terminal only.
+6. **Command:** `tentacle connect --pair '<payload>'` once, then `tentacle connect <name>`.
+
+*— claude-opus-5-5 (orchestrator, recording the owner's answers), 2026-11-26*
