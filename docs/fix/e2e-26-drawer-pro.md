@@ -362,4 +362,65 @@ with `SIM=0FA4B51F-A0E3-421B-BE66-CE29EF45213D`.
 
 ## Review
 
-*(empty — the reviewer fills and signs this)*
+*— claude-opus-5-5, 2026-11-26* (fresh context; a different model from the
+Sonnet planner and the DeepSeek executor)
+
+**Verdict: APPROVE-WITH-NITS.** No HIGH or MEDIUM findings. Scope: `git diff main...HEAD`.
+
+### Gate (re-run here)
+
+- `bun test apps/mobile/test/e2e-flows.test.ts`: 72 pass, 0 fail.
+- `bun run lint`: clean (2591 files). `bun run typecheck`: clean (root, mobile, relay).
+- The chain's script gate (`.tentacle/tmp/e2e-26-drawer-pro-sgate.log`):
+  full `bun test` 0 fail. `✓ 25-session-info` and `✓ 26-drawer` pass on the
+  **Pro Max** (`0B43D716…`). So Execution's "flow 25 without the tap has never
+  been run" is out of date: it ran green, on the Pro Max only.
+
+### Premise table
+
+| premise | verdict |
+|---|---|
+| `RenameSheet.tsx:59` `autoFocus` | TRUE |
+| scrim `onPress={onCancel}` (`RenameSheet.tsx:44`) | TRUE |
+| card inside a `KeyboardAvoidingView` (`:37`, `:118`) | TRUE |
+| one component for both entry points (`SessionsDrawer.tsx:343`, `SessionScreen.tsx:2530`) | TRUE |
+| both flows end on daemon truth (`26-drawer.yaml:124` → `26-drawer.js:16`; `25-session-info.yaml:129` → `.js`) | TRUE: lost keystrokes fail the flow; they never pass silently |
+
+### Mutations (each one reverted; `git status` clean afterwards)
+
+- A: put `tapOn session-rename-input` back after the settle step in 26. Both
+  new tests fail (70/2).
+- B: put the tap back in flow-mapping form (`- tapOn: { id: "session-rename-input" }`).
+  Only test 2 fails, and only because of the adjacency check in 25/26. See nit 1.
+
+### Attacks tried
+
+1. **Typing goes nowhere and the flow still passes.** Not possible: the daemon-truth
+   title check fails it.
+2. **The TODO.md hunk (commit `f1a0c164`) breaks the merge.** It is byte-identical
+   to main's `771517b1`, so it merges as a no-op. Main already has a duplicate
+   `## Quarantined e2e flows` section (lines 126 and 866). That duplicate is
+   pre-existing on main and was not added by this branch.
+3. **Another flow taps the field.** `rg` finds the rename input only in flows 25 and 26.
+4. **§7 invariants.** Not touched: there is no app, protocol, persistence or
+   terminal change.
+
+### Nits
+
+1. `apps/mobile/test/e2e-flows.test.ts:1169`: the "no tap" scan only matches the
+   block form. A `tapOn: { id: "session-rename-input" }`, or a block whose first
+   key is not `id`, gets past test 1. Outside flows 25 and 26 nothing else would
+   catch it.
+2. The Pro validation the plan requires (twice, `0FA4B51F…`) has still not run.
+   The reviewer took `sim.lock` but was not allowed to run the gate here, then
+   released the lock. Flow 26's change matches the Context's run 4, which passed
+   on the Pro. Flow 25 has passed only on the Pro Max. Run
+   `scripts/e2e-gate.sh 0FA4B51F-A0E3-421B-BE66-CE29EF45213D --only 25-session-info,26-drawer`
+   before ticking the TODO item.
+
+### How the executor behaved
+
+The executor stayed inside the plan. It wrote the tests first and showed them
+red, then ran six mutations, each reverted. It reported honestly that it did not
+run the simulator. The gate-fix round re-added TODO lines that main had
+restored on its own in the meantime. That was harmless.
