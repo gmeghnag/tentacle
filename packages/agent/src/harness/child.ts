@@ -31,6 +31,7 @@ import {
   authorizeHarnessAsk,
   authorizeRemoteSend,
 } from "./permissions.ts";
+import { appendReport, applyOutput, createReport, reportText, setReport } from "./report.ts";
 import type {
   HarnessAdapter,
   HarnessEvent,
@@ -140,7 +141,6 @@ export const HARNESS_VERDICT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-const DATA_CAP = 4096;
 /** A remote question as the parent reads it, at most (C2's cap). */
 const QUESTION_CAP = 2000;
 const WINDOW_LABEL: Readonly<Record<string, string>> = { five_hour: "5h", seven_day: "7d" };
@@ -186,12 +186,14 @@ export async function runHarnessChild(
   const onEvent = (event: ToolProgressEvent): void => controls?.onEvent?.(event);
   const name = type.name;
   let toolUses = 0;
-  let report = "";
+  // The report as segments, so an A2A `append:false` REPLACE retracts its own text
+  // (docs/fix/a2a-stream-duplicate.md); with no replacement it is a plain `+=`.
+  const report = createReport();
   const fail = (message: string, cause?: unknown): never => {
     controls?.inbox?.close();
     onEvent({ kind: "subagent_end", toolUses, stopReason: "error" });
     throw new SubagentFailure(message, {
-      partialReport: report,
+      partialReport: reportText(report),
       toolUses,
       ...(cause !== undefined ? { cause } : {}),
     });
@@ -262,7 +264,7 @@ export async function runHarnessChild(
     instance.reportHeader && text.trim() !== "" ? `${instance.reportHeader()}\n\n${text}` : text;
   const failRun = async (message: string, cause?: unknown): Promise<never> => {
     await closeWorktree().catch(() => {});
-    report = `${framed(report.trim())}${worktreeNote}${footer()}`.trim();
+    setReport(report, `${framed(reportText(report).trim())}${worktreeNote}${footer()}`.trim());
     return fail(message, cause);
   };
 
@@ -421,10 +423,13 @@ export async function runHarnessChild(
               await run.cancel().catch(() => "unconfirmed" as const);
               await closeWorktree().catch(() => {});
               const unread = controls?.inbox?.close() ?? [];
-              report = `${framed(`${name} needs input to continue: ${ev.ask.question}`)}${worktreeNote}${footer()}`;
-              if (unread.length > 0) report += unreadNote(unread.length);
+              setReport(
+                report,
+                `${framed(`${name} needs input to continue: ${ev.ask.question}`)}${worktreeNote}${footer()}`,
+              );
+              if (unread.length > 0) appendReport(report, unreadNote(unread.length));
               onEvent({ kind: "subagent_end", toolUses, stopReason: "end_turn" });
-              return { report, toolUses, stopReason: "end_turn" };
+              return { report: reportText(report), toolUses, stopReason: "end_turn" };
             }
             let reply = answer;
             if (adapter.kind === "remote") {
@@ -446,12 +451,9 @@ export async function runHarnessChild(
           }
           break;
         case "output":
-          if (ev.text) report += ev.text;
-          if (ev.data !== undefined) report += `\n${capped(JSON.stringify(ev.data) ?? "")}`;
-          if (ev.file) {
-            const f = ev.file;
-            report += `\n[file] ${f.name ?? "(unnamed)"} (${f.mediaType ?? "unknown type"}${f.bytes !== undefined ? `, ${f.bytes} bytes` : ""}) — listed, not saved`;
-          }
+          // Text / data / file lines go to the segment of the artifact they came
+          // from; a `replace` event empties that segment first (A2A `append:false`).
+          applyOutput(report, ev);
           break;
         case "disconnected": {
           if (!adapter.reattach || handle === undefined) {
@@ -491,12 +493,15 @@ export async function runHarnessChild(
     let stopReason: AgentStopReason;
     if (localCancel) {
       stopReason = "cancelled";
-      report += `\n\n(cancel not confirmed: the remote task may still be running${handle ? ` (task ${handle.id})` : ""})`;
+      appendReport(
+        report,
+        `\n\n(cancel not confirmed: the remote task may still be running${handle ? ` (task ${handle.id})` : ""})`,
+      );
     } else if (end === undefined) {
       if (!abortSeen) return await failRun(`${name}: the run ended without a result`);
       stopReason = "cancelled";
     } else if (end.status === "failed" || end.status === "rejected") {
-      if (end.text && !report.includes(end.text)) report += end.text;
+      if (end.text && !reportText(report).includes(end.text)) appendReport(report, end.text);
       const why = end.error ?? end.text ?? end.status;
       const quota =
         quotaHit !== undefined
@@ -513,8 +518,8 @@ export async function runHarnessChild(
           sessionId: controls?.sessionId ?? "",
           signal: own.signal,
         } as ToolContext);
-        report += verdict.report ?? end.text ?? "";
-      } else if (end.text) report += end.text;
+        appendReport(report, verdict.report ?? end.text ?? "");
+      } else if (end.text) appendReport(report, end.text);
       stopReason =
         budgetHit || end.status === "budget"
           ? "max_token_budget"
@@ -525,7 +530,7 @@ export async function runHarnessChild(
 
     await closeWorktree().catch(() => {});
     const unread = controls?.inbox?.close() ?? [];
-    const trimmed = report.trim();
+    const trimmed = reportText(report).trim();
     const body =
       trimmed !== ""
         ? framed(trimmed)
@@ -563,10 +568,6 @@ function verdictFrom(
 
 function unreadNote(n: number): string {
   return `\n\n(${n} message(s) sent to this sub-agent arrived after it stopped and were not read.)`;
-}
-
-function capped(text: string): string {
-  return text.length > DATA_CAP ? `${text.slice(0, DATA_CAP)}… (${text.length} chars)` : text;
 }
 
 /**

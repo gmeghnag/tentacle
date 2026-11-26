@@ -4,6 +4,7 @@
  * (docs/feat/subagent-harness-runners.md, slice shr-4).
  */
 import { describe, expect, test } from "bun:test";
+import { type StreamResponse, TaskState } from "@a2a-js/sdk";
 import {
   AgentInbox,
   DISMISSED,
@@ -16,6 +17,7 @@ import {
 } from "@tentacle/core";
 import type { ModelProvider } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
+import { A2A_OUTPUT_MAX_CHARS, mapStreamResponse, newMapState } from "../src/harness/a2a-map.ts";
 import { type HarnessDeps, harnessModeIssue } from "../src/harness/child.ts";
 import type {
   HarnessAdapter,
@@ -453,6 +455,133 @@ describe("remote fit: auth, cancel, rejected, outputs, mode", () => {
 
   test("readOnlyType: a remote harness type is read-only", () => {
     expect(runner(remoteAdapter([])).readOnlyType("acme")).toBe(true);
+  });
+});
+
+/**
+ * A2A `append:false` is a REPLACE of that artifact's text: the report must
+ * carry the answer ONCE (the owner's e2e: "…OTTARINA-42…OTTARINA-42").
+ * Driven through the REAL mapper into the REAL runner — the bug lived in the
+ * seam between them (`child.ts` reported `ev.text` with no `replace` reader).
+ */
+describe("a2a: a replacing artifact stream reaches the report once", () => {
+  const textPart = (text: string) => ({
+    content: { $case: "text" as const, value: text },
+    metadata: undefined,
+    filename: "",
+    mediaType: "",
+  });
+  /** One `artifactUpdate` frame; `append` absent = false, lastChunk as given. */
+  const artFrame = (text: string, append: boolean, lastChunk = false): StreamResponse =>
+    ({
+      payload: {
+        $case: "artifactUpdate",
+        value: {
+          taskId: "t1",
+          contextId: "c1",
+          artifact: {
+            artifactId: "response",
+            name: "response",
+            description: "",
+            parts: [textPart(text)],
+            metadata: undefined,
+            extensions: [],
+          },
+          append,
+          lastChunk,
+          metadata: undefined,
+        },
+      },
+    }) as StreamResponse;
+  const completed = (): StreamResponse =>
+    ({
+      payload: {
+        $case: "statusUpdate",
+        value: {
+          taskId: "t1",
+          contextId: "c1",
+          status: {
+            state: TaskState.TASK_STATE_COMPLETED,
+            message: undefined,
+            timestamp: undefined,
+          },
+          metadata: undefined,
+        },
+      },
+    }) as StreamResponse;
+
+  /** Map the wire frames, then feed the resulting events to the real runner. */
+  async function reportOf(frames: StreamResponse[]): Promise<string> {
+    const state = newMapState("a2a:acme", "https://agents.acme.dev/card");
+    const run = new ScriptRun();
+    const p = runner(remoteAdapter([run])).run(OPTS);
+    run.push(...frames.flatMap((f) => mapStreamResponse(f, state)));
+    run.close();
+    return (await p).report;
+  }
+  const count = (hay: string, needle: string): number => hay.split(needle).length - 1;
+
+  test("chunk + whole-text lastChunk → the report has it once", async () => {
+    // The wire shape of the report: one delta, then the whole text again as the
+    // closing artifact (legal A2A, `append:false`) — the composed artifact is "CIAO".
+    const report = await reportOf([
+      artFrame("CIAO", false),
+      artFrame("CIAO", false, true),
+      completed(),
+    ]);
+    expect(count(report, "CIAO")).toBe(1);
+    expect(report.startsWith("CIAO")).toBe(true);
+  });
+
+  test("append:true deltas still concatenate", async () => {
+    // The anti-overreach pin: an appending stream is NOT a replacement.
+    const report = await reportOf([
+      artFrame("Ot", true),
+      artFrame("tarina-42", true, true),
+      completed(),
+    ]);
+    expect(report.startsWith("Ottarina-42")).toBe(true);
+    expect(count(report, "Ottarina-42")).toBe(1);
+  });
+
+  test("an artifact replaced mid-stream keeps only the replacement", async () => {
+    const report = await reportOf([
+      artFrame("Ot", true),
+      artFrame("tarina-42", true),
+      artFrame("OTTARINA-42", false, true),
+      completed(),
+    ]);
+    expect(report.startsWith("OTTARINA-42")).toBe(true);
+    expect(report.includes("Ottarina-42")).toBe(false);
+  });
+
+  test("a 40 000-char answer under the cap is not cut by its own closing replace", async () => {
+    // Review round 1, finding 1: the retracted deltas were billed AGAIN against
+    // the 64 KiB cap, so the whole-text close truncated an answer that fits
+    // (64K−N chars) with a note that lies about it.
+    const half = "d".repeat(20_000);
+    const report = await reportOf([
+      artFrame(half, true),
+      artFrame(half, true),
+      artFrame(half + half, false, true),
+      completed(),
+    ]);
+    expect(report.includes(half + half)).toBe(true);
+    expect(report.includes("truncated")).toBe(false);
+  });
+
+  test("a 70 000-char answer over the cap keeps the cap's worth, not nothing", async () => {
+    // Past 64 KiB the deltas set `truncated`, so the close's `takeText` returned
+    // undefined and the replace had already emptied the segment: the report had
+    // NONE of the answer. It must keep what the cap allows, and say so.
+    const chunk = "d".repeat(35_000);
+    const report = await reportOf([
+      artFrame(chunk, true),
+      artFrame(chunk, true),
+      artFrame(chunk + chunk, false, true),
+      completed(),
+    ]);
+    expect(report.includes(`${"d".repeat(A2A_OUTPUT_MAX_CHARS - 1)}…`)).toBe(true);
   });
 });
 

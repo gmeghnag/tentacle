@@ -94,6 +94,39 @@ const upd = (state: TaskState, text?: string): StreamResponse =>
       value: { taskId: "t1", contextId: "c1", status: status(state, text), metadata: undefined },
     },
   }) as StreamResponse;
+/** An `append:false` artifact update with NO parts (the daemon's close of an empty unit). */
+const emptyArt = (id = "a1"): StreamResponse =>
+  ({
+    payload: {
+      $case: "artifactUpdate",
+      value: {
+        taskId: "t1",
+        contextId: "c1",
+        artifact: {
+          artifactId: id,
+          name: "",
+          description: "",
+          parts: [],
+          metadata: undefined,
+          extensions: [],
+        },
+        append: false,
+        lastChunk: true,
+        metadata: undefined,
+      },
+    },
+  }) as StreamResponse;
+/** An artifact as a terminal `task` snapshot carries it (its full content). */
+const snapshotArtifact = (text: string, id = "a1") => ({
+  artifactId: id,
+  name: "",
+  description: "",
+  parts: [
+    { content: { $case: "text", value: text }, metadata: undefined, filename: "", mediaType: "" },
+  ],
+  metadata: undefined,
+  extensions: [],
+});
 const art = (text: string, append = false, id = "a1"): StreamResponse =>
   ({
     payload: {
@@ -210,7 +243,7 @@ describe("mapStreamResponse", () => {
       });
     }
     expect(evs[1]).toEqual({ kind: "progress", label: "step 1" });
-    expect(evs[2]).toEqual({ kind: "output", text: "done: 42" });
+    expect(evs[2]).toEqual({ kind: "output", text: "done: 42", fromArtifact: "a1" });
     expect(evs[3]).toEqual({ kind: "end", status: "completed" });
   });
 
@@ -275,11 +308,59 @@ describe("mapStreamResponse", () => {
     ]);
   });
 
-  test("append:false over an existing artifact marks replace; append does not", () => {
+  test("append:false over an existing artifact emits a clear, then the parts; append does not", () => {
     const evs = run([art("one"), art("two"), art("three", true)]);
-    expect(evs[0]).toEqual({ kind: "output", text: "one" });
-    expect(evs[1]).toEqual({ kind: "output", text: "two", replace: true });
-    expect(evs[2]).toEqual({ kind: "output", text: "three" });
+    // A2A `append:false` REPLACES: the clear comes first, so the text before it retracts.
+    expect(evs).toEqual([
+      { kind: "output", text: "one", fromArtifact: "a1" },
+      { kind: "output", replace: true, fromArtifact: "a1" },
+      { kind: "output", text: "two", fromArtifact: "a1" },
+      { kind: "output", text: "three", fromArtifact: "a1" },
+    ]);
+  });
+
+  test("append:false with no parts clears an artifact already streamed, and nothing else", () => {
+    const evs = run([art("Ot", true), emptyArt()]);
+    expect(evs).toEqual([
+      { kind: "output", text: "Ot", fromArtifact: "a1" },
+      { kind: "output", replace: true, fromArtifact: "a1" },
+    ]);
+    // Nothing was streamed for it: a clear with nothing to retract emits no event.
+    expect(run([emptyArt()])).toEqual([]);
+  });
+
+  test("terminal task: an artifact already streamed is replaced, not appended", () => {
+    const state = newMapState("a2a:acme", CARD_URL);
+    const evs = run(
+      [
+        art("Ottarina-42", true),
+        task(TaskState.TASK_STATE_COMPLETED, undefined, [snapshotArtifact("OTTARINA-42")]),
+      ],
+      state,
+    );
+    // A snapshot IS the artifact's full content: differing text replaces what was shown.
+    expect(evs.filter((e) => e.kind === "output")).toEqual([
+      { kind: "output", text: "Ottarina-42", fromArtifact: "a1" },
+      { kind: "output", replace: true, fromArtifact: "a1" },
+      { kind: "output", text: "OTTARINA-42", fromArtifact: "a1" },
+    ]);
+  });
+
+  test("a terminal snapshot of an already-streamed artifact gives its budget back too", () => {
+    // The D5 path (round 1, finding 1) replaces through the same release: without
+    // it the snapshot's whole text is billed a second time and cut at 64K−N.
+    const half = "d".repeat(20_000);
+    const state = newMapState("a2a:acme", CARD_URL);
+    const evs = run(
+      [
+        art(half, true),
+        art(half, true),
+        task(TaskState.TASK_STATE_COMPLETED, undefined, [snapshotArtifact(half + half)]),
+      ],
+      state,
+    );
+    const texts = evs.flatMap((e) => (e.kind === "output" && e.text ? [e.text] : []));
+    expect(texts[texts.length - 1] ?? "").toBe(half + half);
   });
 
   test("data part → capped json; raw/url part → listed file, not fetched", () => {
@@ -323,12 +404,13 @@ describe("mapStreamResponse", () => {
       },
     } as StreamResponse;
     const evs = run([frame]);
-    expect(evs[0]).toEqual({ kind: "output", data: '{"k":1}' });
+    expect(evs[0]).toEqual({ kind: "output", data: '{"k":1}', fromArtifact: "a" });
     expect(evs[1]).toEqual({
       kind: "output",
       file: { name: "x.bin", mediaType: "application/octet-stream", bytes: 4 },
+      fromArtifact: "a",
     });
-    expect(evs[2]).toEqual({ kind: "output", file: { name: "f" } });
+    expect(evs[2]).toEqual({ kind: "output", file: { name: "f" }, fromArtifact: "a" });
   });
 
   test("output beyond 64 KiB is truncated once, with a note", () => {
@@ -338,6 +420,35 @@ describe("mapStreamResponse", () => {
     expect(texts).toHaveLength(2);
     expect(texts[1]).toContain("remote output truncated");
     expect(texts.join("").length).toBeLessThan(A2A_OUTPUT_MAX_CHARS + 100);
+  });
+
+  test("an answer under the cap keeps its whole text through the closing replace", () => {
+    // Our daemon streams `append:true` deltas and then closes with the WHOLE text
+    // as `append:false` (daemon/src/a2a/executor.ts:624-636). The retracted text
+    // must give its cap budget back (round 1, finding 1), or a 40 000-char answer
+    // comes out cut to 64K−N with a note that lies.
+    const half = "d".repeat(20_000);
+    const state = newMapState("a2a:acme", CARD_URL);
+    const evs = run([art(half, true), art(half, true), art(half + half)], state);
+    const texts = evs.flatMap((e) => (e.kind === "output" && e.text ? [e.text] : []));
+    expect(texts[texts.length - 1] ?? "").toBe(half + half);
+    expect(state.truncated).toBe(false);
+    expect(state.outChars).toBe(40_000);
+  });
+
+  test("an answer over the cap keeps the cap's worth after the closing replace", () => {
+    // `truncated` tripped while THIS artifact streamed, so the replace that
+    // retracts it also retracts the truncation: without that, the close yields no
+    // text at all and the report keeps none of the answer.
+    const chunk = "d".repeat(35_000);
+    const state = newMapState("a2a:acme", CARD_URL);
+    const evs = run([art(chunk, true), art(chunk, true), art(chunk + chunk)], state);
+    const texts = evs.flatMap((e) => (e.kind === "output" && e.text ? [e.text] : []));
+    const last = texts[texts.length - 1] ?? "";
+    // `sanitizeRemote` itself caps one part at 64 KiB (its own "…"), so the closed
+    // text is the whole cap's worth of the answer — not the empty string it was.
+    expect(last.length).toBe(A2A_OUTPUT_MAX_CHARS);
+    expect(last.slice(0, -1)).toBe("d".repeat(A2A_OUTPUT_MAX_CHARS - 1));
   });
 
   test("remote strings are sanitised at the source (ESC, bidi)", () => {

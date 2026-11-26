@@ -97,8 +97,12 @@ export interface MapState {
   askSeq: number;
   outChars: number;
   truncated: boolean;
+  /** The artifact whose output tripped the cap (`""` = the plain tail); released on its replace. */
+  truncatedBy?: string;
   /** Per-artifact text so far (for `append:false` replacement). */
   readonly artifacts: Map<string, string>;
+  /** Cap chars each artifact has been charged, so a replace can give them back. */
+  readonly charged: Map<string, number>;
 }
 
 export function newMapState(adapter: string, cardUrl: string): MapState {
@@ -112,6 +116,7 @@ export function newMapState(adapter: string, cardUrl: string): MapState {
     outChars: 0,
     truncated: false,
     artifacts: new Map(),
+    charged: new Map(),
   };
 }
 
@@ -172,30 +177,51 @@ function endFor(state: MapState, s: TaskState, text: string): HarnessEvent | und
   }
 }
 
-/** Account output text against the 64 KiB cap; returns what may still be emitted. */
-function takeText(state: MapState, text: string): string | undefined {
+/**
+ * Account output text against the 64 KiB cap; returns what may still be emitted.
+ * `from` is the artifact the text belongs to (`""` = the plain tail): its charge
+ * is remembered so an `append:false` replace can retract it (see `releaseArtifact`).
+ */
+function takeText(state: MapState, text: string, from = ""): string | undefined {
   if (state.truncated) return undefined;
   const room = A2A_OUTPUT_MAX_CHARS - state.outChars;
+  const charged =
+    text.length <= room ? text : `${text.slice(0, Math.max(0, room))}\n${A2A_TRUNCATED_NOTE}`;
+  state.charged.set(from, (state.charged.get(from) ?? 0) + charged.length);
   if (text.length <= room) {
     state.outChars += text.length;
     return text;
   }
   state.truncated = true;
+  state.truncatedBy = from;
   state.outChars = A2A_OUTPUT_MAX_CHARS;
-  return `${text.slice(0, Math.max(0, room))}\n${A2A_TRUNCATED_NOTE}`;
+  return charged;
 }
 
-function partEvents(state: MapState, parts: readonly Part[], replace: boolean): HarnessEvent[] {
+/**
+ * A2A `append:false` REPLACES an artifact's text: retract what it was charged, so
+ * the whole text that follows is billed once, not twice (a 40 000-char answer under
+ * the 64 KiB cap used to come out cut, and one over it, empty). The truncation it
+ * caused goes with it — it was about text the report no longer holds.
+ */
+function releaseArtifact(state: MapState, artifactId: string): void {
+  const charged = state.charged.get(artifactId) ?? 0;
+  state.charged.delete(artifactId);
+  state.outChars = Math.max(0, state.outChars - charged);
+  if (state.truncated && state.truncatedBy === artifactId) {
+    state.truncated = false;
+    state.truncatedBy = undefined;
+  }
+}
+
+function partEvents(state: MapState, parts: readonly Part[], fromArtifact: string): HarnessEvent[] {
   const evs: HarnessEvent[] = [];
   for (const p of parts) {
     const c = p.content;
     if (!c) continue;
     if (c.$case === "text") {
-      const t = takeText(state, sanitizeRemote(c.value));
-      if (t !== undefined)
-        evs.push(
-          replace ? { kind: "output", text: t, replace: true } : { kind: "output", text: t },
-        );
+      const t = takeText(state, sanitizeRemote(c.value), fromArtifact);
+      if (t !== undefined) evs.push({ kind: "output", text: t, fromArtifact });
     } else if (c.$case === "data") {
       let json = "";
       try {
@@ -203,10 +229,10 @@ function partEvents(state: MapState, parts: readonly Part[], replace: boolean): 
       } catch {
         json = "";
       }
-      const t = takeText(state, json);
+      const t = takeText(state, json, fromArtifact);
       if (t !== undefined) {
         // capped JSON text, never a live remote object
-        evs.push({ kind: "output", data: sanitizeRemote(t) });
+        evs.push({ kind: "output", data: sanitizeRemote(t), fromArtifact });
       }
     } else {
       // raw | url — listed, never written, a url never fetched.
@@ -218,6 +244,7 @@ function partEvents(state: MapState, parts: readonly Part[], replace: boolean): 
           ...(p.mediaType ? { mediaType: oneLine(p.mediaType, 80) } : {}),
           ...(bytes !== undefined ? { bytes } : {}),
         },
+        fromArtifact,
       });
     }
   }
@@ -266,7 +293,17 @@ export function mapStreamResponse(resp: StreamResponse, state: MapState): Harnes
       } else {
         const end = endFor(state, s, statusText(t.status));
         if (end) {
-          for (const a of t.artifacts ?? []) evs.push(...partEvents(state, a.parts, false));
+          for (const a of t.artifacts ?? []) {
+            // A snapshot IS the artifact's full content: one we already streamed
+            // REPLACES what was shown, never appends to it (D5).
+            const seen = state.artifacts.has(a.artifactId);
+            state.artifacts.set(a.artifactId, partsText(a.parts));
+            if (seen) {
+              evs.push({ kind: "output", replace: true, fromArtifact: a.artifactId });
+              releaseArtifact(state, a.artifactId);
+            }
+            evs.push(...partEvents(state, a.parts, a.artifactId));
+          }
           evs.push(end);
         }
       }
@@ -306,9 +343,13 @@ export function mapStreamResponse(resp: StreamResponse, state: MapState): Harnes
       const text = partsText(a.parts);
       const prev = state.artifacts.get(a.artifactId) ?? "";
       state.artifacts.set(a.artifactId, u.append ? prev + text : text);
-      // `append:false` over an artifact already seen replaces its text so far.
-      const replace = !u.append && state.artifacts.has(a.artifactId) && prev !== "";
-      return partEvents(state, a.parts, replace);
+      // A2A `append:false` REPLACES the artifact's text so far: say so, THEN send
+      // the content (nothing streamed for it yet ⇒ there is nothing to retract).
+      if (!u.append && prev !== "") {
+        evs.push({ kind: "output", replace: true, fromArtifact: a.artifactId });
+        releaseArtifact(state, a.artifactId);
+      }
+      return [...evs, ...partEvents(state, a.parts, a.artifactId)];
     }
   }
 }
