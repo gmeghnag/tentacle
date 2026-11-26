@@ -111,7 +111,7 @@ import {
 import { type RenderOptions, layoutTranscript, sliceLaid, warmRowsChunk } from "./render-lines.ts";
 import { runChunked } from "./run-chunked.ts";
 import { anchorOffset, applyScroll, clampOffset, isScrolledUp, windowFor } from "./scroll.ts";
-import type { Selection } from "./selection.ts";
+import { COPIED_NOTE_MS, type Selection, copiedLabel } from "./selection.ts";
 import { withRestored } from "./send-now.ts";
 import { SkillsSync } from "./skills-sync.ts";
 import { COMPACTED_SHOWN_MS } from "./spinner-slot.ts";
@@ -2018,6 +2018,22 @@ export function App({
     (artifact: ArtifactMeta) => openArtifactRef.current(artifact),
     [],
   );
+  // A copy's confirmation lives in the status bar for a moment. It is NOT a
+  // transcript notice: `pushNotice` resets scrollOffset (the viewport jump).
+  const [copiedNote, setCopiedNote] = useState<string | null>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onCopied = useCallback((chars: number) => {
+    setCopiedNote(copiedLabel(chars));
+    if (copiedTimerRef.current) {
+      clearTimeout(copiedTimerRef.current);
+    }
+    copiedTimerRef.current = setTimeout(() => {
+      copiedTimerRef.current = null;
+      setCopiedNote(null);
+    }, COPIED_NOTE_MS);
+  }, []);
+  // No unmount effect (the structural tests pin App's effect count): the 2 s timer
+  // only sets state, a no-op after unmount.
   // A click on a URL (docs/feat/tui-clickable-links.md): success is silent (a
   // notice would pull the view to the tail), everything else says why inline.
   const openLink = useCallback(
@@ -2041,6 +2057,7 @@ export function App({
     field,
     clipboard,
     pushNotice,
+    onCopied,
     setScrollOffset,
     setPanel,
     setDock,
@@ -2496,6 +2513,7 @@ export function App({
         contextWindow,
         expandAll,
         selection,
+        copiedNote,
         quitConfirm,
         artifactConfirm,
         hopRow,

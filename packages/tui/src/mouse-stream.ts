@@ -30,7 +30,7 @@ import type { BackgroundListView } from "./background-list.ts";
 import { type MouseReport, isMousePrefix, splitMouseReports } from "./mouse.ts";
 import type { LaidItem } from "./render-lines.ts";
 import type { ScrollWindow } from "./scroll.ts";
-import type { Selection } from "./selection.ts";
+import { type Selection, isDeliberate } from "./selection.ts";
 import { type ClickState, nextClick } from "./tool-expand.ts";
 import { linkAtViewport, toolCallAtViewport } from "./tool-hit.ts";
 import type { PanelView } from "./tree-panel.ts";
@@ -342,7 +342,13 @@ export function dispatchMouse(
   if (!report.press) {
     // Selection can span rows scrolled out of view, so the App assembles the
     // whole buffer on release — never on the per-frame render path.
-    return { state: { click, selection: null }, effects: [{ kind: "copySelection" }] };
+    // Only a DELIBERATE selection copies (`isDeliberate`): a click with a hand
+    // jitter must not silently overwrite the clipboard.
+    const copy = state.selection !== null && isDeliberate(state.selection);
+    return {
+      state: { click, selection: null },
+      effects: copy ? [{ kind: "copySelection" }] : NONE,
+    };
   }
   const visibleIndex = report.y - 1;
   if ((report.btn & 3) === 0 && visibleIndex >= 0 && visibleIndex < snapshot.visibleCount) {

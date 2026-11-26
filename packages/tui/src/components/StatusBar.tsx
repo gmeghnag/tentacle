@@ -74,6 +74,7 @@ export function StatusBar({
   pill = { kind: "none" },
   onPillRange,
   link = null,
+  copiedNote = null,
 }: {
   cwd: string;
   /** In a container/pod: the accent badge at the left, never cut unless it alone does not fit. */
@@ -114,6 +115,8 @@ export function StatusBar({
    * The link's state when it is not up ("reconnecting…", "disconnected: …").
    */
   link?: LinkIndicator | null;
+  /** The transient "Copied · N chars" after a mouse selection copy. */
+  copiedNote?: string | null;
 }): ReactElement {
   const width = Math.max(10, columns);
   // The right slot is `auto-accept`'s, always: nothing displaces it (owner's rule).
@@ -121,8 +124,8 @@ export function StatusBar({
   // The switches' marker leads the suffix: it says what the model cannot see,
   // and gives way with the suffix on a short line (`statusLayout`).
   const suffix = `${capsMarker === null ? "" : ` · ${capsMarker}`}${
-    scrolledUp ? ` · ↑${hiddenAbove} more (↓ to follow)` : expandAll ? " · expanded" : ""
-  }`;
+    copiedNote === null ? "" : ` · ${copiedNote}`
+  }${scrolledUp ? ` · ↑${hiddenAbove} more (↓ to follow)` : expandAll ? " · expanded" : ""}`;
   // The pill rides the right-hand box, AFTER the auto-accept indicator: it is one
   // more fact about the session, never a replacement for it (the owner's rule).
   const pillValue = pillText(pill);

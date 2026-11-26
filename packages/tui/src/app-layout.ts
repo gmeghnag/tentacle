@@ -554,6 +554,8 @@ export type AppViewModel = FrameLayout & {
   readonly contextWindow: number;
   readonly expandAll: boolean;
   readonly selection: Selection | null;
+  /** The status bar's transient "Copied · N chars" (`copiedLabel`), or null. */
+  readonly copiedNote: string | null;
   readonly quitConfirm: QuitConfirmFacts | null;
   /** The artifact open confirm (model-artifacts D8): the quit dialog's slot. */
   readonly artifactConfirm: ArtifactConfirmView | null;

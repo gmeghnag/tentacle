@@ -215,7 +215,8 @@ describe("dispatchMouse: a click on a link (docs/feat/tui-clickable-links.md)", 
   });
 
   test("off the link the click is what it was", () => {
-    expect(kinds(click(20, 3).effects)).toEqual(["copySelection"]);
+    // A bare click is not a deliberate selection (fix/tui-accidental-copy): no copy, no open.
+    expect(kinds(click(20, 3).effects)).toEqual([]);
   });
 
   test("a header keeps its toggle", () => {
@@ -310,7 +311,7 @@ describe("S4 dispatchMouse: the per-event priority order", () => {
       report(0, 3, 1, false),
       snapshot({ expandAll: true }),
     );
-    expect(kinds(clicked.effects)).toEqual(["copySelection"]);
+    expect(kinds(clicked.effects)).toEqual([]);
   });
 
   // docs/feat/tui-present-row.md: a `present` header with its card OPENS it.
@@ -359,11 +360,13 @@ describe("S4 dispatchMouse: the per-event priority order", () => {
       }),
       3,
     );
-    expect(kinds(clicked.effects)).toEqual(["copySelection"]);
+    expect(kinds(clicked.effects)).toEqual([]);
   });
 
   test("a release COPIES the selection and hands back an empty one", () => {
-    const sel = { anchor: { row: 0, col: 0 }, head: { row: 1, col: 2 } };
+    // A deliberate one (one row down with COPY_MIN_CELLS of travel): a release
+    // of a lesser selection copies nothing (see accidental-copy.test.tsx).
+    const sel = { anchor: { row: 0, col: 0 }, head: { row: 1, col: 4 } };
     const step = dispatchMouse(state({ selection: sel }), report(0, 3, 2, false), snapshot());
     expect(step.effects).toEqual([{ kind: "copySelection" }]);
     expect(step.state.selection).toBeNull();

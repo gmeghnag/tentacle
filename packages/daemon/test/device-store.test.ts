@@ -796,6 +796,14 @@ describe("daemon records: liveness, sweep, addresses (sibling discovery)", () =>
 });
 
 describe("process start time (`ps -o etime=`)", () => {
+  /** The OS's elapsed seconds for `pid`, independently of `processStartedAt`. */
+  function psEtimeSeconds(pid: number): number | undefined {
+    const out = Bun.spawnSync(["ps", "-o", "etime=", "-p", String(pid)], {
+      env: { ...process.env, LC_ALL: "C" },
+    }).stdout.toString();
+    return parseEtime(out);
+  }
+
   test("parseEtime reads `[[dd-]hh:]mm:ss` and nothing else", () => {
     expect(parseEtime("05:31")).toBe(331);
     expect(parseEtime("1:02:03")).toBe(3723);
@@ -807,10 +815,30 @@ describe("process start time (`ps -o etime=`)", () => {
   });
 
   test("processStartedAt places our own start, and is unknown for a gone pid", async () => {
-    const started = processStartedAt(process.pid);
-    const expected = Date.now() - process.uptime() * 1000;
+    const now = Date.now();
+    const started = processStartedAt(process.pid, now);
+    // Ground truth is the OS's own elapsed time for our PID, never
+    // `process.uptime()`: under `bun test --parallel` the two disagree (the gate
+    // read 19 s apart — a worker's notion of "up"), and only `ps` answers for
+    // the process a pid names.
+    const elapsed = psEtimeSeconds(process.pid);
+    expect(elapsed).toBeDefined();
     // Whole seconds from `ps`; nowhere near a timezone's offset.
-    expect(Math.abs((started ?? 0) - expected)).toBeLessThan(5_000);
+    expect(Math.abs((started ?? 0) - (now - (elapsed ?? 0) * 1000))).toBeLessThan(2_000);
+    // The answer is `now` MINUS an elapsed time, never a local-clock reading of
+    // `lstart` (measured an hour off under another timezone,
+    // docs/fix/daemon-records-stale.md): moving `now` an hour moves it an hour.
+    // Two `ps` reads can straddle a second boundary.
+    const later = processStartedAt(process.pid, now + 3_600_000);
+    expect(Math.abs((later ?? 0) - (started ?? 0) - 3_600_000)).toBeLessThan(2_000);
+    // A long-lived pid pins the UNIT: with a seconds-for-milliseconds mistake
+    // the answer for a machine up for days is off by days, not by our own
+    // process's few seconds.
+    const oldEtime = psEtimeSeconds(1);
+    expect(oldEtime).toBeDefined();
+    expect(Math.abs((processStartedAt(1, now) ?? 0) - (now - (oldEtime ?? 0) * 1000))).toBeLessThan(
+      2_000,
+    );
     const gone = Bun.spawn(["true"]);
     await gone.exited;
     expect(processStartedAt(gone.pid)).toBeUndefined();
