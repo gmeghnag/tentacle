@@ -3,7 +3,10 @@ import type { AppsErrorCode } from "@tentacle/protocol";
 
 export type ControlRoute =
   | { readonly kind: "create" }
+  | { readonly kind: "create_live" }
   | { readonly kind: "update" | "delete" | "renew"; readonly id: string }
+  /** The signed WebSocket upgrade of a live app. */
+  | { readonly kind: "tunnel"; readonly id: string }
   | { readonly kind: "health" | "info" | "report_form" | "report" | "thanks" | "robots" }
   | { readonly kind: "method_not_allowed"; readonly allow: string }
   | { readonly kind: "not_found" };
@@ -16,7 +19,7 @@ const PAGES = new Map<string, "health" | "info" | "report_form" | "thanks" | "ro
   ["/robots.txt", "robots"],
 ]);
 
-const APP_PATH = /^\/v1\/apps\/([a-z2-7]{16})(\/lease)?$/;
+const APP_PATH = /^\/v1\/apps\/([a-z2-7]{16})(\/lease|\/tunnel)?$/;
 
 const notAllowed = (allow: string): ControlRoute => ({ kind: "method_not_allowed", allow });
 
@@ -32,10 +35,16 @@ export function controlRoute(method: string, path: string): ControlRoute {
   if (path === "/v1/apps") {
     return method === "POST" ? { kind: "create" } : notAllowed("POST");
   }
+  if (path === "/v1/apps/live") {
+    return method === "POST" ? { kind: "create_live" } : notAllowed("POST");
+  }
   const match = APP_PATH.exec(path);
   const id = match?.[1];
   if (id === undefined) {
     return { kind: "not_found" };
+  }
+  if (match?.[2] === "/tunnel") {
+    return method === "GET" ? { kind: "tunnel", id } : notAllowed("GET");
   }
   if (match?.[2] !== undefined) {
     return method === "POST" ? { kind: "renew", id } : notAllowed("POST");

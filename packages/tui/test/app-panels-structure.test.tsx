@@ -101,10 +101,12 @@ describe("S7: the panel rules are the kinds', not App.tsx's", () => {
       "browser",
       // …and `/apps` (docs/feat/session-apps-publish.md D10).
       "apps",
+      // …and `/previews` (docs/feat/session-apps-container-ports.md S4).
+      "previews",
     ]) {
       expect((list ?? "").match(new RegExp(`${kind}Kind`, "g"))).toHaveLength(1);
     }
-    expect((list ?? "").split(",").filter((s) => s.trim() !== "")).toHaveLength(9);
+    expect((list ?? "").split(",").filter((s) => s.trim() !== "")).toHaveLength(10);
     // The two panel key layers are the registry's decision too, not their own.
     const layers = readSrc(join("keys", "layer-panels.ts"));
     expect(layers).not.toContain("sessionsKey");

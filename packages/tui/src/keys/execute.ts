@@ -11,7 +11,7 @@
  * taken upstream, in the effect's own `kind`.
  */
 import type { PermissionResponse } from "@tentacle/core";
-import type { ArtifactMeta } from "@tentacle/protocol";
+import type { ArtifactMeta, PreviewRow } from "@tentacle/protocol";
 import type { ApprovalScroll } from "../approval-scroll.ts";
 import type { ArtifactIntent } from "../artifact-open.ts";
 import type { DockState } from "../background-focus.ts";
@@ -96,6 +96,8 @@ export interface KeyHost {
   deleteSchedule(id: string): void;
   /** Take one published app offline (`s` in `/apps`). */
   unpublishApp(app: string): void;
+  copyPreviewLink(row: PreviewRow): void;
+  stopPreview(row: PreviewRow): void;
   /** Write the `/schedule` panel's own state (its arm/answer). */
   setSchedulesState(state: SchedulesState): void;
   /** `o` in `/workflow`: read one step's prompt/report (`session/workflow_step`). */
@@ -236,6 +238,12 @@ export function executeEffect(effect: KeyEffect, host: KeyHost): void {
       return;
     case "deleteSchedule":
       host.deleteSchedule(effect.id);
+      return;
+    case "copyPreviewLink":
+      host.copyPreviewLink(effect.row);
+      return;
+    case "stopPreview":
+      host.stopPreview(effect.row);
       return;
     case "unpublishApp":
       host.unpublishApp(effect.app);

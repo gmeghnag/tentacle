@@ -106,6 +106,12 @@ export const DEFAULT_WORKLOAD_SHELL_TOOL = false;
  */
 export const DEFAULT_PREVIEWS_ENABLED = false;
 /**
+ * `previews.links`: with `previews.enabled`, offer `container_share` too — a
+ * container's port on the INTERNET through the apps host
+ * (docs/feat/session-apps-container-ports.md OD11). **Default: off.**
+ */
+export const DEFAULT_PREVIEWS_LINKS = false;
+/**
  * `apps.enabled`: offer the agent `app_publish` — publish a presented HTML page
  * as a PUBLIC web page, asked every time (docs/feat/session-apps-publish.md
  * D11). **Default: off** until the apps host is deployed.
@@ -279,7 +285,9 @@ export const DEFAULT_CONFIG_JSONC = `{
   // Container previews: may the agent show a running container's web port to
   // your PAIRED devices (\`container_preview\`, asked every time)? Read by
   // \`serve\` only; never carried to a pod.
-  // "previews": { "enabled": ${DEFAULT_PREVIEWS_ENABLED} },
+  // \`links\` (needs \`enabled\`): may it also put one on the INTERNET, through
+  // \`apps.domain\` (\`container_share\`: secret link or public, asked every time)?
+  // "previews": { "enabled": ${DEFAULT_PREVIEWS_ENABLED}, "links": ${DEFAULT_PREVIEWS_LINKS} },
 
   // Scheduled wakes: limits on the agent's \`schedule_create\` (it asks you
   // first). Read by THIS host (the local worker, \`serve\`); never carried to a pod.

@@ -151,6 +151,7 @@ describe("S7: a panel kind is described by its OWN descriptor, found by lookup",
       "artifacts",
       "browser",
       "mcp",
+      "previews",
       "schedule",
       "sessions",
       "skills",
@@ -200,7 +201,7 @@ describe("S7: a panel kind is described by its OWN descriptor, found by lookup",
     // rides the same one).
     for (const desc of PANEL_KINDS) {
       // `/workflow` (docs/feat/workflows-ui.md D3) is a cursor list too, and `/apps`.
-      const flat = ["sessions", "schedule", "workflow", "apps"].includes(desc.kind);
+      const flat = ["sessions", "schedule", "workflow", "apps", "previews"].includes(desc.kind);
       expect(desc.layer).toBe(flat ? "sessions" : "tree");
     }
   });

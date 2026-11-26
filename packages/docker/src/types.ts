@@ -26,6 +26,12 @@ export interface ContainerInspect {
   readonly HostConfig?: {
     readonly NetworkMode?: string;
     readonly Privileged?: boolean;
+    readonly PidMode?: string;
+    readonly IpcMode?: string;
+    readonly UTSMode?: string;
+    readonly CapAdd?: readonly string[] | null;
+    readonly Devices?: readonly unknown[] | null;
+    readonly SecurityOpt?: readonly string[] | null;
   };
   readonly NetworkSettings?: {
     /** `"<port>/<proto>"` → its host bindings; `null` = exposed, not published. */

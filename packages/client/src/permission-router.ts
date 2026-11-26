@@ -20,6 +20,7 @@ import {
   APP_PUBLISH_TOOL,
   BROWSER_ACTION_TOOL,
   CONTAINER_PREVIEW_TOOL,
+  CONTAINER_SHARE_TOOL,
   type PermissionRequest,
   type PermissionResponse,
   WORKFLOW_APPROVE_TOOL,
@@ -29,6 +30,8 @@ import {
   QUESTION_ANSWER_OPTION,
   QUESTION_SKIP_OPTION,
   type QuestionRequestUpdate,
+  SHARE_LINK_OPTION,
+  SHARE_PUBLIC_OPTION,
 } from "@tentacle/protocol";
 import { progressText } from "./mapping.ts";
 import {
@@ -167,6 +170,8 @@ export function toPermissionRequest(update: AskUpdate): PermissionRequest {
     ...(update.tool === APP_PUBLISH_TOOL ? { kind: "app_publish" as const } : {}),
     // Showing a container to the paired devices (container-apps-devices OD2): same rule.
     ...(update.tool === CONTAINER_PREVIEW_TOOL ? { kind: "container_preview" as const } : {}),
+    // Putting it on the internet (session-apps-container-ports OD1): same rule.
+    ...(update.tool === CONTAINER_SHARE_TOOL ? { kind: "container_share" as const } : {}),
     tool: update.tool,
     level: "ask",
     title: update.title,
@@ -329,6 +334,11 @@ export class PermissionRouter {
         return [];
       }
       optionId = outcome.optionId;
+      // A share's two approvals are its own options: the secret link unless the
+      // person chose public.
+      if (update.tool === CONTAINER_SHARE_TOOL && response.allowed) {
+        optionId = response.choice === "public" ? SHARE_PUBLIC_OPTION : SHARE_LINK_OPTION;
+      }
       if (!update.options.some((o) => o.optionId === optionId)) {
         return [{ kind: "unoffered", sessionId, requestId, optionId }];
       }

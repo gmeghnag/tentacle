@@ -69,7 +69,9 @@ export type View =
       readonly id: string;
       readonly sha256: string;
       readonly bytes: number;
-    };
+    }
+  /** A live app that may be reached, if its tunnel is connected. */
+  | { readonly kind: "live"; readonly id: string };
 
 export interface CoreOptions {
   readonly limits: AppsLimits;
@@ -126,9 +128,12 @@ export class HostCore {
   private readonly allReports: RateWindows;
   /** Renewals of live apps from addresses the full API map cannot track. */
   private readonly untrackedRenews: RateWindows;
+  /** Visitor requests to live apps, per address. */
+  private readonly liveRequests: RateWindows;
 
   constructor(private readonly options: CoreOptions) {
     const l = options.limits;
+    this.liveRequests = new RateWindows(l.liveRequestsPerMinutePerIp, MINUTE, l.maxTrackedIps);
     this.api = new RateWindows(l.apiPerMinutePerIp, MINUTE, l.maxTrackedIps);
     this.signed = new RateWindows(l.signedPerMinutePerKey, MINUTE, l.maxTrackedKeys);
     this.publishes = new RateWindows(l.publishesPerHourPerKey, HOUR, l.maxTrackedKeys);
@@ -248,6 +253,94 @@ export class HostCore {
     return { ok: true, reservation };
   }
 
+  /** A new live app: a record with no content, counted like any app. */
+  reserveCreateLive(input: { readonly key: string; readonly ip: string }): Reserved {
+    const now = this.options.now();
+    const keyReason = this.options.operator().takedowns.keys.get(input.key);
+    const early =
+      this.refusalIfKilled() ??
+      (keyReason === undefined ? undefined : blocked(keyReason)) ??
+      this.publishes.check(input.key, now) ??
+      this.creates.check(input.ip, now) ??
+      this.newKeys.check(input.ip, input.key, now) ??
+      this.liveCaps(input.key);
+    if (early !== undefined) {
+      return early;
+    }
+    const id = this.mint();
+    if (id === undefined) {
+      return refuse("internal", "could not mint an app id");
+    }
+    this.publishes.hit(input.key, now);
+    this.creates.hit(input.ip, now);
+    this.newKeys.hit(input.ip, input.key, now);
+    const reservation: Reservation = {
+      record: {
+        v: 1,
+        id,
+        kind: "live",
+        ownerKey: input.key,
+        state: "live",
+        sha256: "",
+        bytes: 0,
+        createdAt: now,
+        updatedAt: now,
+      },
+      addsLive: true,
+      growth: 0,
+    };
+    this.inFlight.set(id, reservation);
+    return { ok: true, reservation };
+  }
+
+  // ── live apps: the tunnel ──────────────────────────────────────────────────
+
+  /**
+   * For a VERIFIED upgrade: may this key connect the app's tunnel now?
+   * `connected`: the tunnels of OTHER apps already connected. Both kill modes
+   * refuse a new tunnel.
+   */
+  admitTunnel({ key, id }: Claim, connected: number): Gate {
+    const current = this.owned(key, id);
+    if ("ok" in current) {
+      return current;
+    }
+    if (current.kind !== "live") {
+      return refuse("bad_request", "this app is not a live app");
+    }
+    if (current.state === "deleted") {
+      return refuse("deleted", "the app was unpublished");
+    }
+    if (current.state !== "live" || this.lapsed(id)) {
+      return refuse("expired", "the lease expired; share it again");
+    }
+    if (this.options.operator().kill !== "off") {
+      return refuse("killed", "publishing is switched off by the operator");
+    }
+    return connected >= this.options.limits.maxLiveTunnels
+      ? refuse("cap_reached", "the host holds as many live tunnels as it accepts")
+      : { ok: true };
+  }
+
+  /** A connected tunnel IS the lease: extend a live app's. */
+  keepAlive(id: string): void {
+    const record = this.records.get(id);
+    if (record?.state === "live" && record.kind === "live") {
+      this.extend(id);
+    }
+  }
+
+  /** A visitor request to a live app, per address. */
+  admitLive(ip: string): Gate {
+    return this.liveRequests.take(ip, this.options.now()) ?? { ok: true };
+  }
+
+  /** Count a live app's bytes. `false`: it is over its daily budget. */
+  countLive(id: string, bytes: number): boolean {
+    this.countServed(id, bytes);
+    return this.servedToday(id) <= this.options.limits.liveBytesPerDay;
+  }
+
   /** Replace a live app's content, or revive an expired one under the same id. */
   reserveUpdate(input: Publication & { readonly id: string }): Reserved {
     const killed = this.refusalIfKilled();
@@ -260,6 +353,9 @@ export class HostCore {
     }
     if (current.state === "deleted") {
       return refuse("deleted", "the app was unpublished");
+    }
+    if (current.kind === "live") {
+      return refuse("bad_request", "a live app takes no content");
     }
     if (this.inFlight.has(input.id)) {
       return refuse("conflict", "another write to this app is in progress");
@@ -417,6 +513,11 @@ export class HostCore {
     if (record.state !== "live" || this.lapsed(id)) {
       return { kind: "offline" };
     }
+    if (record.kind === "live") {
+      return this.servedToday(id) >= this.options.limits.liveBytesPerDay
+        ? { kind: "over_limit" }
+        : { kind: "live", id };
+    }
     if (this.servedToday(id) + record.bytes > this.options.limits.appBytesPerDay) {
       return { kind: "over_limit" };
     }
@@ -481,6 +582,7 @@ export class HostCore {
       this.newKeys,
       this.reports,
       this.untrackedRenews,
+      this.liveRequests,
     ]) {
       windows.prune(now);
     }
@@ -519,7 +621,9 @@ export class HostCore {
         input.snapshot?.leases[id] ?? 0,
         record.updatedAt + this.options.limits.leaseMs,
       );
-      if (lease >= aliveAt && files.has(`${id}-${contentTag(record.sha256)}`)) {
+      // A live app has no content file: its tunnel comes back, or it expires.
+      const whole = record.kind === "live" || files.has(`${id}-${contentTag(record.sha256)}`);
+      if (lease >= aliveAt && whole) {
         this.extend(id);
       } else {
         const next = this.retire(record, "expired", undefined);
@@ -562,6 +666,7 @@ export class HostCore {
     const next: AppRecord = {
       v: 1,
       id: record.id,
+      ...(record.kind === undefined ? {} : { kind: record.kind }),
       ownerKey: record.ownerKey,
       state,
       sha256: record.sha256,

@@ -249,6 +249,7 @@ import {
   type PreviewDialTarget,
   type PreviewEndReason,
   SessionPreviews,
+  type ShareStarter,
 } from "./session-previews.ts";
 import type { SessionLiveness } from "./session-reaper.ts";
 import {
@@ -1326,6 +1327,7 @@ export class HostedSession {
     schedules?: SessionSchedules,
     apps?: AppsService,
     previews?: PreviewResolver,
+    shares?: ShareStarter,
   ) {
     this.id = id;
     this.uploads = uploads;
@@ -1420,7 +1422,7 @@ export class HostedSession {
     };
     // Container previews live in memory only (OD6): nothing to restore.
     if (previews !== undefined) {
-      this.previews = new SessionPreviews(previews, () => this.previewsChanged(), now);
+      this.previews = new SessionPreviews(previews, () => this.previewsChanged(), now, shares);
     }
     // The published apps a restart or a reopen brings back (session apps D8):
     // each renews at once. Their timers fire after this constructor returns.
@@ -4652,6 +4654,11 @@ export class HostedSession {
     onEnd: (reason: PreviewEndReason) => void,
   ): (() => void) | undefined {
     return this.closed ? undefined : this.previews?.watch(previewId, onEnd);
+  }
+
+  /** `session/preview_link`: a shared preview's link, or `undefined`. */
+  previewLink(previewId: string): string | undefined {
+    return this.closed ? undefined : this.previews?.linkOf(previewId);
   }
 
   /** `session/preview_stop`: the user takes one preview down. */

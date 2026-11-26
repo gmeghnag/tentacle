@@ -11,7 +11,7 @@
  * state that decided them.
  */
 import type { PermissionResponse } from "@tentacle/core";
-import type { ArtifactMeta } from "@tentacle/protocol";
+import type { ArtifactMeta, PreviewRow } from "@tentacle/protocol";
 import type { ApprovalScroll } from "../approval-scroll.ts";
 import type { ArtifactIntent } from "../artifact-open.ts";
 import type { DockState } from "../background-focus.ts";
@@ -124,6 +124,10 @@ export type KeyEffect =
   | { readonly kind: "deleteSchedule"; readonly id: string }
   /** `s` in `/apps`: take one app offline (`session/app_unpublish`). */
   | { readonly kind: "unpublishApp"; readonly app: string }
+  /** `c` in `/previews`: copy a shared one's link (`session/preview_link`). */
+  | { readonly kind: "copyPreviewLink"; readonly row: PreviewRow }
+  /** `s` in `/previews`: take one down (`session/preview_stop`). */
+  | { readonly kind: "stopPreview"; readonly row: PreviewRow }
   | { readonly kind: "setDock"; readonly state: DockState }
   | { readonly kind: "fieldSet"; readonly text: string }
   | { readonly kind: "fieldReset" }

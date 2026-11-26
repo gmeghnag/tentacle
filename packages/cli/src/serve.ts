@@ -49,10 +49,12 @@ import {
   bunRelayDialer,
   createLiveActivityNotifier,
   createPushNotifier,
+  createShareStarter,
   deleteLiveRegistration,
   deletePushRegistration,
   isLoopbackHost,
   loadOrCreateIdentity,
+  loopbackAppsUrl,
   readIdentity,
   readLiveRegistration,
   readLiveRegistrations,
@@ -697,6 +699,8 @@ export async function startDaemon(
         // A stop ends no session: the app timers stop, nothing is deleted, and
         // the next start renews what the sidecars kept (session apps D9).
         sessionHost.stopApps();
+        // A share lives only as long as this process: unpublish them now.
+        await sessionHost.stopShares();
         await persister?.stop();
         devices?.stop();
         lock.release();
@@ -830,6 +834,19 @@ async function reloadedHost(
     // Container previews, for the paired devices only: `serve` alone, and only
     // with `previews.enabled` (docs/feat/container-apps-devices.md OD8).
     ...(config.previews.enabled ? { previews: enginePreviewResolver() } : {}),
+    // The same ports on the internet, through the apps host: only with
+    // `previews.links` too (docs/feat/session-apps-container-ports.md OD11).
+    ...(config.previews.enabled && config.previews.links
+      ? {
+          shares: createShareStarter({
+            configDir: config.configDir,
+            domain: config.apps.domain,
+            // A loopback apps host, for a local test only.
+            baseUrl: loopbackAppsUrl(process.env.TENTACLE_APPS_URL),
+            log: (line) => options.onAudit?.(line),
+          }),
+        }
+      : {}),
     // A deleted session takes its spilled tool output with it.
     onSessionDeleted: (id) => void toolOutputStore().removeSession(id),
     maxSessions: options.maxSessions ?? DEFAULT_MAX_SESSIONS,

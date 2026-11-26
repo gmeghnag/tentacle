@@ -16,7 +16,7 @@
  *
  * Nothing here is React, and nothing here is a snapshot of a render.
  */
-import type { AppRow, BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
+import type { AppRow, BrowserStatusResult, PreviewRow, WorkflowRow } from "@tentacle/protocol";
 import type { AppProps, SessionController } from "../app-types.ts";
 import type { CapOp, CapsView } from "../capability-toggles.ts";
 import type { SlashSkill } from "../commands.ts";
@@ -45,6 +45,8 @@ export interface CommandContext {
   readonly sessionRef: Live<SessionController | null>;
   /** The session's published apps, as last reported: `/apps` opens on them. */
   readonly appsRef: Live<readonly AppRow[] | undefined>;
+  /** The session's container previews, as last reported: `/previews` opens on them. */
+  readonly previewsRef: Live<readonly PreviewRow[] | undefined>;
   /**
    * The session's armed scheduled wakes, as this TUI last reported them
    * (docs/feat/cron-tool.md S5): `/schedule` opens on them, and the panel's

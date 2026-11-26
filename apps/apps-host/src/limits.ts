@@ -53,6 +53,17 @@ export const APPS_LIMITS = {
   snapshotMs: 30 * SECOND,
   /** How stale a read of the operator files may be. */
   operatorStaleMs: SECOND,
+  /** Live apps (tunnels), all keys together; per key `maxLiveAppsPerKey`. */
+  maxLiveTunnels: 200,
+  /** Concurrent requests and WebSockets of one live app. */
+  maxStreamsPerApp: 64,
+  maxLiveStreams: 4000,
+  /** Bytes through one live app per UTC day, both directions. */
+  liveBytesPerDay: GIB,
+  /** Requests to live apps from one address (dev servers load many modules). */
+  liveRequestsPerMinutePerIp: 600,
+  /** An HTTP stream with no bytes for this long is reset. */
+  liveStreamIdleMs: 2 * MINUTE,
 } as const;
 
 export type AppsLimitName = keyof typeof APPS_LIMITS;

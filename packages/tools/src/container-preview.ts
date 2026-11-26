@@ -36,16 +36,27 @@ function line(text: string, cap: number): string {
 
 const shortId = (id: string): string => line(id.replace(/^sha256:/, ""), 64).slice(0, 12);
 
+/** What an exposure ask says of the container: its name and the engine's lines. */
+export function containerFacts(facts: PreviewFacts): { name: string; lines: string[] } {
+  const name = line(facts.name, 80) || shortId(facts.id);
+  const lan = facts.hostIp === "0.0.0.0" || facts.hostIp === "" ? " (also on your LAN)" : "";
+  return {
+    name,
+    lines: [
+      `Engine: ${facts.engine} · ${line(facts.endpointLabel, 200)}`,
+      `Container: ${name} · ${shortId(facts.id)}`,
+      `Image: ${line(facts.image, 200)} · ${shortId(facts.imageId)}`,
+      `Port: ${facts.containerPort}/tcp → 127.0.0.1:${facts.hostPort}${lan}`,
+    ],
+  };
+}
+
 /** The ask the owner decides on: only the engine's facts. Pure. */
 export function containerPreviewAsk(facts: PreviewFacts): PermissionRequest {
-  const name = line(facts.name, 80) || shortId(facts.id);
+  const { name, lines } = containerFacts(facts);
   const port = facts.containerPort;
-  const lan = facts.hostIp === "0.0.0.0" || facts.hostIp === "" ? " (also on your LAN)" : "";
   const detail = [
-    `Engine: ${facts.engine} · ${line(facts.endpointLabel, 200)}`,
-    `Container: ${name} · ${shortId(facts.id)}`,
-    `Image: ${line(facts.image, 200)} · ${shortId(facts.imageId)}`,
-    `Port: ${port}/tcp → 127.0.0.1:${facts.hostPort}${lan}`,
+    ...lines,
     "Only your paired devices can open it, while this session is open",
   ].join("\n");
   return {

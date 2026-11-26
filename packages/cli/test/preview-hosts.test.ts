@@ -139,6 +139,56 @@ describe("`serve`", () => {
   }
 });
 
+/**
+ * `container_share` (docs/feat/session-apps-container-ports.md OD11): a `serve`
+ * with `previews.enabled` AND `previews.links` only.
+ */
+describe("who offers container_share", () => {
+  const SHARE = "container_share";
+  const LINKS = { previews: { enabled: true, links: true } };
+
+  for (const [name, file, offers] of [
+    ["serve with both flags", LINKS, true],
+    ["not serve with previews.enabled alone", ON, false],
+    ["not serve with links alone", { previews: { links: true } }, false],
+  ] as const) {
+    test(name, async () => {
+      await withConfig(file, async (config, dir) => {
+        const model = new Recorder();
+        const server = await startDaemon(config, {
+          host: "127.0.0.1",
+          port: 0,
+          createProvider: () => model,
+        });
+        const channel = await connectWebSocket(`ws://127.0.0.1:${server.port}`);
+        const laptop = new RemoteClient(channel, new PermissionBroker());
+        try {
+          await laptop.initialize();
+          const sessionId = await laptop.openSession(dir, undefined, "S");
+          await laptop.prompt(sessionId, "t1", "hi");
+          const offered = await offeredIn(model);
+          expect(offered.includes(SHARE)).toBe(offers);
+        } finally {
+          laptop.close();
+          await server.stop();
+        }
+      });
+    });
+  }
+
+  test("never the worker or a pod daemon, even with both flags", async () => {
+    await withConfig(LINKS, async (config) => {
+      const worker = new Recorder();
+      const local = workerSessionHost(config, { version: "t", createProvider: () => worker });
+      expect(await offeredBy(local, worker)).not.toContain(SHARE);
+      const pod = new Recorder();
+      const host = podSessionHost(config, undefined, { createProvider: () => pod });
+      expect(await offeredBy(host, pod)).not.toContain(SHARE);
+      expect(buildAgent(config, {}).tools.get(SHARE)).toBeUndefined();
+    });
+  });
+});
+
 describe("the ask goes to the session's ONE broker (AGENTS §7)", () => {
   test("it reaches that broker, and a no records nothing", async () => {
     await withConfig(ON, async (config) => {

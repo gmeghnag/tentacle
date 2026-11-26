@@ -101,6 +101,7 @@ import { forgetPushRegistration, writePushRegistration } from "./push-store.ts";
 import type { AppsService } from "./session-apps.ts";
 import { type SessionSummary, toSessionList } from "./session-list.ts";
 import type { ArchivedMeta, SessionPersister } from "./session-persister.ts";
+import type { ShareStarter } from "./session-previews.ts";
 import { type Expired, type ReapPolicy, selectEvictable, selectExpired } from "./session-reaper.ts";
 import { type TitleState, renameText, seedState } from "./session-title.ts";
 import type { DaemonIdentity } from "./version-mismatch.ts";
@@ -470,6 +471,12 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * the engine side. Absent: no link, no tool, `preview_connect` is `PreviewGone`.
    */
   readonly previews?: PreviewResolver;
+  /**
+   * `serve` with `previews.enabled` AND `previews.links`
+   * (docs/feat/session-apps-container-ports.md): the way to the apps host.
+   * Absent: nothing is shared on the internet.
+   */
+  readonly shares?: ShareStarter;
 }
 
 /**
@@ -1786,6 +1793,7 @@ export class SessionHost {
       this.opts.schedules,
       this.opts.apps,
       this.opts.previews,
+      this.opts.shares,
     );
     bound.hosted = hosted;
     hosted.settingsReport = settingsReport;
@@ -1817,6 +1825,14 @@ export class SessionHost {
    */
   stopApps(): void {
     this.opts.apps?.stop();
+  }
+
+  /**
+   * The daemon stopping: every shared port goes offline at once
+   * (docs/feat/session-apps-container-ports.md; a share is never persisted).
+   */
+  async stopShares(): Promise<void> {
+    await this.opts.shares?.close?.();
   }
 
   /**

@@ -16,6 +16,52 @@ export interface PreviewTargetInput {
   readonly endpoint: EngineEndpoint;
   /** The caller's `XDG_RUNTIME_DIR`: where rootless engines listen. OD4. */
   readonly runtimeDir?: string | undefined;
+  /**
+   * `link`: the port goes on the INTERNET
+   * (docs/feat/session-apps-container-ports.md OD2): stricter, since whoever
+   * holds the link drives the service. Absent: the paired devices only.
+   */
+  readonly scope?: "link" | undefined;
+}
+
+/** Added capabilities that turn code execution in a container into the host. */
+const HOST_CAPS: readonly string[] = [
+  "ALL",
+  "SYS_ADMIN",
+  "NET_ADMIN",
+  "SYS_PTRACE",
+  "SYS_MODULE",
+  "DAC_READ_SEARCH",
+  "SYS_RAWIO",
+];
+const UNCONFINED = /^(seccomp|apparmor)[=:]unconfined$/i;
+
+/** A list the engine may omit; `undefined`: not a list, so it cannot be checked. */
+function listOf(value: unknown): readonly unknown[] | undefined {
+  if (value === undefined || value === null) return [];
+  return Array.isArray(value) ? value : undefined;
+}
+
+/** Why a container may not go on the internet, beyond the device rules. */
+function linkRefusal(host: NonNullable<ContainerInspect["HostConfig"]>): string | undefined {
+  for (const mode of ["PidMode", "IpcMode", "UTSMode"] as const) {
+    if (host[mode] === "host") return `the container shares the host's ${mode.slice(0, 3)} space`;
+  }
+  const caps = listOf(host.CapAdd);
+  const devices = listOf(host.Devices);
+  const options = listOf(host.SecurityOpt);
+  if (caps === undefined || devices === undefined || options === undefined) {
+    return "the container's privileges cannot be checked";
+  }
+  for (const cap of caps) {
+    const name = String(cap).toUpperCase().replace(/^CAP_/, "");
+    if (HOST_CAPS.includes(name)) return `the container adds the ${name} capability`;
+  }
+  if (devices.length > 0) return "the container has host devices";
+  if (options.some((option) => UNCONFINED.test(String(option)))) {
+    return "the container runs unconfined (seccomp or AppArmor off)";
+  }
+  return undefined;
 }
 
 /** `HostIp` values published on loopback (the last two also on the LAN). OD3. */
@@ -106,6 +152,10 @@ export function previewTargetOf(input: PreviewTargetInput): PreviewResolution {
   }
   if (host.Privileged === true) {
     return refuse("the container is privileged");
+  }
+  const unfit = input.scope === "link" ? linkRefusal(host) : undefined;
+  if (unfit !== undefined) {
+    return refuse(`${unfit}: it cannot be put on the internet`);
   }
   const guarded = guardedPaths(endpoint.path, input.runtimeDir);
   for (const mount of inspect.Mounts ?? []) {

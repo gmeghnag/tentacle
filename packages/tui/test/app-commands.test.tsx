@@ -103,6 +103,7 @@ describe("S0 command smoke: every built-in command answers", () => {
       "/artifacts",
       "/schedule",
       "/apps",
+      "/previews",
       "/workflow",
       "/agents",
       "/settings",

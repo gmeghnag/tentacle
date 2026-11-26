@@ -630,7 +630,16 @@ describe("no cookies, no indexing, ever", () => {
       await host.call("/robots.txt", { host: at(live) }),
       await host.call("/v1/report", form({ app: live, reason: "other" })),
       await host.call("/v1/report", form({ app: live, reason: "other" })),
+      // The live routes, and a live app's own host-made pages, set none either.
+      await host.signed(publisher, "POST", "/v1/apps/live"),
+      await host.signed(publisher, "GET", `/v1/apps/${live}/tunnel`),
     ];
+    const created = [...host.memory.records.values()].find((r) => r.kind === "live");
+    const liveHost = at(created?.id ?? "");
+    responses.push(
+      await host.call("/", { host: liveHost }),
+      await host.call("/", { host: liveHost, headers: { "sec-fetch-site": "same-origin" } }),
+    );
     const statuses = new Set(responses.map((r) => r.status));
     for (const status of [200, 201, 204, 303, 400, 404, 405, 410, 429]) {
       expect(statuses).toContain(status);

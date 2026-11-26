@@ -5,19 +5,15 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  APPS_API_VERSION,
-  APPS_HEADERS,
-  type AppsError,
-  type AppsErrorCode,
-  isAppId,
-} from "@tentacle/protocol";
+import { APPS_API_VERSION, APPS_HEADERS, APPS_TUNNEL_PING_MS, isAppId } from "@tentacle/protocol";
 import { clientIpOf, limiterKeyOf } from "@tentacle/relay/client-ip";
 import { createLogLimiter } from "@tentacle/relay/log-limit";
 import { type RandomBytes, hostRoute } from "./app-id.ts";
 import { BODY_RETRY_MS, BodyBudget, declaredLength } from "./body-budget.ts";
 import { HostCore, type Reservation, type Reserved } from "./host-core.ts";
 import { APPS_LIMITS, type AppsLimits } from "./limits.ts";
+import { type LiveSocket, type SocketData, createLive } from "./live-server.ts";
+import type { LiveTunnels } from "./live-tunnels.ts";
 import {
   type OperatorFileName,
   type OperatorFileRead,
@@ -26,8 +22,6 @@ import {
 import {
   COMMON_HEADERS,
   FRAME_PATH,
-  type NoticeKind,
-  type Page,
   REPORT_CONTACT_MAX,
   REPORT_DETAILS_MAX,
   REPORT_REASONS,
@@ -39,6 +33,7 @@ import {
 } from "./pages.ts";
 import { readBody } from "./read-body.ts";
 import type { Effect } from "./records.ts";
+import { NOTICE_STATUS, type Refused, errorResponse, pageResponse, text } from "./respond.ts";
 import { type ControlRoute, ERROR_STATUS, controlRoute } from "./routes.ts";
 import {
   NonceGuard,
@@ -80,6 +75,8 @@ export interface RunningAppsHost {
   sweep(): Promise<void>;
   /** The core, for a test's assertions about state. */
   readonly core: HostCore;
+  /** The connected tunnels of live apps (a test's assertions). */
+  readonly tunnels: LiveTunnels;
   /** Stop serving, let writes finish, take a last snapshot. */
   stop(): Promise<void>;
 }
@@ -109,44 +106,6 @@ interface RequestUrl {
   readonly searchParams: { get(name: string): string | null };
 }
 
-interface Refused {
-  readonly error: AppsErrorCode;
-  readonly message: string;
-  readonly retryAfterMs?: number;
-  readonly reason?: string;
-  readonly serverTime?: number;
-}
-
-function text(body: string, status = 200, headers: Record<string, string> = {}): Response {
-  return new Response(body, {
-    status,
-    headers: { ...COMMON_HEADERS, "Content-Type": "text/plain; charset=utf-8", ...headers },
-  });
-}
-
-function pageResponse(page: Page, status = 200): Response {
-  return new Response(page.body, { status, headers: page.headers });
-}
-
-function errorResponse(refused: Refused): Response {
-  const body: AppsError = {
-    error: refused.error,
-    message: refused.message,
-    ...(refused.retryAfterMs === undefined ? {} : { retryAfterMs: refused.retryAfterMs }),
-    ...(refused.reason === undefined ? {} : { reason: refused.reason }),
-    ...(refused.serverTime === undefined ? {} : { serverTime: refused.serverTime }),
-  };
-  return Response.json(body, {
-    status: ERROR_STATUS[refused.error],
-    headers: {
-      ...COMMON_HEADERS,
-      ...(refused.retryAfterMs === undefined
-        ? {}
-        : { "Retry-After": String(Math.ceil(refused.retryAfterMs / 1000)) }),
-    },
-  });
-}
-
 function utf8(bytes: Uint8Array): string | undefined {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -154,15 +113,6 @@ function utf8(bytes: Uint8Array): string | undefined {
     return undefined;
   }
 }
-
-const NOTICE_STATUS: Record<NoticeKind, number> = {
-  maintenance: 503,
-  unknown: 404,
-  taken_down: 410,
-  deleted: 410,
-  offline: 503,
-  over_limit: 503,
-};
 
 export async function startAppsHost(options: AppsHostOptions): Promise<RunningAppsHost> {
   const domain = options.domain.toLowerCase();
@@ -265,7 +215,21 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     });
   };
 
+  /** Nothing signed before this instant is accepted: the nonce cache starts empty. */
+  let startedAt = Number.POSITIVE_INFINITY;
+  const live = createLive({
+    domain,
+    limits,
+    now,
+    core,
+    pages,
+    nonces,
+    startedAt: () => startedAt,
+    log,
+  });
+
   const sweepOnce = async (): Promise<void> => {
+    live.keepConnected();
     const swept = core.sweep();
     for (const id of swept.expired) {
       log(`expire ${id}`);
@@ -273,6 +237,7 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     for (const { id, reason } of swept.takenDown) {
       log(`takedown ${id} ${reason}`);
     }
+    live.sweep();
     await apply(swept.effects);
     nonces.prune(now());
     try {
@@ -310,16 +275,18 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     }
   };
 
-  /** Write a reserved publication, then commit it. */
+  /** Write a reserved publication, then commit it. A live app has no bytes. */
   const publishBytes = (
     reservation: Reservation,
-    bytes: Uint8Array,
+    bytes: Uint8Array | undefined,
     done: { status: number; line: string },
   ): Promise<Response | Refused> => {
     const { record } = reservation;
     return serial(record.id, async () => {
       try {
-        await store.writeContent(record.id, record.sha256, bytes);
+        if (bytes !== undefined) {
+          await store.writeContent(record.id, record.sha256, bytes);
+        }
         await store.writeRecord(record);
       } catch (error) {
         log(`store-error publish ${errno(error)}`);
@@ -381,7 +348,10 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     }
   };
 
-  type ApiRoute = Extract<ControlRoute, { kind: "create" | "update" | "renew" | "delete" }>;
+  type ApiRoute = Extract<
+    ControlRoute,
+    { kind: "create" | "create_live" | "update" | "renew" | "delete" }
+  >;
 
   /** Cheap checks before crypto, crypto before any state. */
   const handleApi = async (
@@ -396,7 +366,7 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
         ? { key: req.headers.get(APPS_HEADERS.key) ?? "", id: route.id }
         : undefined;
     const early =
-      (publishing ? core.refusalIfKilled() : undefined) ??
+      (publishing || route.kind === "create_live" ? core.refusalIfKilled() : undefined) ??
       refusalOf(core.admitApi(limiterKeyOf(ip), renewal));
     if (early !== undefined) {
       return early;
@@ -451,6 +421,17 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
       }
       return admitted;
     }
+    if (route.kind === "create_live") {
+      const reserved = core.reserveCreateLive({ key, ip: limiterKeyOf(ip) });
+      if (!reserved.ok) {
+        return reserved;
+      }
+      const { reservation } = reserved;
+      return publishBytes(reservation, undefined, {
+        status: 201,
+        line: `publish-live ${reservation.record.id} key ${key.slice(0, 8)} ip ${ip}`,
+      });
+    }
     if (route.kind === "create" || route.kind === "update") {
       if (!HTML_TYPE.test((req.headers.get("content-type") ?? "").trim())) {
         return { error: "unsupported_media", message: "send text/html in UTF-8" };
@@ -492,6 +473,7 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     if (!deleted.ok) {
       return deleted;
     }
+    live.tunnels.end(route.id, "deleted");
     if (!(await apply(deleted.effects))) {
       return { error: "internal", message: "the host could not finish; retry" };
     }
@@ -555,7 +537,20 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     });
   };
 
-  const handleControl = async (req: Request, url: RequestUrl, ip: string): Promise<Response> => {
+  const answered = (answer: Response | Refused, ip: string): Response => {
+    if (answer instanceof Response) {
+      return answer;
+    }
+    log(`refused ${answer.error} ip ${ip}`);
+    return errorResponse(answer);
+  };
+
+  const handleControl = async (
+    req: Request,
+    url: RequestUrl,
+    ip: string,
+    server: Parameters<typeof live.upgrade>[4],
+  ): Promise<Response | undefined> => {
     const route = controlRoute(req.method, url.pathname);
     switch (route.kind) {
       case "health":
@@ -575,14 +570,12 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
         return text("method not allowed", 405, { Allow: route.allow });
       case "not_found":
         return text("not found", 404);
-      default: {
-        const answer = await handleApi(route, req, url, ip);
-        if (answer instanceof Response) {
-          return answer;
-        }
-        log(`refused ${answer.error} ip ${ip}`);
-        return errorResponse(answer);
+      case "tunnel": {
+        const answer = await live.upgrade(route.id, req, url, ip, server);
+        return answer === undefined ? undefined : answered(answer, ip);
       }
+      default:
+        return answered(await handleApi(route, req, url, ip), ip);
     }
   };
 
@@ -598,7 +591,9 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     }
     const view = core.view(id);
     if (view.kind !== "app") {
-      return pageResponse(pages.notice(view.kind), NOTICE_STATUS[view.kind]);
+      // A live app never comes here (`fetch` sends it to the tunnel).
+      const kind = view.kind === "live" ? "unknown" : view.kind;
+      return pageResponse(pages.notice(kind), NOTICE_STATUS[kind]);
     }
     // The framed copy, behind the warning dialog: only for the wrapper's own
     // iframe. Top level, another origin or no Fetch Metadata: nothing.
@@ -637,10 +632,9 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
   }
   await apply(restored.effects);
   await saveSnapshot();
-  /** Nothing signed before this instant is accepted: the nonce cache starts empty. */
-  const startedAt = now();
+  startedAt = now();
 
-  const server = Bun.serve({
+  const server = Bun.serve<SocketData>({
     hostname: options.host ?? DEFAULT_APPS_HOST,
     port: options.port ?? DEFAULT_APPS_PORT,
     maxRequestBodySize: limits.maxAppBytes,
@@ -651,7 +645,7 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
       if (route.kind === "unknown") {
         return text("not found", 404);
       }
-      if (route.kind === "app") {
+      if (route.kind === "app" && core.record(route.id)?.kind !== "live") {
         return handleApp(req, url, route.id);
       }
       const peer = (srv as unknown as PeerAddressable).requestIP(req)?.address ?? "";
@@ -660,13 +654,32 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
         forwardedFor: req.headers.get("x-forwarded-for"),
         trustProxy: options.trustProxy === true,
       });
-      return handleControl(req, url, ip);
+      return route.kind === "app"
+        ? live.visit(route.id, req, url, ip, srv)
+        : handleControl(req, url, ip, srv);
+    },
+    websocket: {
+      ...live.socketOptions,
+      open(ws) {
+        live.websocket.open(ws as unknown as LiveSocket);
+      },
+      message(ws, message) {
+        live.websocket.message(ws as unknown as LiveSocket, message);
+      },
+      drain(ws) {
+        live.websocket.drain(ws as unknown as LiveSocket);
+      },
+      close(ws, code, reason) {
+        live.websocket.close(ws as unknown as LiveSocket, code, reason);
+      },
     },
     error(error) {
       log(`request-failed ${errno(error)}`);
       return text("internal error", 500);
     },
   });
+
+  const pinger = setInterval(() => live.tunnels.ping(), APPS_TUNNEL_PING_MS);
 
   const timer = setInterval(() => {
     // A sweep slower than its period is not queued behind itself.
@@ -680,10 +693,13 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     url: `http://${options.host ?? DEFAULT_APPS_HOST}:${server.port}`,
     port: server.port ?? 0,
     core,
+    tunnels: live.tunnels,
     sweep,
     stop() {
       stopped ??= (async () => {
         clearInterval(timer);
+        clearInterval(pinger);
+        live.tunnels.closeAll();
         server.stop(true);
         await sweeping;
         await Promise.all([...queues.values()]);

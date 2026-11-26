@@ -68,6 +68,8 @@ import {
   type PreviewConnectParams,
   type PreviewConnectResult,
   type PreviewDataParams,
+  type PreviewLinkParams,
+  type PreviewLinkResult,
   type PreviewStopParams,
   type PromptParams,
   type PromptResult,
@@ -557,8 +559,20 @@ export class Connection {
       case Method.PreviewStop: {
         const { sessionId, previewId } = params as PreviewStopParams;
         const hosted = this.lookup(sessionId);
-        this.requirePreviewDevice();
+        // Stopping opens nothing: any owner client, the `connect` TUI included.
+        this.requirePreviewOwner();
         return hosted.stopPreview(previewId);
+      }
+      case Method.PreviewLink: {
+        const { sessionId, previewId } = params as PreviewLinkParams;
+        const hosted = this.lookup(sessionId);
+        this.requirePreviewOwner();
+        const url = hosted.previewLink(previewId);
+        if (url === undefined) {
+          throw new RpcError(DomainErrorCode.PreviewGone, "no such shared preview");
+        }
+        // The ONE place a share's secret leaves the daemon: to the asker alone.
+        return { url } satisfies PreviewLinkResult;
       }
       case Method.ScheduleCreate: {
         // agent-workflows slice 10: answers up to the create (reads the file);
@@ -1010,9 +1024,16 @@ export class Connection {
   /** Previews are viewed by paired devices only (OD5): a token client answers the ask, no more. */
   private requirePreviewDevice(): void {
     if (this.principal.kind !== "device") {
+      throw new RpcError(DomainErrorCode.Unauthorized, "only a paired device may open a preview");
+    }
+  }
+
+  /** The person's own clients: a paired device or a token (never a pairing one). */
+  private requirePreviewOwner(): void {
+    if (this.principal.kind !== "device" && this.principal.kind !== "token") {
       throw new RpcError(
         DomainErrorCode.Unauthorized,
-        "only a paired device may open or stop a preview",
+        "only the owner's own clients may stop a preview or read its link",
       );
     }
   }

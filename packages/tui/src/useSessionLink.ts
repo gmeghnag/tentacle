@@ -50,7 +50,7 @@ import { type WakeModel, wakeStep } from "@tentacle/core";
  * themselves PORT FIELDS of `useTurnDriver`, which is called at 1355. Adding
  * them here would move an effect's index or form a use-before-declaration.
  */
-import type { AppRow } from "@tentacle/protocol";
+import type { AppRow, PreviewRow } from "@tentacle/protocol";
 import { type MutableRefObject, useCallback, useRef } from "react";
 import type { SessionController, SessionDirectory } from "./app-types.ts";
 import { noteSent, resetDock } from "./background-focus.ts";
@@ -116,6 +116,9 @@ export interface SessionLinkHost {
   /** The session's published apps (`apps`, session apps D10), and their sink. */
   readonly appsSubRef: MutableRefObject<(() => void) | null>;
   readonly setApps: (rows: readonly AppRow[] | undefined) => void;
+  /** The session's container previews (`/previews`), and their sink. */
+  readonly previewsSubRef: MutableRefObject<(() => void) | null>;
+  readonly setPreviews: (rows: readonly PreviewRow[] | undefined) => void;
   /** The session's workflow runs (`workflows`, docs/feat/workflows-ui.md D2). */
   readonly workflowsSubRef: MutableRefObject<(() => void) | null>;
   readonly notifySubRef: MutableRefObject<(() => void) | null>;
@@ -244,6 +247,8 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
     schedulesSubRef,
     appsSubRef,
     setApps,
+    previewsSubRef,
+    setPreviews,
     workflowsSubRef,
     notifySubRef,
     dockMsgSubRef,
@@ -460,6 +465,8 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       schedulesSubRef.current?.();
       appsSubRef.current?.();
       setApps(undefined);
+      previewsSubRef.current?.();
+      setPreviews(undefined);
       workflowsSubRef.current?.();
       notifySubRef.current?.();
       dockMsgSubRef.current?.();
@@ -491,6 +498,8 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
         session?.onSchedules?.((report) => setSchedules(report.rows)) ?? null;
       // The session's published apps (session apps D10): `/apps` and the status line.
       appsSubRef.current = session?.onApps?.((rows) => setApps(rows)) ?? null;
+      // The session's container previews: `/previews`.
+      previewsSubRef.current = session?.onPreviews?.((rows) => setPreviews(rows)) ?? null;
       // The session's workflow runs (docs/feat/workflows-ui.md D3): the SAME
       // per-session feed the rail and `/workflow` paint. `undefined` when this
       // session reports no runs at all (a pod, an older daemon), never an
@@ -553,6 +562,8 @@ export function useSessionLink(host: SessionLinkHost): SessionLinkLayer {
       schedulesSubRef,
       appsSubRef,
       setApps,
+      previewsSubRef,
+      setPreviews,
       workflowsSubRef,
       notifySubRef,
       onActivityRef,

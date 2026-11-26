@@ -26,12 +26,15 @@
 		# This name only: no includeSubDomains, no preload.
 		Strict-Transport-Security "max-age=31536000"
 		-Server
-		-Set-Cookie
 	}
 	reverse_proxy 127.0.0.1:4200 {
 		# REPLACE the client's header: the process takes the right-most hop.
 		header_up X-Forwarded-For {remote_host}
-		header_down -Set-Cookie
+		# Live apps stream (server-sent events, long responses): pass bytes on at once.
+		flush_interval -1
 	}
+	# Cookies pass: a LIVE app needs them (docs/feat/session-apps-container-ports.md
+	# Q5). The process sets none on static and control responses (its tests pin
+	# that) and drops a `Domain` cookie from a live app.
 	# No `log` directive: visitor access is not logged (privacy).
 }

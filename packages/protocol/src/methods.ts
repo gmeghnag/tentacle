@@ -46,6 +46,8 @@ import {
   PreviewConnectParamsSchema,
   PreviewConnectResultSchema,
   PreviewDataParamsSchema,
+  PreviewLinkParamsSchema,
+  PreviewLinkResultSchema,
   PreviewStopParamsSchema,
   PreviewStopResultSchema,
 } from "./preview.ts";
@@ -322,8 +324,14 @@ export const Method = {
    * `MethodNotFound`.
    */
   PreviewConnect: "session/preview_connect",
-  /** A paired device takes one preview down (and its tunnels). Device only. */
+  /** An owner takes one preview down (and its tunnels, and its public link). */
   PreviewStop: "session/preview_stop",
+  /**
+   * An owner reads the link of a shared preview, secret included
+   * (docs/feat/session-apps-container-ports.md). An older daemon answers
+   * `MethodNotFound`.
+   */
+  PreviewLink: "session/preview_link",
 } as const;
 export type MethodName = (typeof Method)[keyof typeof Method];
 
@@ -493,6 +501,7 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     result: PreviewConnectResultSchema,
   },
   [Method.PreviewStop]: { params: PreviewStopParamsSchema, result: PreviewStopResultSchema },
+  [Method.PreviewLink]: { params: PreviewLinkParamsSchema, result: PreviewLinkResultSchema },
 };
 
 /** params schema for every notification method. */

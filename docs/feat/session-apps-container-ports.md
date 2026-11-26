@@ -288,12 +288,15 @@ serve ◄── wss://apps.tentacle.so/v1/apps/<id>/tunnel (signed upgrade, dial
   - It is refused under kill `publish|all`, and for a taken-down key.
   - It counts in `maxLiveAppsPerKey`.
   - It mints an id and writes `AppRecord{kind:"live", sha256:"", bytes:0}`
-    (`kind` is optional; absent means static). An older host build sees a live
-    record as a static app with no content and serves the offline page.
+    (`kind` is optional; absent means static). *(Corrected in Execution: an older
+    host build's `parseRecord` requires a 64-hex `sha256`, so it SKIPS a live
+    record and shows «No such app», not the offline page.)*
 - **The tunnel:** `GET /v1/apps/<id>/tunnel` (on the apex) is a signed upgrade:
   `checkSignedHeaders` + `verifySignedBody` over the empty body.
   - The owner key must match the app's, and the app must be `live` and kind `live`.
   - It is refused under kill `all`, for a takedown, or past `maxLiveTunnels`.
+    *(Corrected in Execution: also under kill `publish`, as the failure table
+    says; the stricter of the two statements.)*
   - The newest valid tunnel for an id replaces the old one, which is closed. That
     covers a half-open socket after a network blip.
 - **The visitor path** (`handleApp` for a `live` view), in order:
@@ -576,7 +579,127 @@ deploy.
 
 ## Execution
 
-*(empty — slices S1 → S5)*
+*— claude-sonnet-5-5, 2026-11-26*
+
+| Slice | State |
+|---|---|
+| S1 apps host | DONE |
+| S2 serve gates, tool, ask, row, protocol | DONE (phone sheet change not run: no `apps/mobile` install here) |
+| S3 serve tunnel and lifecycle | PARTIAL: the host's end reason is not shown in the owner's client; no inspect-latency measurement; no real-container run |
+| S4 TUI `/previews`, changelog | DONE |
+| S5 phone | not started (own branch) |
+
+**Load-bearing check** (Bun 1.4.3), re-run before any edit: `probe.ts` and
+`probe-upgrade.ts` print the plan's lines (custom headers + subprotocol on the
+client WebSocket; `keepalive:false` 5 requests → 5 ports, default → 1; streamed
+body; `//evil` changes the origin; manual redirect; awaited upgrade with the
+subprotocol). **Repro:** the `container_share|apps-tunnel|preview_link|/tunnel`
+search over `{packages,apps}/**/*.ts` → 0 matches.
+
+**As built, in order**
+
+- S1: `protocol/apps-tunnel.ts` (codec, limits, credit). Host: `live-stream.ts`,
+  `live-tunnels.ts`, `live-server.ts`, `respond.ts` (new), `server.ts`,
+  `host-core.ts`, `records.ts`, `store.ts`, `limits.ts`, `routes.ts`, `pages.ts`;
+  `Caddyfile.apps` (no `Set-Cookie` strip, `flush_interval -1`) and the runbook.
+- S2: docker link scope; core kind `container_share` + `PreviewSharing`;
+  `tools/container-share.ts`; sub-agent filter; `daemon/share-gate.ts`,
+  `session-previews.ts`, `connection.ts`, `permission-map.ts`, `external/asks.ts`;
+  client router; `previews.links`; wiring; TUI and phone ask labels;
+  `protocol.json` regenerated. All wire changes are additive: no `protocol.d/`.
+- S3: `AppsClient.createLive/signTunnel/probeTunnel`, `share-tunnel.ts`,
+  `share-stream.ts`, `TENTACLE_APPS_URL` (loopback only), `serve.ts`.
+- S4: `client/previews.ts` + `RemoteClient`/`RemoteSession`/runtime;
+  `tui/previews-view.ts`, `/previews` panel and command;
+  `changelog.d/session-apps-container-ports.added.md`.
+
+**Owner answer 2 (public mode), as built**
+
+- Every ask offers `share_link` (first, pre-selected), `share_public` and Deny.
+  Only `share_public` yields `choice: "public"`; any other approval is the secret link.
+- The tool's `public` flag (default false) changes the title and warning only.
+- The two custom option ids mean an older client's literal `allow_once`
+  (auto-accept) is «not offered» and decides nothing.
+- Found and fixed: the TUI's quick `a` key answered the second row, so it chose
+  PUBLIC (red: 3 answers where 2 expected; `permission-reply.ts`).
+
+**Drift from Implementation**
+
+- `addShare` is `PreviewsLink.share.add` and async: the host mints the id (and URL)
+  before the row exists.
+- A frame for a lower, finished stream id is ignored (it crosses a reset on the
+  wire); an id never opened still closes the tunnel.
+- An authenticated tunnel refusal upgrades and then closes `4001 <code>` (Bun's
+  client cannot read an HTTP status). After an unanswered upgrade the serve asks
+  with the same signed GET (`probeTunnel`), which also corrects clock skew.
+- A WebSocket handshake with no `Sec-Fetch-Site` is admitted only when `Origin` is
+  the app's own (not every browser sends Fetch Metadata there). No Fetch Metadata:
+  GET/HEAD → warning, other methods → 403.
+- Serve stop sends `DELETE` and closes (failure table), so visitors then get 410,
+  not the offline 503; a killed process still gives 503 then `expired`. The stop
+  path was missing at first and was found by the validation below.
+- The idle timer applies to HTTP streams only.
+- The end-to-end test is `apps/apps-host/test/share-tunnel.test.ts` (keeps the
+  host out of the root typecheck). The static/control no-cookie test already
+  existed in `server.test.ts`; live routes were added to it.
+- Bun 1.4.3 refuses `headers: {}` on `upgrade`; its `fetch` client collapses `//`
+  (pivot tests use raw sockets); a paused visitor stops a response pull at about
+  1.6 MiB (`probe-backpressure.ts`), which is why pull-based ACKs bound memory.
+
+**Not done / unverified**
+
+- «The host's reason shown to the owner»: the row disappears and the reason is only
+  in serve's audit line (`share <id> tunnel closed 4003 <code>`). Showing it needs
+  a UI surface or a new wire field.
+- Inspect latency (OD6) and a run with real containers: `podman` needed approval
+  here. Phone tests: run `bun test apps/mobile/test/permission-sheet-share.test.ts`
+  where mobile is installed.
+- Browser behaviour (Fetch Metadata on Safari/Chrome, `__Host-` cookie over TLS)
+  waits for the owner's deploy.
+
+**Mutations** (each applied, seen failing, reverted)
+
+| Mutation | Result |
+|---|---|
+| codec: drop the size check | 3 fail |
+| host: visitor gate always admits | 2 fail |
+| host: tunnel without ownership check | 1 fail |
+| host: no tunnel close on takedown / kill | 2 fail |
+| host: window overrun ignored | 1 fail |
+| preview target ignores `scope` (the pre-implementation run) | 20 fail |
+| share gate: no `//` check | 2 fail |
+| share gate: no origin re-assert | 1 fail |
+| share gate: forward the capability cookie | 1 fail |
+| secret link in the tool's row | hygiene test fails |
+| serve: cache the dial target | 1 fail |
+| serve: `keepalive: true` | 1 fail |
+
+**Local validation** — script `.tentacle/tmp/session-apps-container-ports/validate.ts`:
+real apps host, real `serve` (engine resolver, tool, tunnel) and client; **a fake
+Docker engine on a unix socket and a Bun server stand in for the containers**.
+
+```
+ask: Put container p5-nginx port 80/tcp on the INTERNET behind a secret link?
+(a) no Fetch Metadata: 200 warning=true
+(b) same-origin, no cookie: 403
+(c) cap path: 303 -> / __Host-tentacle-cap=<secret>; Path=/; Secure; HttpOnly; SameSite=Lax
+(d) with cookie: 200 <h1>Welcome to nginx!</h1>
+(e) GET //evil/: HTTP/1.1 400 Bad Request; service requests added: 0
+(f) WebSocket: echo:ping
+(g) container stopped: 502; rows 0; app deleted
+(h) kill-switch all: tunnel closed; visitor 503
+(h) kill lifted: the serve reconnected
+(j) /previews Stop: {"ok":true}; visitor 410
+(i) serve stopped: visitor 410 offline=false
+secret in any log line or tool result: false
+```
+
+**Checks run here** (the full gate is the orchestrator's): tests of the eleven
+changed packages/apps → 14050 pass, 4 skip, 1 fail + 1 error, both the same
+missing `apps/mobile` install (`Cannot find module '@tentacle/core'` from
+`apps/mobile/src/transcript-history.ts`). Biome on `packages`, `apps/apps-host` and
+the phone files: clean. `tsc -p apps/apps-host`: clean. Root `tsc`: no error in a
+changed file (errors remain in untouched a2a / serve-mcp files in this worktree).
 
 ## Review
 

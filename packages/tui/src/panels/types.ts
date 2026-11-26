@@ -1,4 +1,10 @@
-import type { AppRow, ArtifactMeta, BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
+import type {
+  AppRow,
+  ArtifactMeta,
+  BrowserStatusResult,
+  PreviewRow,
+  WorkflowRow,
+} from "@tentacle/protocol";
 import type { ArtifactsData } from "../artifacts-panel.ts";
 /**
  * The panel MODEL (docs/feat/app-decomposition.md S7): the three open panels as
@@ -118,6 +124,7 @@ export type OpenPanel =
   | ArtifactsPanel
   | SchedulesPanel
   | AppsPanel
+  | PreviewsPanel
   | WorkflowPanel
   | BrowserPanel;
 
@@ -134,6 +141,18 @@ export const appsPanel = (data: readonly AppRow[] | undefined = undefined): Apps
   data,
   cursor: 0,
 });
+
+/** `/previews` (docs/feat/session-apps-container-ports.md S4): a flat list. */
+export interface PreviewsPanel {
+  readonly kind: "previews";
+  /** The daemon's list; `undefined` = never reported. */
+  readonly data: readonly PreviewRow[] | undefined;
+  readonly cursor: number;
+}
+
+export const previewsPanel = (
+  data: readonly PreviewRow[] | undefined = undefined,
+): PreviewsPanel => ({ kind: "previews", data, cursor: 0 });
 
 export const browserPanel = (data: BrowserStatusResult | null = null): BrowserPanel => ({
   kind: "browser",

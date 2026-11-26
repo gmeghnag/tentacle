@@ -163,7 +163,11 @@ export function stepPermissionKey(
     return answer({ allowed: true, scope: "once" });
   }
   if (char === "a") {
-    return answer(choices[1]?.response ?? { allowed: true, scope: "session" });
+    // `a` means "and don't ask again": on a share the second row is PUBLIC,
+    // which no quick key picks (docs/feat/session-apps-container-ports.md).
+    return choices[1]?.response.choice === undefined
+      ? answer(choices[1]?.response ?? { allowed: true, scope: "session" })
+      : { state, action: NONE };
   }
   if (char === "t" && replyable) {
     return { state: open(state), action: NONE };

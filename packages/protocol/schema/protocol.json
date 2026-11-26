@@ -4087,6 +4087,34 @@
       "required": ["data", "tunnelId"],
       "type": "object"
     },
+    "PreviewLinkParams": {
+      "additionalProperties": true,
+      "properties": {
+        "previewId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sessionId": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["previewId", "sessionId"],
+      "type": "object"
+    },
+    "PreviewLinkResult": {
+      "additionalProperties": true,
+      "properties": {
+        "url": {
+          "maxLength": 2048,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": ["url"],
+      "type": "object"
+    },
     "PreviewRow": {
       "additionalProperties": true,
       "properties": {
@@ -4112,6 +4140,25 @@
         },
         "image": {
           "type": "string"
+        },
+        "link": {
+          "additionalProperties": true,
+          "properties": {
+            "public": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": ["connecting", "up", "down"],
+              "type": "string"
+            },
+            "url": {
+              "maxLength": 2048,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": ["public", "state", "url"],
+          "type": "object"
         },
         "name": {
           "type": "string"
@@ -8921,6 +8968,14 @@
       },
       "result": {
         "$ref": "#/$defs/PreviewConnectResult"
+      }
+    },
+    "session/preview_link": {
+      "params": {
+        "$ref": "#/$defs/PreviewLinkParams"
+      },
+      "result": {
+        "$ref": "#/$defs/PreviewLinkResult"
       }
     },
     "session/preview_stop": {

@@ -29,6 +29,7 @@ describe("external answer table", () => {
       agent_add: "owner-only",
       app_publish: "owner-only",
       container_preview: "owner-only",
+      container_share: "owner-only",
     });
     const kinds = Object.keys(EXTERNAL_ANSWER) as PermissionKind[];
     expect(kinds.filter((k) => externalMayAnswer(k))).toEqual(["tool"]);

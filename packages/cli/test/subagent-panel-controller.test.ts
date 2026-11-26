@@ -413,6 +413,11 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       // is the daemon's own method. Forwarded in `persistingController`.
       "onApps",
       "unpublishApp",
+      // The session's container previews (docs/feat/session-apps-container-ports.md
+      // S4): `/previews`' feed, its link and its stop.
+      "onPreviews",
+      "previewLink",
+      "previewStop",
       // The session's workflow runs (docs/feat/workflows-ui.md D2): the rail, the
       // panel and `/workflow` read this ONE feed, and every action (start / stop /
       // resume / rerun step) plus one step's detail are the daemon's own methods.

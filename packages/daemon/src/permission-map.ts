@@ -19,6 +19,8 @@ import {
   QUESTION_ANSWER_OPTION,
   QUESTION_SKIP_OPTION,
   type QuestionRequestUpdate,
+  SHARE_LINK_OPTION,
+  SHARE_PUBLIC_OPTION,
 } from "@tentacle/protocol";
 
 /** The options the daemon offers for an approval; the "always" label reflects
@@ -27,6 +29,19 @@ export function permissionOptions(req: PermissionRequest): PermissionOption[] {
   const alwaysName = req.suggestion
     ? `Allow \`${req.suggestion.prefix}\` commands for this session`
     : "Allow for the rest of this session";
+  // Putting a container port on the internet: the person chooses who may open
+  // it; the secret link first (docs/feat/session-apps-container-ports.md).
+  if (req.kind === "container_share") {
+    return [
+      { optionId: SHARE_LINK_OPTION, name: "Share with a secret link", kind: "allow_once" },
+      {
+        optionId: SHARE_PUBLIC_OPTION,
+        name: "Share PUBLICLY: anyone with the address",
+        kind: "allow_once",
+      },
+      { optionId: "reject_once", name: "Deny", kind: "reject_once" },
+    ];
+  }
   // A workflow's hash approval / approve step is allow-once or deny only: a
   // lasting answer would wave through a merge (docs/feat/agent-workflows.md D3).
   // A browser action likewise: each one acts as the user on the web (B5).
@@ -166,7 +181,11 @@ export function outcomeToResponse(outcome: PermissionOutcome): PermissionRespons
     case QUESTION_ANSWER_OPTION:
       return { allowed: true, scope: "once" };
     case "allow_once":
+    case SHARE_LINK_OPTION:
       return { allowed: true, scope: "once" };
+    // Offered only by a `container_share` ask: the person chose public.
+    case SHARE_PUBLIC_OPTION:
+      return { allowed: true, scope: "once", choice: "public" };
     case "allow_always":
       return { allowed: true, scope: "session" };
     default:

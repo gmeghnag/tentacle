@@ -766,6 +766,9 @@ const FIXTURES: Record<string, Json[]> = {
   "methods/session~1preview_connect/result": [{ tunnelId: "t-1" }],
   "methods/session~1preview_stop/params": [{ sessionId: "s", previewId: "0a1b" }],
   "methods/session~1preview_stop/result": [{ ok: true }, { ok: false, reason: "no such preview" }],
+  // feat/session-apps-container-ports: the owner's link of a shared port.
+  "methods/session~1preview_link/params": [{ sessionId: "s", previewId: "0a1b" }],
+  "methods/session~1preview_link/result": [{ url: "https://aaaa.apps.example.so/" }],
   "notifications/preview~1data/params": [{ tunnelId: "t-1", data: "aGk=" }],
   "notifications/preview~1ack/params": [{ tunnelId: "t-1", bytes: 2 }],
   "notifications/preview~1close/params": [{ tunnelId: "t-1" }, { tunnelId: "t-1", reason: "end" }],
