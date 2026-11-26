@@ -372,6 +372,82 @@
       "required": ["signature", "thinking", "type"],
       "type": "object"
     },
+    "AppsError": {
+      "additionalProperties": true,
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/AppsErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "retryAfterMs": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "serverTime": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": ["error", "message"],
+      "type": "object"
+    },
+    "AppsErrorCode": {
+      "enum": [
+        "bad_request",
+        "bad_signature",
+        "clock_skew",
+        "replay",
+        "not_found",
+        "forbidden",
+        "blocked",
+        "taken_down",
+        "expired",
+        "deleted",
+        "too_large",
+        "unsupported_media",
+        "malformed",
+        "rate_limited",
+        "cap_reached",
+        "conflict",
+        "storage_full",
+        "killed",
+        "busy",
+        "internal"
+      ],
+      "type": "string"
+    },
+    "AppsLeaseResult": {
+      "additionalProperties": true,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z2-7]{16}$",
+          "type": "string"
+        },
+        "leaseExpiresAt": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "leaseMs": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "renewAfterMs": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "url": {
+          "format": "uri",
+          "type": "string"
+        }
+      },
+      "required": ["id", "leaseExpiresAt", "leaseMs", "renewAfterMs", "url"],
+      "type": "object"
+    },
     "ArtifactListParams": {
       "additionalProperties": true,
       "properties": {

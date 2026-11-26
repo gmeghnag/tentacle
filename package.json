@@ -9,7 +9,7 @@
     "bun": ">=1.4.3"
   },
   "scripts": {
-    "typecheck": "tsc --noEmit && tsc -p apps/mobile --noEmit && tsc -p apps/relay --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p apps/mobile --noEmit && tsc -p apps/relay --noEmit && tsc -p apps/apps-host --noEmit",
     "test": "bun test --parallel --timings=scripts/test-timings.json",
     "test:timings": "bun test --parallel --timings=scripts/test-timings.json --update-timings && biome format --write scripts/test-timings.json",
     "test:watch": "bun test --watch",

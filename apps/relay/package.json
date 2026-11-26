@@ -6,7 +6,9 @@
   "type": "module",
   "exports": {
     ".": "./src/server.ts",
-    "./core": "./src/relay-core.ts"
+    "./core": "./src/relay-core.ts",
+    "./client-ip": "./src/client-ip.ts",
+    "./log-limit": "./src/log-limit.ts"
   },
   "dependencies": {
     "@tentacle/protocol": "workspace:*",

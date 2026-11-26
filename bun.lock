@@ -14,6 +14,14 @@
         "typescript": "5.7.2",
       },
     },
+    "apps/apps-host": {
+      "name": "@tentacle/apps-host",
+      "version": "0.7.1",
+      "dependencies": {
+        "@tentacle/protocol": "workspace:*",
+        "@tentacle/relay": "workspace:*",
+      },
+    },
     "apps/browser-extension": {
       "name": "@tentacle/browser-extension",
       "version": "0.7.1",
@@ -644,6 +652,8 @@
     "@sindresorhus/is": ["@sindresorhus/is@4.6.0", "", {}, "sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw=="],
 
     "@tentacle/agent": ["@tentacle/agent@workspace:packages/agent"],
+
+    "@tentacle/apps-host": ["@tentacle/apps-host@workspace:apps/apps-host"],
 
     "@tentacle/browser": ["@tentacle/browser@workspace:packages/browser"],
 

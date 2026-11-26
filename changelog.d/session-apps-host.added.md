@@ -1,0 +1,1 @@
+- **Apps host for session apps.** A new service (`apps/apps-host`) keeps a single-file HTML app published by a tentacle `serve` and serves it at `<id>.<apps domain>`: network off, a first-visit warning with a Report link, size/rate/count caps, a lease that lasts as long as the session, a kill switch and takedowns. Not deployed yet; the publish tools come next.

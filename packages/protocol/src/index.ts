@@ -35,5 +35,6 @@ export * from "./tools.ts";
 export * from "./hooks.ts";
 export * from "./daemon.ts";
 export * from "./relay.ts";
+export * from "./apps-host.ts";
 export * from "./watch.ts";
 export * from "./methods.ts";
