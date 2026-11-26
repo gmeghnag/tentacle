@@ -872,3 +872,44 @@ path I could construct. The orientation geometry is pinned by an independent
 oracle, and the mutations are non-vacuous. **Executor behaviour:** good. It found and
 fixed two holes in the planned walk (step 0), and it reported the CPU issue
 honestly instead of silently widening scope. It did not run the full gate.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-26* (fresh context, reviewing `git diff HEAD~1` = `b86edbf2`)
+
+**Verdict: PASS.** Finding 1 is fixed, and the diff introduces no regression.
+
+- **Fix verified.** I re-ran my round-1 attack (`rv-scan.ts`, 1000/5000 tiny scans, the cost under budget). It is
+  now refused before the decode: `the JPEG has an unexpected layout (more than 32 scans)`.
+- **Mutations (each applied, run, reverted; `git status` clean):**
+  - scan cap ×1000: "32 accepted, 33 refused" and "EOI inside a later APP" FAIL;
+  - duplicate selectors allowed: "names a component twice" FAILS;
+  - `Se` check off: "past coefficient 63" FAILS.
+
+  Together they gave 4 of 49 failing, each the one the mutation targets.
+- **Re-synchronisation attack (the new load-bearing step: the walk now
+  follows pdf.js to the top-level EOI).**
+  - `skipScan` returns the marker that `decodeScan`'s `findNextFileMarker`
+    (`pdf.image_decoders.mjs:8618-8643`, only `FFC0–FFFE`) also lands on. The
+    walk's 2-byte skips have a second byte of `00` or `D0–D7`, never `FF`, so
+    no misaligned marker can hide.
+  - `readBit` throws on any other marker (`:8169`).
+  - A top-level `FFFF` is consumed one byte at a time on both sides
+    (`:8953-8957`).
+  - pdf.js's `markerLoop` ends at the same top-level EOI (`:8771`), and bytes
+    after it are ignored on both sides.
+  - The EOI-in-first-scan re-parse (`:8160-8165`) runs once at most, at a
+    lower height: CPU ≤ 2× the first scan.
+
+  The ≈ 2.7 s worst case is the executor's measurement; I did not re-measure it.
+- **Regressions:** none found.
+  - The 6 image test files: 204 pass / 0 fail.
+  - `bun run lint` clean (2631 files); `bun run typecheck` clean (root + mobile + relay).
+  - Every real fixture still passes the walk.
+  - The full parallel `bun run test` was not run by this review.
+- **Residual (accepted debt, not a finding):** ≤ ≈ 2.7 s synchronous on the
+  daemon thread at the budget (J7's worker debt).
+- **Executor:** it fixed more than asked, with good reasons: it walks to the
+  EOI rather than counting `FF DA`, because motion photos append video after
+  the EOI; and it also refuses `Se` > 63, an amplification measured at 13 s
+  that this review missed. Each new test was shown red first. It did not run the full gate.
