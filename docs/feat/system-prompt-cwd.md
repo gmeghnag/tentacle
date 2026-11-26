@@ -490,4 +490,51 @@ Precondition 3.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-26* (fresh context; planner was the same model
+family — shared blind spots are possible; the executor was Sonnet)
+
+**Verdict: APPROVE.** No HIGH or MEDIUM findings.
+
+**Gate (run by the reviewer):** `bun run test` 20243 pass · 5 skip · 0 fail
+(1388 files; the diff adds no skip). `bun run typecheck` clean. `bun run lint`
+clean (2635 files, 0 findings). Touched files: 101 pass / 0 fail across 6 files.
+
+**Premises checked:** every model-facing build goes through `requestHistory` →
+`projectedHistory` (`agent.ts:1170`; callers `:1210`, `:1686`, `:2025`, `:2152`,
+`:2212`) — TRUE. Only two non-test `new Agent(` sites (`wiring.ts:1449`,
+`subagent.ts:588`) — TRUE. The pod's `tunnelledAgent` ends in `buildAgent`
+(`serve.ts:1355`) — TRUE. The copy keeps the length, and every non-head message
+keeps its identity (`agent.ts:1155`) — TRUE.
+
+**Mutations (each applied, run, reverted; the tree was byte-identical after):**
+- `renderPath` quotes only on `\n` → T1 red, 5 failures (`</cwd>`, tab, CR, NUL, DEL).
+- `wiring.ts` drops `platform` → T3 red, 3 failures (default, custom, sub-agent).
+- `projectedHistory` writes the block into the stored `messages[0]` (the
+  load-bearing property) → T2 (a)(b)(c)(d)(e)(g) and `context-reset-e2e` red, 7 failures.
+
+**Attacks tried:**
+1. Another model path that skips the projection: the only other non-test
+   `.stream({` outside providers is the laptop proxy's forwarder
+   (`remote-client.ts:4902`), which only forwards. Compaction builds its own
+   request. Nothing found.
+2. The block reaching the persisted history: mutation 3 shows the suite
+   catches it. On the real code the stored head stays block-free (T2(b),
+   `context-reset-e2e`). Nothing found.
+3. Injection through the directory name: control characters and `</cwd>` are
+   JSON-quoted, and `platform` is `process.platform` only. Nothing found.
+4. The pod/laptop boundary (§7): the block is built pod-side from the pod's
+   config and travels only inside `model/stream`. It has no laptop effect and
+   adds no new trust. Nothing found.
+5. Prune/anchor identity: the copy keeps the length, and T2(c) pins the
+   anchored context line. Nothing found.
+
+**Noted, not findings:** `/context`-style accounting from the stored head
+undercounts the block (about 30 tokens). `systemPromptEnvironment: false` on
+the laptop does not reach a pod session, which is accepted debt (Orchestrator
+decision 5). The `serve`, pod and `/move` rows were not exercised live; they
+rest on Precondition 3.
+
+**Executor behaviour:** the executor worked red-first, ran five mutations and
+recorded its drift honestly (the D5 `sources` correction, the extra sub-agent
+case in T3, the `context-reset-e2e` change). It ran no full gate; this Review
+ran it.
