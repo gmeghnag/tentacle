@@ -4,6 +4,7 @@ import {
   linkOpenError,
   linkOpenStep,
   linkRows,
+  linkableUrls,
   normalizeUrl,
   sourceUrls,
   underlineRow,
@@ -33,6 +34,19 @@ describe("findUrls", () => {
     expect(raws("(see https://e.com/p_(x))")).toEqual(["https://e.com/p_(x)"]);
     expect(raws("[docs](https://e.com/d)")).toEqual(["https://e.com/d"]);
     expect(raws("[https://e.com/d]")).toEqual(["https://e.com/d"]);
+  });
+
+  test("a markdown link's text and target are two URLs", () => {
+    expect(raws("[https://x.com/a](https://x.com/a)")).toEqual([
+      "https://x.com/a",
+      "https://x.com/a",
+    ]);
+    expect(raws("[https://good](https://other/p_(x)), ok")).toEqual([
+      "https://good",
+      "https://other/p_(x)",
+    ]);
+    // A `]` that is not followed by `(` stays part of the URL.
+    expect(raws("https://e.com/a[0]/b")).toEqual(["https://e.com/a[0]/b"]);
   });
 
   test("angle brackets and quotes end it", () => {
@@ -108,6 +122,22 @@ describe("sourceUrls", () => {
   });
 });
 
+describe("linkableUrls", () => {
+  const url = "https://e.com/x";
+  const item = { kind: "assistant", text: url } as DisplayItem;
+  const allowed = (...lines: string[]): string[] => [...linkableUrls(item, lines)];
+
+  test("the item's URLs, through styles, TABs, newlines and CRLF", () => {
+    expect(allowed(`\x1b[31m${url}\x1b[39m`, "a\tb", "c\r\nd", "e\r\x1b[39m")).toEqual([url]);
+  });
+
+  test("none when any line can redraw cells", () => {
+    for (const control of ["\r", "\b", "\x1b[18D", "\x1b[2K", "\x9b1A", "\x1b]0;t\x07"]) {
+      expect(allowed(url, `a${control}b`)).toEqual([]);
+    }
+  });
+});
+
 const span = (s: { row: number; col: number; width: number; url: string }) => ({
   row: s.row,
   col: s.col,
@@ -143,6 +173,54 @@ describe("linkRows", () => {
   test("a candidate that is not in the source set has no span", () => {
     const line = "see https://e.com/frag";
     expect(linkRows(line, [line], new Set(["https://e.com/fragment"]), 0, 0)).toEqual([]);
+  });
+
+  /** The URLs `linkRows` links on `line`, with every URL it shows allowed. */
+  const linked = (line: string, ...allowed: string[]): string[] =>
+    linkRows(line, wrapLines([line], 80), new Set(allowed), 0, 0).map((s) => s.url);
+
+  test("a URL with any style change inside it is not a link", () => {
+    const full = "https://good.com.evil.com/x";
+    // Concealed tail, a colour equal to the background, a plain colour change.
+    for (const code of ["\x1b[8m", "\x1b[30;40m", "\x1b[31m", "\x1b[m"]) {
+      expect(linked(`visit https://good.com${code}.evil.com/x\x1b[0m now`, full)).toEqual([]);
+    }
+  });
+
+  test("style codes at the edges of a URL keep the link", () => {
+    const url = "https://e.com/x";
+    const line = `a \x1b[34m\x1b[4m${url}\x1b[24m\x1b[39m b`;
+    expect(linked(line, url)).toEqual([url]);
+  });
+
+  test("a URL that starts concealed or in its background colour is not a link", () => {
+    const url = "https://e.com/x";
+    for (const code of [
+      "\x1b[8m",
+      "\x1b[1;8m",
+      "\x1b[30;40m",
+      "\x1b[90m\x1b[100m",
+      "\x1b[38;5;1;41m",
+      "\x1b[38;2;1;2;3m\x1b[48;2;1;2;3m",
+    ]) {
+      expect(linked(`${code}hidden ${url}`, url)).toEqual([]);
+    }
+  });
+
+  test("a style that ended, or a visible colour pair, keeps the link", () => {
+    const url = "https://e.com/x";
+    for (const code of [
+      "\x1b[8m\x1b[28m",
+      "\x1b[8m\x1b[0m",
+      "\x1b[30;40m\x1b[39m",
+      "\x1b[30;40m\x1b[49m",
+      "\x1b[37;40m",
+      // The colour's own numbers are not codes (`8`, `40`).
+      "\x1b[38;2;8;40;8m",
+      "\x1b[58;5;8m",
+    ]) {
+      expect(linked(`${code}shown ${url}`, url)).toEqual([url]);
+    }
   });
 
   test("rows below skipRows have no span", () => {

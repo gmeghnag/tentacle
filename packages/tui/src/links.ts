@@ -38,8 +38,9 @@ export interface LinkSpan {
 }
 
 const MAX_URL = 2048;
-// A URL runs until whitespace, a control char, one of <>"'`{}|\^ or a `…`.
-const CANDIDATE_RE = /(?<!\w)https?:\/\/[^\s\p{Cc}<>"'`{}|\\^…]+/giu;
+// A URL runs until whitespace, a control char, one of <>"'`{}|\^, a `…`, or the
+// `](` between a markdown link's text and its target.
+const CANDIDATE_RE = /(?<!\w)https?:\/\/(?:[^\s\p{Cc}<>"'`{}|\\^…\]]|\](?!\())+/giu;
 const TRAILING = new Set([".", ",", ":", ";", "!", "?", "*", "_", "~", "'", '"']);
 
 /**
@@ -147,12 +148,108 @@ export function sourceUrls(item: DisplayItem): ReadonlySet<string> {
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI SGR codes
 const SGR_ALL = /\x1b\[[0-9;]*m/g;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI SGR codes
+const SGR_SPLIT = /\x1b\[([0-9;]*)m/;
+const NO_URLS: ReadonlySet<string> = new Set();
+
+/**
+ * Whether a line can draw anywhere but in sequence: it holds a control byte or
+ * an escape other than SGR (`\r`, `\b`, a cursor move), so what the screen shows
+ * on a cell may not be what the line says there. A CR ending the line (CRLF
+ * output) redraws nothing.
+ */
+function redrawsCells(line: string): boolean {
+  const rest = expandTabs(line)
+    .replace(SGR_ALL, "")
+    .replace(/\r+(?=\n|$)/g, "");
+  return /(?!\n)\p{Cc}/u.test(rest);
+}
+
+/**
+ * The URLs that may be linked on an item's rendered `lines`: its `sourceUrls`,
+ * or none at all when any line can redraw cells (a cursor move reaches other
+ * lines too).
+ */
+export function linkableUrls(item: DisplayItem, lines: readonly string[]): ReadonlySet<string> {
+  return lines.some(redrawsCells) ? NO_URLS : sourceUrls(item);
+}
+
+// An escape byte, raw or still JSON-encoded (a call's `args` are decoded later).
+// biome-ignore lint/suspicious/noControlCharactersInRegex: finding escape bytes
+const OWN_CODE = /\x1b|\\u001b/i;
+
+/**
+ * Whether the item's own data holds escape codes, so that a code on its rendered
+ * rows may not be one the TUI added.
+ */
+export function carriesCodes(value: unknown): boolean {
+  if (typeof value === "string") {
+    return OWN_CODE.test(value);
+  }
+  return typeof value === "object" && value !== null && Object.values(value).some(carriesCodes);
+}
+
+/**
+ * Whether text printed after these SGR parameter lists cannot be seen: it is
+ * concealed, or its foreground is its background.
+ */
+function isHidden(codes: readonly string[]): boolean {
+  let conceal = false;
+  let fg: string | null = null;
+  let bg: string | null = null;
+  for (const code of codes) {
+    const parts = code.split(";").map(Number); // `""` is 0, a reset
+    for (let i = 0; i < parts.length; i += 1) {
+      const n = parts[i] ?? 0;
+      if (n === 38 || n === 48 || n === 58) {
+        // An extended colour (`5;n`, `2;r;g;b`); its numbers are not codes.
+        const length = parts[i + 1] === 2 ? 4 : 2;
+        const colour = parts.slice(i + 1, i + 1 + length).join(";");
+        fg = n === 38 ? colour : fg;
+        bg = n === 48 ? colour : bg;
+        i += length;
+      } else if (n === 0) {
+        conceal = false;
+        fg = null;
+        bg = null;
+      } else if (n === 8 || n === 28) {
+        conceal = n === 8;
+      } else if (n === 39) {
+        fg = null;
+      } else if (n === 49) {
+        bg = null;
+      } else if ((n >= 30 && n <= 37) || (n >= 90 && n <= 97)) {
+        fg = `5;${n >= 90 ? n - 82 : n - 30}`;
+      } else if ((n >= 40 && n <= 47) || (n >= 100 && n <= 107)) {
+        bg = `5;${n >= 100 ? n - 92 : n - 40}`;
+      }
+    }
+  }
+  return conceal || (fg !== null && fg === bg);
+}
+
+/** A line's text without its SGR codes, and where in that text each one sat. */
+function readStyled(line: string): { plain: string; codes: { at: number; params: string }[] } {
+  const [head = "", ...rest] = expandTabs(line).split(SGR_SPLIT);
+  let plain = head.normalize();
+  const codes: { at: number; params: string }[] = [];
+  for (let i = 0; i < rest.length; i += 2) {
+    codes.push({ at: plain.length, params: rest[i] ?? "" });
+    plain += (rest[i + 1] ?? "").normalize();
+  }
+  return { plain, codes };
+}
 
 /**
  * One logical line's links, mapped onto the rows it wrapped into. `firstRow` is
  * the item-relative index of `rows[0]`; rows below `skipRows` are controls and
  * get no link. The mapping stands on the wrap only INSERTING row breaks: when
  * the rows do not concatenate back to the line, there is no link at all.
+ *
+ * With `ownCodes` (`carriesCodes`), a URL is a link only if it reads as
+ * written: no style code INSIDE it (item text takes its own SGR to the screen,
+ * which can conceal a tail and leave a shorter address showing), and not hidden
+ * by the codes before it. Otherwise every code is the TUI's own highlighting.
  */
 export function linkRows(
   logical: string,
@@ -160,12 +257,18 @@ export function linkRows(
   allowed: ReadonlySet<string>,
   firstRow: number,
   skipRows: number,
+  ownCodes = true,
 ): LinkSpan[] {
   if (allowed.size === 0) {
     return [];
   }
-  const plain = expandTabs(logical).replace(SGR_ALL, "").normalize();
-  const matches = findUrls(plain).filter((m) => allowed.has(plain.slice(m.start, m.end)));
+  const { plain, codes } = readStyled(logical);
+  const asWritten = (m: UrlMatch): boolean =>
+    !codes.some((c) => c.at > m.start && c.at < m.end) &&
+    !isHidden(codes.filter((c) => c.at <= m.start).map((c) => c.params));
+  const matches = findUrls(plain).filter(
+    (m) => allowed.has(plain.slice(m.start, m.end)) && (!ownCodes || asWritten(m)),
+  );
   if (matches.length === 0) {
     return [];
   }

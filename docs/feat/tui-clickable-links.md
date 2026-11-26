@@ -487,6 +487,68 @@ still fails with only the pre-existing describes selected (`-t`); `--parallel` p
   also present in the same item ends, that row links to the shorter one (the row's
   visible text is what opens).
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Repro before** (`rv-conceal.ts`, the reviewer's): the `visit https://good.com…` row
+spanned `[1,8,27,"https://good.com.evil.com/x"]`; `[https://x.com/a](https://x.com/a)`
+had no span. A sibling of finding 1 also reproduced (`fx-ctl.ts`): Ink passes `\r` and
+`ESC[18D` to the frame, and `https://evil.com/x\rhttps://good.com/y` linked the cells
+good.com is drawn over to evil.com.
+
+**Repro after**: no span on the concealed row in any of the six variants (the URL written
+in full elsewhere still links); `x.com/a` is spanned; both control cases give `links []`.
+
+**Changes** (`links.ts`, 3 call-site lines in `render-lines.ts`):
+
+1. *Finding 1:* `carriesCodes(item)`: the item's data holds `ESC`, raw or as JSON
+   `\u001b`. Then a URL with ANY SGR inside it, or concealed / fg = bg where it starts,
+   is not a link.
+2. *Same finding, other bytes:* `linkableUrls`: if any rendered line holds a control byte
+   or non-SGR escape (a CR ending a line excepted), the whole item has no link.
+3. *Finding 2:* a candidate stops at `](`, so a markdown link's text and target are two
+   URLs, in `sourceUrls` and on screen.
+
+**Red first:** 7 new tests failed on `ad9d4eb9`'s sources (165 pass, 7 fail). The
+highlighting test was red on the first version of the fix (below).
+
+**Drift from the fix direction / Implementation:**
+
+- "Refuse any SGR inside the URL" applied to every item dropped links the TUI's own
+  syntax highlighting splits (bash / unlabeled fences, `.ts`/`.md`/`.json` reads), so it
+  is limited to items that carry their own codes. That is item-wide: in a coloured output
+  a URL that highlighting splits also loses its link.
+- Finding 2 changes `findUrls` itself (design §1's stop list gains `](`), so raw markdown
+  in tool output no longer links the glued `a](b` string either.
+- Change 2 was not asked for.
+
+**Mutation checks** (each applied, seen red, reverted):
+
+| Mutation | Failed |
+|---|---|
+| no "SGR inside the URL" rule | "any style change inside it"; "conceals part of a URL"; "JSON-encoded args" |
+| no `isHidden` | "starts concealed or in its background colour" |
+| `linkableUrls` ignores redraws | "none when any line can redraw cells"; "moves the cursor" |
+| no `](` stop | "text and target are two URLs"; "text is its address" |
+| `OWN_CODE` without `\\u001b` | "JSON-encoded args" |
+| strict rule for every item | "TUI's own highlighting" |
+| strict rule for no item | "conceals part of a URL"; "JSON-encoded args" |
+
+**Checks run:** the 10 link / render / app test files `--parallel` → 420 pass, 0 fail;
+`bunx biome check packages/tui/src packages/tui/test` clean. Typecheck and the full
+suite not run (the orchestrator's gate).
+
+**Not covered (for Review):**
+
+- A URL hidden WHOLE by a colour equal to the terminal's default background (black on a
+  black terminal), or fg = bg written in two encodings, is not detected. No shorter
+  address shows in that case.
+- Unicode bidi / zero-width format characters (U+202E) are not control bytes here; a
+  bidi-reordering terminal is unverified (print one in a live TUI).
+- A cursor-up sequence in a LATER item can still draw over an earlier item's link: tool
+  output reaches the screen unsanitised, which needs its own task.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same model as the planner, other model than the executor)

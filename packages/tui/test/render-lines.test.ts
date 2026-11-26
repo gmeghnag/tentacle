@@ -2447,6 +2447,93 @@ describe("links in the layout", () => {
     expect(covered(fits)).toBe(url);
   });
 
+  const shell = (resultText: string): DisplayItem => ({
+    kind: "tool",
+    id: "c1",
+    name: "shell",
+    args: JSON.stringify({ command: "echo" }),
+    status: "ok",
+    resultText,
+  });
+
+  test("output that conceals part of a URL never makes the visible part open another", () => {
+    const full = "https://good.com.evil.com/x";
+    const hidden = "visit https://good.com\x1b[8m.evil.com/x\x1b[28m now";
+    for (const expandAll of [false, true]) {
+      const laid = layoutTranscript([shell(`${hidden}\nalso ${full}`)], {
+        expandAll,
+        width: 100,
+      }).laid[0];
+      const spoofed = laid?.rows.findIndex((r) => strip(r).includes("visit ")) ?? -1;
+      expect(spoofed).toBeGreaterThanOrEqual(0);
+      expect(laid?.links.filter((s) => s.row === spoofed)).toEqual([]);
+      expect(underlined(laid?.rows[spoofed] ?? "")).toBe(false);
+      // The URL written out in full stays a link.
+      expect(laid?.links.map((s) => [s.row, s.url])).toEqual([[spoofed + 1, full]]);
+    }
+  });
+
+  test("a code that reaches the screen from JSON-encoded args counts as the item's own", () => {
+    const full = "https://good.com.evil.com/x";
+    // `args` holds `\u001b` as text; the rows hold the decoded byte.
+    const item: DisplayItem = {
+      kind: "tool",
+      id: "c1",
+      name: "search",
+      args: JSON.stringify({ pattern: `https://good.com\x1b[8m.evil.com/x\x1b[28m ${full}` }),
+      status: "ok",
+    };
+    const laid = layoutTranscript([item], { expandAll: true, width: 120 }).laid[0];
+    expect(laid?.rows.some((r) => r.includes("\x1b[8m"))).toBe(true);
+    expect(laid?.links.map((s) => s.url)).toEqual([full]);
+  });
+
+  test("output that moves the cursor leaves the whole item without links", () => {
+    for (const control of ["\r", "\x1b[18D"]) {
+      const text = `first https://clean.com/\nhttps://evil.com/x${control}https://good.com/y`;
+      const laid = layoutTranscript([shell(text)], { expandAll: true, width: 100 }).laid[0];
+      expect(laid?.links).toEqual([]);
+      expect(laid?.rows.some(underlined)).toBe(false);
+    }
+    // CRLF output is ordinary output.
+    const crlf = layoutTranscript([shell("https://a.com/\r\nhttps://b.com/\r\n")], {
+      expandAll: true,
+      width: 100,
+    }).laid[0];
+    expect(crlf?.links.map((s) => s.url)).toEqual(["https://a.com/", "https://b.com/"]);
+  });
+
+  test("the TUI's own highlighting inside a URL keeps the link", () => {
+    const target = "https://e.com/p-1/q_2?x=3&y=true";
+    const item: DisplayItem = {
+      kind: "tool",
+      id: "c1",
+      name: "fs_read",
+      args: JSON.stringify({ path: "a.ts" }),
+      status: "ok",
+      resultText: `# ${target}`,
+    };
+    const laid = layoutTranscript([item], { expandAll: true, width: 100 }).laid[0];
+    const row = laid?.rows.find((r) => strip(r).includes(target)) ?? "";
+    // The premise: a colour code really sits inside the URL.
+    expect(strip(row)).toContain(target);
+    expect(row).not.toContain(target);
+    expect(laid?.links.map((s) => s.url)).toEqual([target]);
+  });
+
+  test("a markdown link whose text is its address is linked", () => {
+    const linksOf = (text: string): string[] =>
+      (
+        layoutTranscript([{ kind: "assistant", text }], { expandAll: false, width: 100 }).laid[0]
+          ?.links ?? []
+      ).map((s) => s.url);
+    expect(linksOf("[https://x.com/a](https://x.com/a)")).toEqual(["https://x.com/a"]);
+    expect(linksOf("[https://good.com/](https://other.com/)")).toEqual([
+      "https://good.com/",
+      "https://other.com/",
+    ]);
+  });
+
   test("a present header underlines its title only when it has a card to open", () => {
     const artifact = {
       artifactId: "dashboard",

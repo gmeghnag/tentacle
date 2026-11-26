@@ -28,7 +28,7 @@ import { diagramToolBody } from "./diagram-lines.ts";
 import { formatDurationMs } from "./format.ts";
 import { harnessLevel, isHarness, joinsPrevious, showsGlyph } from "./harness-group.ts";
 import { expandTabs } from "./input-view.ts";
-import { type LinkSpan, linkRows, sourceUrls, underlineRow } from "./links.ts";
+import { type LinkSpan, carriesCodes, linkRows, linkableUrls, underlineRow } from "./links.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { GUTTER, type MascotCell, headerView } from "./mascot.ts";
 import { messageRows } from "./message-row.ts";
@@ -1573,13 +1573,14 @@ function wrapLinkedLines(
   width: number,
   allowed: ReadonlySet<string>,
   skipRows: number,
+  ownCodes: boolean,
 ): readonly string[] {
   const out: string[] = [];
   const spans: LinkSpan[] = [];
   for (const line of lines) {
     const rows = wrapLines([line], width);
     const first = out.length;
-    const found = linkRows(line, rows, allowed, first, skipRows);
+    const found = linkRows(line, rows, allowed, first, skipRows, ownCodes);
     spans.push(...found);
     out.push(
       ...(found.length === 0
@@ -1688,11 +1689,14 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
     entry = { width, threshold, preview };
     rowCache.set(item, entry);
   }
+  const lines = itemLines(item, opts);
+  const allowed = linkableUrls(item, lines);
   const rows = wrapLinkedLines(
-    itemLines(item, opts),
+    lines,
     width,
-    sourceUrls(item),
+    allowed,
     item.kind === "tool" ? toggleRowsOf(item, opts) : 0,
+    allowed.size > 0 && carriesCodes(item),
   );
   entry[slot] = rows;
   return withPhase(item, rows, opts);
