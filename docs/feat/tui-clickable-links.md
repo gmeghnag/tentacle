@@ -238,8 +238,10 @@ hyperlink and the `stripAnsi` leak are gone.
 `laidItemAt(laid, absRow)`. `toolCallAt` uses it unchanged. Add
 `linkAtViewport(laid, win, x, y): string | null`. It applies the same viewport bound as
 `toolCallAtViewport`, then finds the item with `laidItemAt`, its item-relative row, and
-the span with `col ≤ x-1 < col+width`. It returns null on rows `< toggleRows` (defence
-in depth) or past the item's rows (a gap row).
+the span with `col ≤ x-1 < col+width`. It returns null on a TOOL item's rows
+`< toggleRows` (defence in depth; `layoutTranscript` sets `toggleRows: 1` on every
+non-tool item too, so the guard must read `id !== ""` — corrected in Execution) or
+past the item's rows (a gap row).
 
 **5. `mouse-stream.ts`:** a new effect `{ kind: "openLink"; url: string }`. In
 `dispatchMouse`, on a completed click (`step.click`), AFTER the artifact and toggle
@@ -409,7 +411,81 @@ Red before green for each (AGENTS §9). Run the narrow file while iterating:
 
 ## Execution
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Load-bearing check, re-run on this worktree** before any edit (`probe-wrap-wt.ts`, the
+Context's 7 lines × widths 7/12/20/33): `ok=28 diff=0`.
+
+**Repro before the change** (`probe-osc8-wt.ts`, `FORCE_HYPERLINK=1`): stripped markdown
+output carried `ESC]8;;…BEL` for `https:`, `file:` and a bare URL; `LaidItem` keys were
+`rows,start,id,gap,toggleRows`; `rg linkOpener|openLink packages/tui/src` found nothing.
+The same probe after: `A docs (https://example.com/d) link`, `A x (file:///etc/passwd)`,
+the `&` autolink once, and `LaidItem` has `links`.
+
+**As built**, in the plan's order (new modules/functions first stubbed, so every red is
+an assertion failure):
+
+| Slice | Red → green |
+|---|---|
+| `links.ts` (new) | `links.test.ts` 18 fail / 5 pass on the stub → 23 pass |
+| `markdown.ts` link renderer | `&` autolink and the child-process OSC 8 test failed → 17 pass |
+| `render-lines.ts` (+ present underline) | 6 layout tests failed → 140 pass; the T3 wrap property passed before and after (it pins an existing property) |
+| `tool-hit.ts` | 4 `linkAtViewport` tests failed → 21 pass |
+| `mouse-stream.ts` | the open-link dispatch test failed → 29 pass (its 3 "unchanged behaviour" tests pass on both) |
+| `os-open.ts` | 6 `createLinkOpener` tests failed → 16 pass |
+| wiring (`useMouse`, `App`, `app-types`, `run`) | `app-links.test.tsx` (a)(c)(d)(e)(g) failed → 7 pass ((b), (f) pass on both) |
+
+**Mutation checks** (each applied, seen red, reverted):
+
+| Mutation | Failed |
+|---|---|
+| `linkAtViewport` ignores `win.start` (the plan's target) | app (c) "scrolled up…"; tool-hit "a scrolled window maps the screen row through its start" |
+| no source-set filter in `linkRows` | "a candidate that is not in the source set has no span"; "a URL split by an inner pre-wrap…" |
+| `offPhaseRows` does not inherit links | "the blink OFF phase of a running call has the same links" |
+| `hangRows` does not inherit links | "a hung harness line has the same links" |
+| no `…` truncation rule | "a URL cut by an ellipsis is dropped" |
+| no `normalizeUrl` re-check in the opener | "anything but a normalised http(s) URL is refused without a spawn" |
+| `skipRows` = 0 | "a URL in a header subtitle is neither underlined nor spanned" |
+
+**Drift from Implementation:**
+
+1. `linkAtViewport`'s control-row guard applies to tool items only (§4 corrected above):
+   as written it would have killed every link on a reply's first row
+   (pinned: "a reply's FIRST row link hits").
+2. `LinkSpan` also carries `from`/`to` (plain UTF-16 offsets in the row), which is what
+   `underlineRow` takes; `col`/`width` stay cells.
+3. Dark-mode link styles come from `tokens.dark.md.link` through `colorStyler`, not a
+   literal `chalk.blue` (`theme-no-stray.test.ts` forbids it; it caught the first
+   version). The dark golden bytes are unchanged.
+4. `normalizeUrl` also rejects an `href` longer than 2048 (percent-encoding can lengthen
+   it, and the opener re-checks the same function); it uses `URL.canParse`.
+5. `createLinkOpener` rethrows a spawn `ENOENT` with `path` = the opener's name, which
+   `linkOpenError` prints. The artifact opener's behaviour is unchanged.
+6. `LaidItem.links` is required, so the two hand-built literals in
+   `mouse-stream.test.ts` gained `links: []` (the only edit to an existing test's data).
+
+No protocol or schema change (`protocol.json` untouched).
+
+**Checks run** (not the full gate, which the orchestrator runs): `bun test
+packages/tui/test` — first 3195 pass, 1 fail (drift 3), then on the final tree with
+`--parallel` 3196 pass, 0 fail; `bunx biome check
+packages/tui/src packages/tui/test` — clean; a scoped `tsc` over the touched files and
+their imports — only `agent/src/harness/a2a-map.ts(520)`, an unedited file, so
+attributed to the scoped config (unverified; the full typecheck decides).
+
+Seen, not caused here: run SERIALLY, `markdown.test.ts` + `render-lines.test.ts` fail
+"the shipped default is the text-only header" (theme state leaks between files). It
+still fails with only the pre-existing describes selected (`-t`); `--parallel` passes.
+
+**For Review** (not exercised or accepted limits):
+
+- No real terminal / real `open` was driven: every open goes through a fake spawn.
+  To verify: click a URL in a live TUI on macOS.
+- The opened string is the WHATWG `href`, so an IDN host opens as punycode while the
+  screen shows Unicode; userinfo URLs (`https://a@b/`) are allowed as planned.
+- Source-set corner: if an inner pre-wrap cuts a long URL exactly where a shorter URL
+  also present in the same item ends, that row links to the shorter one (the row's
+  visible text is what opens).
 
 ## Review
 
