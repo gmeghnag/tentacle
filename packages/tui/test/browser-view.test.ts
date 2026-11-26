@@ -97,6 +97,13 @@ describe("browserPanelRows", () => {
     ]);
   });
 
+  test("auto on: a handed-over tab no longer claims acting asks first (B5b answers it)", () => {
+    expect(heads(caps({ actions: "auto" }), connected).slice(4)).toEqual([
+      "#1 Page 1 — example.com/p1 · Opened by the agent",
+      "#2 Page 2 — example.com/p2 · Handed over by you",
+    ]);
+  });
+
   test("tools off: auto and clear are locked (stored values kept, not shown), nothing to flip", () => {
     const view = browserPanelRows(
       caps({ actions: "auto", secrets: "clear", off: MEMBERS }),

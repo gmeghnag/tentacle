@@ -214,6 +214,21 @@ describe("status and retitle (the host port's toolset half)", () => {
     expect(await r.set.status("session-1")).toEqual({ tabs: [] });
   });
 
+  test("a lost lease (hub restarted) is not heldElsewhere: [], the claim is forgotten, no re-claim", async () => {
+    // Mutation: map «does not hold» to heldElsewhere, or keep the uid in `claimed`.
+    const r = rig((op) => {
+      if (op.op === "tabs") throw new Error("this session does not hold the browser");
+      return hub()(op);
+    });
+    await r.exec("browser_open", { url: "https://a.test/" }, ctx());
+    expect(await r.set.status("session-1")).toEqual({ tabs: [] });
+    const after = r.ops.length;
+    expect(r.ops[after - 1]?.op).toBe("tabs"); // the read itself re-claimed nothing
+    // Forgotten: the next read makes no hub op at all (a read never takes the lease).
+    expect(await r.set.status("session-1")).toEqual({ tabs: [] });
+    expect(r.ops.length).toBe(after);
+  });
+
   test("retitle: kept for the first claim; sent to a claimed group; a failure is swallowed", async () => {
     const r = rig((op) => {
       if (op.op === "retitle") throw new Error("unknown op");

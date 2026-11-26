@@ -56,7 +56,8 @@ function modeRow(label: string, name: "auto" | "clear", on: boolean, offered: bo
 
 const note = (head: string): BrowserRow => ({ head, op: null });
 
-function tabRows(status: BrowserStatusResult | null): BrowserRow[] {
+/** `auto`: the browser acts alone, so a handed-over tab no longer asks first (B5b). */
+function tabRows(status: BrowserStatusResult | null, auto: boolean): BrowserRow[] {
   if (status === null) {
     return [note("Tabs unknown")];
   }
@@ -69,7 +70,7 @@ function tabRows(status: BrowserStatusResult | null): BrowserRow[] {
   return [
     note(`Tabs · ${status.tabs.length}`),
     ...status.tabs.map((tab) =>
-      note(`#${tab.id} ${oneLine(tab.title)} — ${oneLine(tab.where)} · ${tabSubtitle(tab)}`),
+      note(`#${tab.id} ${oneLine(tab.title)} — ${oneLine(tab.where)} · ${tabSubtitle(tab, auto)}`),
     ),
   ];
 }
@@ -94,7 +95,7 @@ export function browserPanelRows(
     },
     modeRow("Act without asking", "auto", caps?.browser?.actions === "auto", offered),
     modeRow("Show secrets", "clear", caps?.browser?.secrets === "clear", offered),
-    ...tabRows(status),
+    ...tabRows(status, caps?.browser?.actions === "auto"),
   ];
   return {
     title: `Browser · ${linkLabel(status)} · ${capsTitleNote(phase)}`,

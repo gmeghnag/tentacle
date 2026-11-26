@@ -1457,6 +1457,41 @@ a file not touched here (same as B6a). The full gate is the orchestrator's scrip
 
 *— claude-sonnet-5-5, 2026-11-26*
 
+### Fix round 1 (Review B5b + B6a + B6b + icon: 2 MEDIUM)
+
+1. **FIXED — the TUI said «acting asks first» under auto.** `packages/tui/src/browser-view.ts`
+   `tabRows(status, auto)` now passes `auto` to `tabSubtitle`; `browserPanelRows` gives it
+   `caps?.browser?.actions === "auto"` (the same read the auto row and the `▲ AUTO` sign use; the
+   phone reads `browser.actions` the same way). That closes the B6b debt bullet above.
+   Test `browser-view.test.ts` «auto on: a handed-over tab no longer claims acting asks first».
+   - RED before the fix, on the assertion: `-"… · Handed over by you"` /
+     `+"… · Handed over by you · acting asks first"`. 26 pass / 1 fail.
+   - Mutation `tabSubtitle(tab, true)`: RED, «connected, defaults: … the tabs» fails, so the
+     default (ask) row is pinned too. Restored.
+2. **FIXED — a lost lease was reported as `heldElsewhere`.** `packages/tools/src/browser.ts`
+   `status()`: only `held by another tentacle process` gives `heldElsewhere: true`.
+   `does not hold the browser` / `has not claimed the browser` are the two messages `call()`
+   already treats as a lost lease. On either, `status()` drops the uid from `claimed` and returns
+   `{ tabs: [] }`. It never re-claims: a read never takes the lease, and the next tool call claims
+   again through `claim()`. This is the plan's failure row «hub restarting during status → tabs []».
+   Test `browser-switches.test.ts` «a lost lease (hub restarted) is not heldElsewhere …». It
+   checks `[]`, that the last op is the `tabs` read itself (no claim), and that a second
+   `status` makes ZERO hub ops (the claim is forgotten).
+   - RED before the fix: `+ "heldElsewhere": true`. 10 pass / 1 fail.
+   - Mutation: `claimed.delete(uid)` commented out. RED: the second read still sends `tabs`.
+     Restored.
+   - Note: the hub's `tabs` op only ever answers `does not hold` (`cli/src/browser-host.ts:252`).
+     So `status()` now shows `heldElsewhere` only for a hub that says `held by another …`. In
+     practice the status read shows `[]` in both cases. A session whose claim was refused is
+     never in `claimed`, so it never reaches the hub anyway.
+
+**Checks run here:** `bun test` on browser-switches, browser (tools), browser-view,
+browser-panel-app and cli browser-host gave 81 pass, 0 fail. `bunx biome check --write` on the 4
+changed files fixed formatting only, and the files are clean after it. I did not run the full
+gate; the orchestrator's script runs it.
+
+*— claude-opus-5-5, 2026-11-26*
+
 ## Review
 
 ### Review B5b + B6a + B6b + icon (fresh context, `git diff main...HEAD` at `78c66c46`)

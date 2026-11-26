@@ -882,9 +882,15 @@ export function createBrowserToolset(options: BrowserToolsetOptions): BrowserToo
       try {
         r = obj(await backend.call({ op: "tabs", sessionUid: uid }));
       } catch (e) {
-        return /held by another tentacle process|does not hold the browser/.test(errorOf(e))
-          ? { tabs: [], heldElsewhere: true }
-          : { tabs: [] };
+        const error = errorOf(e);
+        if (/held by another tentacle process/.test(error))
+          return { tabs: [], heldElsewhere: true };
+        // A lost lease (the hub restarted): forget it, never re-claim (the next
+        // tool call claims again, as `call` does).
+        if (/does not hold the browser|has not claimed the browser/.test(error)) {
+          claimed.delete(uid);
+        }
+        return { tabs: [] };
       }
       const list = Array.isArray(r.tabs) ? r.tabs.map(obj) : [];
       // Always masked (the phone shows it): the session's redactor, then the net.
