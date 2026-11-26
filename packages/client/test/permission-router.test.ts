@@ -323,6 +323,40 @@ describe("PermissionRouter — the workflow an ask belongs to", () => {
     );
     expect(p?.kind === "prompt" && p.workflow).toEqual({ name: "wf" });
   });
+
+  test("a QUESTION carries it too, bounded the same way", () => {
+    // docs/fix/a2a-question-workflow-label.md: a remote question of a workflow step
+    // keeps its run attribution. Mutation: read `workflow` only off a
+    // `permission_request` (the old guard) → red.
+    const r = new PermissionRouter();
+    const [p] = r.request(
+      "S",
+      {
+        type: "question_request",
+        requestId: "q1",
+        toolCallId: "c1",
+        title: "acme asks",
+        question: "Which branch?",
+        maxChars: 4000,
+        workflow: {
+          name: `wf\u001b[2J${"x".repeat(500)}`,
+          runId: "wf-1",
+          stepId: "gen\nerate",
+          index: Number.NaN,
+          count: 5,
+        },
+      },
+      "X",
+    );
+    const seen = p?.kind === "prompt" ? p.workflow : undefined;
+    expect(seen?.name.startsWith("wf [2J")).toBe(true);
+    expect(seen?.name.length).toBe(200);
+    expect(seen?.runId).toBe("wf-1");
+    expect(seen?.stepId).toBe("gen erate");
+    // A pod's non-finite number is dropped, as for a permission request.
+    expect(seen?.count).toBe(5);
+    expect(seen !== undefined && "index" in seen).toBe(false);
+  });
 });
 
 // docs/feat/mobile-notifications.md Design 5: an answer given OUTSIDE the prompt

@@ -65,6 +65,20 @@ describe("the run screen holds only the slim ask row (docs/fix/mobile-ask-surfac
     );
     expect(SESSION).toContain("askPresentable(");
   });
+
+  // docs/fix/a2a-question-workflow-label.md D4: a question's bar takes text, so its
+  // word and its tap come from the controller's `action` — never a hard-coded Review.
+  test("a question's row says `Answer` and opens the field, decided by `askBarFor`", () => {
+    const panel = between(RUN, "function AskPanel", "\nfunction ");
+    expect(panel).toContain('bar.action === "answer" ? "Answer" : "Review"');
+    expect(panel).toContain("onOpenAnswer");
+    // The screen decides nothing: no `question` test of its own.
+    expect(panel).not.toContain("ask.question");
+    expect(RUN).toContain("onOpenAnswer={props.onOpenAnswer}");
+    // Wired to the controller's ONE resolve path (the sheet's own field), not a send.
+    expect(APP).toContain("onOpenAnswer={() => controller.openAnswer()}");
+    expect(RUNCTRL).toContain('answerFor(ask.requestId, "reply")');
+  });
 });
 
 describe("the run route reuses the ONE session path and the ONE sheet", () => {

@@ -56,6 +56,36 @@ describe("question_request", () => {
   });
 });
 
+// docs/fix/a2a-question-workflow-label.md: the step's origin rides the question.
+// Mutations: make `workflow` required → the "without it" case is red; add
+// `.int()`/`.max()` to `AskWorkflowSchema` → the hostile-numbers case is red.
+describe("question_request.workflow", () => {
+  const wf = { name: "rassegna", runId: "wf-1", stepId: "generate", index: 1, count: 5 };
+
+  test("round-trips the five fields, and is absent on an older daemon's update", () => {
+    const parsed = SessionUpdateSchema.parse({ ...question, workflow: wf });
+    expect(parsed).toEqual({ ...question, workflow: wf });
+    // An older daemon sends none: still a valid question (nothing becomes blocking).
+    expect(QuestionRequestUpdateSchema.parse(question)).toEqual(question);
+  });
+
+  test("a bad value never makes the blocking update unparseable", () => {
+    const hostile = { name: "n".repeat(10_000), runId: "r", stepId: "s", index: -1, count: 1e9 };
+    const parsed = QuestionRequestUpdateSchema.safeParse({ ...question, workflow: hostile });
+    expect(parsed.success).toBe(true);
+    expect(
+      QuestionRequestUpdateSchema.safeParse({
+        ...question,
+        workflow: { ...wf, index: 1.5, count: 1e9 },
+      }).success,
+    ).toBe(true);
+    // The one thing the schema does insist on: `name` is a string (`AskWorkflowSchema`).
+    expect(
+      QuestionRequestUpdateSchema.safeParse({ ...question, workflow: { name: 3 } }).success,
+    ).toBe(false);
+  });
+});
+
 describe("session/answer_question", () => {
   test("is a known method", () => {
     expect(Method.AnswerQuestion).toBe("session/answer_question");

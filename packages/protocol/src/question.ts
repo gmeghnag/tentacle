@@ -20,7 +20,7 @@
  * update unparseable.
  */
 import { z } from "zod";
-import { PermissionRequestIdSchema } from "./permission.ts";
+import { AskWorkflowSchema, PermissionRequestIdSchema } from "./permission.ts";
 import { SessionIdSchema } from "./session.ts";
 
 /** The longest answer to a remote question, in UTF-16 units (the daemon refuses longer). */
@@ -55,6 +55,13 @@ export const QuestionRequestUpdateSchema = z.object({
   agent: z
     .object({ type: z.string(), description: z.string(), id: z.string().optional() })
     .optional(),
+  /**
+   * The workflow step this question belongs to, when a step's child raised it:
+   * the SAME shape and rules as `permission_request.workflow` (display only;
+   * absent on an older daemon, or when no workflow step asked).
+   * (docs/fix/a2a-question-workflow-label.md)
+   */
+  workflow: AskWorkflowSchema.optional(),
   /** A BACKGROUND child's spawning turn (as `permission_request.turnId`). */
   turnId: z.string().optional(),
   /** The longest answer the daemon takes (a client clamps to `MAX_QUESTION_ANSWER_CHARS`). */

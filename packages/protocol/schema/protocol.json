@@ -509,6 +509,28 @@
       "required": ["data", "size"],
       "type": "object"
     },
+    "AskWorkflow": {
+      "additionalProperties": true,
+      "properties": {
+        "count": {
+          "type": "number"
+        },
+        "index": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "stepId": {
+          "type": "string"
+        }
+      },
+      "required": ["name"],
+      "type": "object"
+    },
     "AttachmentContent": {
       "additionalProperties": true,
       "properties": {
@@ -3682,26 +3704,7 @@
           "type": "string"
         },
         "workflow": {
-          "additionalProperties": true,
-          "properties": {
-            "count": {
-              "type": "number"
-            },
-            "index": {
-              "type": "number"
-            },
-            "name": {
-              "type": "string"
-            },
-            "runId": {
-              "type": "string"
-            },
-            "stepId": {
-              "type": "string"
-            }
-          },
-          "required": ["name"],
-          "type": "object"
+          "$ref": "#/$defs/AskWorkflow"
         }
       },
       "required": ["options", "requestId", "title", "tool", "toolCallId", "type"],
@@ -4258,6 +4261,9 @@
         "type": {
           "const": "question_request",
           "type": "string"
+        },
+        "workflow": {
+          "$ref": "#/$defs/AskWorkflow"
         }
       },
       "required": ["maxChars", "question", "requestId", "title", "toolCallId", "type"],

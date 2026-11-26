@@ -94,6 +94,9 @@ function harness(
                 return "ignored";
               }
               answered.push({ requestId, optionId });
+              if (optionId === "reply") {
+                return "typing"; // opens the sheet's field; settles nothing
+              }
               current = null;
               for (const fn of askListeners) fn();
               return "sent";
@@ -416,6 +419,87 @@ describe("S8 — pairing by the structured origin, and the slim bar", () => {
     await h.flush();
     h.push([run()]);
     expect(h.controller.state().askBar?.kind).toBe("open-session");
+  });
+});
+
+// docs/fix/a2a-question-workflow-label.md D4/D5: a remote QUESTION of a step
+// pairs like any other ask — and its bar takes text, not a grant.
+describe("a remote question's bar says `Answer`", () => {
+  const wf = (runId: string | null, stepId: string | null) => ({
+    kind: "workflow" as const,
+    name: "wf",
+    runId,
+    stepId,
+    position: null,
+  });
+  const question = (requestId: string, origin?: CardAsk["origin"]): CardAsk => ({
+    requestId,
+    title: "acme asks",
+    detail: "Which branch?",
+    question: true,
+    ...(origin === undefined ? {} : { origin }),
+  });
+
+  test("the question pairs with its step and the bar's action is `answer`", async () => {
+    // Mutation: hard-code `action: "review"` in `askBarFor` → red.
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([run()]);
+    h.ask(question("q1", wf("wf-1", "merge")));
+    expect(h.controller.state().steps.find((s) => s.step.id === "merge")?.ask?.requestId).toBe(
+      "q1",
+    );
+    const bar = h.controller.state().askBar;
+    expect(bar?.kind === "ask" && bar.action).toBe("answer");
+  });
+
+  test("an approval's bar is still `review`", async () => {
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([run()]);
+    h.ask({ requestId: "a1", title: "Approve", detail: "x", origin: wf("wf-1", "merge") });
+    const bar = h.controller.state().askBar;
+    expect(bar?.kind === "ask" && bar.action).toBe("review");
+  });
+
+  test("its tap opens the field BY ID and sends no allow/reject", async () => {
+    // Mutation: route the tap through `allow_once` → red (a grant sent for a question).
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([run()]);
+    h.ask(question("q2", wf("wf-1", "merge")));
+    h.controller.openAnswer();
+    expect(h.answered).toEqual([{ requestId: "q2", optionId: "reply" }]);
+    // Opening the field settles nothing: the ask is still the bar's.
+    expect(h.controller.state().askBar?.kind).toBe("ask");
+    expect(h.controller.state().notice).toBeNull();
+  });
+
+  test("a question of ANOTHER run stays foreign (`Open the session`), never answerable here", async () => {
+    // Mutation: drop the `runId` test in `askForRunStep` → it pairs with our step → red.
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([run()]);
+    h.ask(question("q3", wf("wf-2", "merge")));
+    expect(h.controller.state().askBar?.kind).toBe("foreign");
+    h.controller.openAnswer();
+    expect(h.answered).toEqual([]);
+  });
+
+  test("an ask settled meanwhile: the tap sends nothing, and a notice says so", async () => {
+    const h = harness();
+    h.controller.start();
+    await h.flush();
+    h.push([run()]);
+    h.ask(question("q4", wf("wf-1", "merge")));
+    h.ask(null); // answered on another device, or withdrawn
+    h.controller.openAnswer();
+    expect(h.answered).toEqual([]);
+    expect(h.controller.state().notice).toBe(RUN_ASK_GONE);
   });
 });
 
