@@ -1,8 +1,9 @@
 <p align="center">
-  <img src="art/polpetto.svg" alt="Polpetto, the tentacle mascot" width="120" height="147">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="art/banner-dark.svg">
+    <img src="art/banner-light.svg" alt="tentacle: Polpetto, the tentacle mascot, next to the wordmark" width="100%">
+  </picture>
 </p>
-
-<h1 align="center">tentacle</h1>
 
 <p align="center">
   A coding agent that runs next to your code and keeps your identity on your machine.
