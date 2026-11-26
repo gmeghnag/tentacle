@@ -94,7 +94,7 @@ make-fixtures.ts  encode deterministic true · decode deterministic true
 **Verdict: `sips` under `sandbox-exec` on macOS; a refusal with a sentence everywhere else.** It needs no dependency, no licence and no patent exposure. It is crash- and memory-isolated from the daemon and from Ink, and it is fast enough. Three measured traps shape the design:
 1. **`-Z` upscales.** The size is queried first, and `-Z` is passed only to shrink.
 2. **`sips` exits 0 on a truncated HEIC and writes a broken JPEG.** The exit code is never trusted. The output must pass the existing strict checks (`inspectImageFile` + `readJpegHeader`), which do refuse it (probe3), and its long edge must equal the planned one.
-3. **`sips` ignores `TMPDIR` and writes its own scratch file in the per-user temp dir.** The sandbox's write allowance is therefore `realpath(os.tmpdir())`, not our own sub-dir (probe4, two runs).
+3. **`sips` ignores `TMPDIR` and writes its own scratch file in the per-user temp dir.** The sandbox's write allowance is therefore that dir (`getconf DARWIN_USER_TEMP_DIR`, resolved; **not** `os.tmpdir()`, see Execution), not our own sub-dir (probe4, two runs).
 
 ### Load-bearing assumption
 
@@ -159,7 +159,7 @@ Expected: `low` ≤ 768 px with no `HIGH_ONLY_NOTE`, and the region is an `image
   - `max(w,h) === edge`.
 
   Otherwise → "the HEIC is corrupt or truncated (its decoded JPEG is not whole)" (trap 2).
-- **`convertHeicWith(bytes, { maxEdge, maxBytes }, ops)`** is the loop. All the branching is here. `ops = { size(): Promise<{w,h}|undefined>, toJpeg(edge | undefined): Promise<Uint8Array | { refused }> }` are injected effects.
+- **`convertHeicWith({ maxEdge, maxBytes }, ops)`** is the loop (no `bytes` argument: the ops are bound to the input). All the branching is here. `ops = { size(): Promise<{w,h} | { refused } | undefined>, toJpeg(edge | undefined): Promise<Uint8Array | { refused }> }` are injected effects; a `size` refusal (exit ≠ 0, timeout) passes through.
   1. `heicTarget`.
   2. `toJpeg`, passing an edge only when `downscale`.
   3. `checkHeicOutput`.
@@ -171,7 +171,7 @@ Expected: `low` ≤ 768 px with no `HIGH_ONLY_NOTE`, and the region is an `image
 
 **D3 — `packages/tools/src/heic-convert.ts` (new: the ONE effectful edge).**
 - **`createSipsHeicConverter(deps?)`** returns `HeicConverter | undefined`.
-  - `deps = { platform, exists, spawn, tmpRoot }` defaults to `process.platform`, `existsSync`, `Bun.spawn` and `realpath(os.tmpdir())`.
+  - `deps = { platform, exists, spawn, tmpRoot, timeoutMs }` defaults to `process.platform`, `existsSync`, `Bun.spawn`, the realpath of **`getconf DARWIN_USER_TEMP_DIR`** (corrected in Execution: `os.tmpdir()` follows `TMPDIR`, `sips` does not, so every conversion failed under another `TMPDIR`) and 20 s.
   - It returns **`undefined` unless** `platform === "darwin"` and both `/usr/bin/sips` and `/usr/bin/sandbox-exec` exist (fail closed, decision H3).
 - **`defaultHeicConverter()`**: memoised, created once per process.
 - **Per call:**
@@ -340,3 +340,83 @@ Extra validation, pasted into Execution:
 - **Metadata.** The converted JPEG keeps `sips`'s EXIF (GPS included), as a JPEG file or attach does today. Stripping location before a provider sees it is a cross-format privacy choice for every image path, not only HEIC.
 - `sandbox-exec` is deprecated by Apple. H3 fails closed; if it disappears, re-plan with an XPC/App Sandbox helper.
 - The marker still says `high only` (true of what is stored; `low` is made on demand, 3b's note).
+
+## Execution
+
+*— claude-sonnet-5-5, 2026-11-27*
+
+**Reproduced** on the branch before any edit (`repro.ts`): same two refusals as in Context.
+
+**Step 0 (load-bearing) — PASSED** (`.tentacle/tmp/image-heic/step0.ts`: D3 argv, real `AttachmentStore`, `createImageViewTool`):
+
+```
+sips -g -> 0 45 ms   pixelWidth: 4032  pixelHeight: 3024
+sips -s -> 0 155 ms  inspect ok image/jpeg 4032×3024, 2390866 B; strict header not refused
+247 ms isError=false mime=image/jpeg bytes=88769  photo.heic · 768×576 · low · 87 KB
+226 ms isError=false mime=image/jpeg bytes=83385  photo.heic · region 1008,756 2016×1512 of 4032×3024 · sent 768×576 · low · 81 KB
+```
+
+**As built, in order:** fixtures (H8 script, `2 fixtures verified`) → `core/src/heic.ts` + marker `format: string` → `tools/src/heic-convert.ts` → `fs_read` branch + option + description → `wiring.ts` → TUI `attach-files.ts` / `attach-refusal.ts` → changelog fragment.
+
+**Red first** (new modules against wrong-answer stubs, so red on assertions):
+
+| Test | Red |
+|---|---|
+| T1 core | 15 listed `(fail)` on `toEqual`/`toMatchObject` |
+| T2+T3 converter | 2 pass / 14 fail |
+| TMPDIR (live) | `refused: the HEIC could not be decoded (Error: Cannot write to file …/T/A73E…)` |
+| T4 `fs_read` | 13 pass / 7 fail («not readable as images yet») |
+| T5 chain | written after D4; red shown by mutation («no HEIC branch») |
+| T6 wiring | 9 pass / 1 fail («this host (darwin) has none») |
+| T7 attach | 56 pass / 4 fail |
+
+**Drift from Implementation**
+1. **Writable dir (D3, trap 3; plan corrected above).** `realpath(os.tmpdir())` broke every conversion when the process had another `TMPDIR`. Now `getconf DARWIN_USER_TEMP_DIR` (`env: {}`), resolved. Re-checked with `TMPDIR` under the temp dir and under `/Users`: both convert.
+2. `convertHeicWith` takes no `bytes`; `ops.size()` may return a refusal (so a size-query timeout or exit ≠ 0 is not reported as «corrupt»). Any throw in the converter is a refusal («could not be converted (…)»), never a rejection.
+3. Hardening beyond D3: the output is opened `O_NOFOLLOW` and must be a regular file (the child could leave a symlink for the unconfined parent to follow); control characters are stripped from the quoted stderr line.
+4. `sipsSandboxProfile` is exported and tested directly: Bun 1.4.3 `realpath` returns ENOENT for a name containing a backslash (such a temp dir fails closed).
+5. The changelog fragment says «Linux terminal», not the header's «a pod»: by D7 a pod session keeps the text path and the laptop converts an attach.
+6. Existing tests changed: the `inspectPath` HEIC test in `attach-files.test.ts` (new sentence) and `attach-draft.test.ts` (`why`). The paste and App tests are unchanged.
+
+**Mutations** (`.tentacle/tmp/image-heic/mutate.ts`: apply, run, restore):
+
+| Mutation | Result (failing) |
+|---|---|
+| skip `checkHeicOutput` | 15 pass / 6 fail, incl. T3 50 %-cut and T1 |
+| always pass `-Z` | 28/4 (T1, T2 argv) |
+| upscale (`edge = maxEdge`) | 16/2 |
+| `stdout: "inherit"` | 13/1 (T2) |
+| no `sandbox-exec` in argv | 13/1 (T2) |
+| no `rm` in `finally` | 12/2 |
+| follow an output symlink | 13/1 |
+| gate of 3 | 13/1 |
+| no SIGKILL | 12/2 |
+| writable dir follows `TMPDIR` | 2/1 (T3) |
+| input bound = model cap | 19/1 (T4) |
+| no HEIC branch | 61/1 (T5) |
+| wiring drops `heic:` | 9/1 (T6) |
+| attach ref id from HEIC bytes | 59/1 (T7) |
+
+**12 MP bench** (`bench.ts`, real `fs_read` → `image_view`, real attach):
+
+```
+anthropic: convert 206 ms · fs_read 210 ms
+[image photo.heic · 4032×3024 · HEIC→JPEG · 2.3 MB · ref 79949e605971 · high only]
+  image_view 252 ms: photo.heic · 768×576 · low · 87 KB
+  image_view 226 ms: photo.heic · region 1008,756 2016×1512 of 4032×3024 · sent 768×576 · low · 81 KB
+openai-compatible: convert 286 ms
+[image photo.heic · 1568×1176 · HEIC 4032×3024→JPEG · 505 KB · ref 8526291a3527 · high only]
+  image_view 58 ms: low 768×576 · 54 ms: region 392,294 784×588 of 1568×1176
+attach 305 ms: {"mimeType":"image/jpeg","size":821832,"name":"photo.jpg"}
+leftover temp dirs: 0
+```
+
+Exact long edge also checked for 4032, 3024, 2268, 2048, 1701 and 1568. (`repro.ts` now shows attach `ok=true`; its `fs_read` line says «darwin has none» only because it passes no converter.)
+
+**Checks:** 408 pass / 0 fail over the 16 covering test files; `biome check` on the changed paths clean; a `tsc` limited to the touched test files and their imports reports errors only in two untouched files (`agent/src/harness/a2a-map.ts`, `tui/src/markdown.ts`; likely the narrowed config). Full gate: not run (orchestrator's). No schema change.
+
+**For Review (not changed, outside the Implementation)**
+- Submit does not wait for an attach in progress (`useAttachments.ts` chains attaches only). Enter during a conversion (≈ 300 ms, worst case far longer) sends without the picture and the chip appears afterwards. The shape predates this task; HEIC widens the window. Read from code, not reproduced.
+- A turn cancel does not stop a running conversion (no signal in `HeicConverter`); each child is bounded at 20 s, so one conversion at worst ≈ 100 s (size + 4 decodes).
+- An output over 15 MiB is refused without the ×0.75 steps (D3's stat bound).
+- Unverified: Linux (only through the injected `platform`), a real iPhone portrait HEIC (Notes). No automated test checks that the OS enforces the denials; run once by hand with the shipped `sipsSandboxProfile` (`deny.ts`): control `exit 0, output exists`; read under `/Users` `exit 0, no output`; write outside the temp dir `exit 13, no output`.

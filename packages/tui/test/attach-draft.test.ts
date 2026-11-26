@@ -69,7 +69,9 @@ describe("routeDecision", () => {
         kind: "attachments",
         images: [a],
         documents: [],
-        refusals: [{ reason: "heic", path: "/tmp/i.heic" }],
+        refusals: [
+          { reason: "heic", path: "/tmp/i.heic", why: "HEIC/HEIF pictures: no decoder here" },
+        ],
       },
       UPLOAD,
       "/tmp/a.png /tmp/i.heic",

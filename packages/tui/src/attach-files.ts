@@ -17,19 +17,24 @@
  *
  * **One read decides everything.** A candidate is opened ONCE; its bytes are
  * read to EOF (bounded by the cap) and BOTH the sniff and the ref come from that
- * one buffer, so a type can never describe bytes other than the ones sent.
+ * one buffer, so a type can never describe bytes other than the ones sent. A
+ * HEIC is converted from that buffer, and the ref then describes the JPEG.
  */
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import {
   type AttachmentRef,
+  HEIC_ATTACH_MAX_EDGE,
+  type HeicConverter,
   MAX_ATTACHMENTS_PER_MESSAGE,
   MAX_IMAGE_BYTES,
   PDF_HEAD_BYTES,
+  heicJpegName,
   isPdf,
   sanitizeAttachmentName,
 } from "@tentacle/core";
+import { defaultHeicConverter } from "@tentacle/tools";
 import type { CandidateText } from "./attach-candidates.ts";
 import { type AttachRefusal, refusalMeansText, refusalText } from "./attach-refusal.ts";
 import { sniffImageType } from "./image-sniff.ts";
@@ -57,6 +62,8 @@ export interface ProbedFile {
  */
 export interface FileProbe {
   read(path: string, cap: number): Promise<ProbedFile | null>;
+  /** This computer's HEIC decoder; absent where it has none. */
+  readonly convertHeic?: HeicConverter | undefined;
 }
 
 /** An image that passed every check: its ref, its bytes, and where it came from. */
@@ -166,23 +173,68 @@ export async function inspectPath(probe: FileProbe, path: string): Promise<Inspe
     };
   }
   const sniffed = sniffImageType(bytes);
-  if (sniffed.kind === "heic") {
-    // Only the flavours that need a conversion land here (sub-task 6 does it).
-    return refuse({ reason: "heic", path });
-  }
-  if (sniffed.kind !== "image") {
+  if (sniffed.kind === "not-image") {
     return refuse({ reason: "not-image", path });
   }
   if (bytes.length > MAX_IMAGE_BYTES) {
     return refuse({ reason: "too-large", path, size: Math.max(file.size, bytes.length) });
   }
+  const name = refName(path);
+  if (sniffed.kind === "heic") {
+    return inspectHeic(probe.convertHeic, path, bytes, name);
+  }
+  return imageResult(path, bytes, sniffed.mimeType, name);
+}
+
+/** An image that passed: its ref describes exactly `bytes`, the ones sent. */
+function imageResult(
+  path: string,
+  bytes: Uint8Array,
+  mimeType: AttachmentRef["mimeType"],
+  name: string | undefined,
+): InspectResult {
   const ref: AttachmentRef = {
     id: sha256Hex(bytes),
-    mimeType: sniffed.mimeType,
+    mimeType,
     size: bytes.length,
-    ...nameField(refName(path)),
+    ...nameField(name),
   };
   return { ok: true, kind: "image", image: { path, ref, bytes } };
+}
+
+/**
+ * A HEIC is never sent (docs/feat/image-heic.md D6): it is converted HERE, on
+ * the user's computer, and the JPEG is the attachment — bytes, ref and name.
+ */
+async function inspectHeic(
+  convert: HeicConverter | undefined,
+  path: string,
+  bytes: Uint8Array,
+  name: string | undefined,
+): Promise<InspectResult> {
+  const refuse = (why: string): InspectResult => ({
+    ok: false,
+    refusal: { reason: "heic", path, why },
+  });
+  if (convert === undefined) {
+    return refuse(
+      "HEIC/HEIF pictures are converted by macOS's own decoder, and this computer has none — export it as JPEG first",
+    );
+  }
+  const converted = await convert(bytes, {
+    maxEdge: HEIC_ATTACH_MAX_EDGE,
+    maxBytes: MAX_IMAGE_BYTES,
+  });
+  if ("refused" in converted) {
+    return refuse(converted.refused);
+  }
+  // The type comes from the bytes sent, here as everywhere.
+  const sniffed = sniffImageType(converted.bytes);
+  if (sniffed.kind !== "image") {
+    return refuse("the HEIC could not be converted to a picture");
+  }
+  const jpegName = name === undefined ? undefined : heicJpegName(name);
+  return imageResult(path, converted.bytes, sniffed.mimeType, jpegName);
 }
 
 /** `{ name }` only when there is one: an absent key, never `name: undefined`. */
@@ -449,6 +501,8 @@ export interface ByteReader {
  */
 export function nodeFileProbe(): FileProbe {
   return {
+    // The child's pipes are never inherited: Ink owns this terminal.
+    convertHeic: defaultHeicConverter(),
     async read(path, cap) {
       let handle: Awaited<ReturnType<typeof open>>;
       try {

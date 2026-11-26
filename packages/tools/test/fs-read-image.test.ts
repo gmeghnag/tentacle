@@ -11,6 +11,7 @@ import { join } from "node:path";
 import type {
   AttachmentRef,
   ExecutionEnvironment,
+  HeicConverter,
   ToolContext,
   ToolImagePut,
   ToolImageStore,
@@ -302,6 +303,146 @@ describe("fs_read of an image file", () => {
     expect(createFsReadTool({ images: true, maxImageBytes: 1 })).not.toBe(
       createFsReadTool({ images: true, maxImageBytes: MAX_IMAGE_BYTES }),
     );
+  });
+});
+
+/** docs/feat/image-heic.md T4: the HEIC branch, over a fake converter. */
+describe("fs_read of a HEIC", () => {
+  /** An `ftyp heic` head and some body. */
+  const heicBytes = (size = 64) => {
+    const bytes = new Uint8Array(size);
+    bytes.set([...be32(24), ...ascii("ftypheic")]);
+    return bytes;
+  };
+  const converted = jpeg(4032, 3024);
+  function converterOf(
+    answer: Awaited<ReturnType<HeicConverter>> = {
+      bytes: converted,
+      width: 4032,
+      height: 3024,
+      sourceWidth: 8064,
+      sourceHeight: 6048,
+    },
+  ) {
+    const calls: { bytes: Uint8Array; maxEdge: number; maxBytes: number }[] = [];
+    const heic: HeicConverter = async (bytes, limits) => {
+      calls.push({ bytes, ...limits });
+      return answer;
+    };
+    return { calls, heic };
+  }
+  /** The environment, recording the bound of every read past the head. */
+  function counting() {
+    const full: number[] = [];
+    const wrapped = {
+      id: env.id,
+      readFile: (p: string) => env.readFile(p),
+      writeFile: env.writeFile.bind(env),
+      exec: env.exec.bind(env),
+      readBytes: (p: string, o?: { maxBytes?: number; readLimitBytes?: number }) => {
+        if (o?.readLimitBytes === undefined) full.push(o?.maxBytes ?? -1);
+        return env.readBytes(p, o);
+      },
+    } as ExecutionEnvironment;
+    return { full, wrapped };
+  }
+  const run = (
+    path: string,
+    context: ToolContext,
+    options: Parameters<typeof createFsReadTool>[0],
+    input: Record<string, unknown> = {},
+  ) => createFsReadTool(options).execute({ path, ...input } as never, context);
+
+  test("the converted JPEG is what is stored, and the marker says so", async () => {
+    const path = await writeFileOf("IMG_0001.HEIC", heicBytes());
+    const images = storeOf();
+    const { calls, heic } = converterOf();
+    const result = await run(path, ctxFor(env, images), { images: true, heic });
+    expect(result.isError).toBeUndefined();
+    expect(calls.map((c) => c.bytes.length)).toEqual([64]);
+    expect(images.puts).toHaveLength(1);
+    expect(images.puts[0]?.mimeType).toBe("image/jpeg");
+    expect(images.puts[0]?.label).toBe("IMG_0001.HEIC");
+    expect(images.puts[0]?.variants.high).toEqual({ bytes: converted, width: 4032, height: 3024 });
+    expect(images.puts[0]?.variants.low).toBeUndefined();
+    expect(result.image).toBeUndefined();
+    expect(result.content).toBe(
+      `[image IMG_0001.HEIC · 4032×3024 · HEIC 8064×6048→JPEG · ${sizeText(converted.length)} · ref ${sha12(converted)} · high only]\n${hintLine()}`,
+    );
+  });
+
+  test("the converter gets the model's side (at most 4032) and byte cap", async () => {
+    const path = await writeFileOf("caps.heic", heicBytes());
+    for (const [maxEdge, asked] of [
+      [8000, 4032],
+      [1568, 1568],
+    ] as const) {
+      const { calls, heic } = converterOf();
+      // A cap smaller than the INPUT: it bounds the output, never the read.
+      const options = { images: true, heic, maxEdge, maxImageBytes: 10 };
+      await run(path, ctxFor(env, storeOf()), options);
+      expect(calls.map((c) => [c.maxEdge, c.maxBytes])).toEqual([[asked, 10]]);
+    }
+    const { calls, heic } = converterOf();
+    const options = { images: true, heic, maxImageBytes: MAX_IMAGE_BYTES * 2 };
+    await run(path, ctxFor(env, storeOf()), options);
+    expect(calls[0]?.maxBytes).toBe(MAX_IMAGE_BYTES);
+  });
+
+  test("no decoder on this host: a sentence naming it, nothing read past the head", async () => {
+    const path = await writeFileOf("linux.heic", heicBytes());
+    const images = storeOf();
+    const { full, wrapped } = counting();
+    const result = await run(path, ctxFor(wrapped, images), { images: true });
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe(
+      `linux.heic: HEIC/HEIF pictures are converted by macOS's own decoder, and this host (${process.platform}) has none — convert it to JPEG first`,
+    );
+    expect(full).toEqual([]);
+    expect(images.puts).toHaveLength(0);
+  });
+
+  test("a converter refusal is the file's sentence, nothing stored", async () => {
+    const path = await writeFileOf("bad.heic", heicBytes());
+    const images = storeOf();
+    const { heic } = converterOf({ refused: "the HEIC is corrupt (no readable size)" });
+    const result = await run(path, ctxFor(env, images), { images: true, heic });
+    expect(result).toEqual({
+      content: "bad.heic: the HEIC is corrupt (no readable size)",
+      isError: true,
+    });
+    expect(images.puts).toHaveLength(0);
+  });
+
+  test("a store refusal → `not kept: …`", async () => {
+    const path = await writeFileOf("full.heic", heicBytes());
+    const { heic } = converterOf();
+    const images = storeOf(() => true);
+    const result = await run(path, ctxFor(env, images), { images: true, heic });
+    expect(result).toEqual({
+      content: "[image full.heic · 4032×3024 · not kept: image store full]",
+      isError: true,
+    });
+  });
+
+  test("a line range is refused before anything is converted", async () => {
+    const path = await writeFileOf("ranged.heic", heicBytes());
+    const { calls, heic } = converterOf();
+    const context = ctxFor(env, storeOf());
+    const result = await run(path, context, { images: true, heic }, { offset: 1 });
+    expect(result.content).toBe(`${path} is an image: no line ranges`);
+    expect(calls).toHaveLength(0);
+  });
+
+  test("over 15 MiB: refused before the body is read", async () => {
+    const path = await writeFileOf("huge.heic", heicBytes(MAX_IMAGE_BYTES + 1));
+    const { calls, heic } = converterOf();
+    const { full, wrapped } = counting();
+    const result = await run(path, ctxFor(wrapped, storeOf()), { images: true, heic });
+    expect(result.isError).toBe(true);
+    expect(result.content).toBe("[image omitted: 15 MB is over the 15 MB limit — huge.heic]");
+    expect(full).toEqual([MAX_IMAGE_BYTES]);
+    expect(calls).toHaveLength(0);
   });
 });
 
