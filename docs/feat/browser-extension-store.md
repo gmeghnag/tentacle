@@ -108,3 +108,35 @@ Done in plan order, each slice red then green:
 - *Not verified:* a real upload, so the store's actual reaction to the zip (`key` absent, warnings) is unknown. The store copy has not run in a real Chrome. The data-category labels in the listing come from the dashboard, which the public docs do not list (R5). The registration fee amount is not on the official page (R8).
 
 **Model behaviour:** it researched before designing (R1 changed deliverable 3 from "implement" to "remove `storage`, justify the rest"). It wrote tests red first for every slice, and ran mutations, one of which exposed a weak test that was then fixed. One self-inflicted typecheck regression was caught by the gate and fixed.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-26* (fresh context, the SAME model as the executor: shared blind spots may survive both passes. Scope: `git diff main...HEAD`, through f995f962, the store id set.)
+
+**Verdict: APPROVE-WITH-NITS.** No HIGH or MEDIUM findings.
+
+**Gate:** the touched tests (`apps/browser-extension`, `extension-ids`, `browser-host`, `browser-install`, `browser-extension-pack`) gave **90 pass, 0 fail**. `bun run lint` is clean (2711 files). `bun run typecheck` has 23 errors, all pre-existing and environmental (mobile `highlight.js` and the `URL`/`RequestInfo` lib types). None is in a touched file. I did not run the full `bun test --parallel`.
+
+**Mutations** (each reverted, and `git status` was clean afterwards):
+- M1: `originAllowed` checks only `ids[0]` → the host test «dev AND store» fails.
+- M2: dropping the length check in `nativeHostInstalled` → the stale test fails, on the extra-origin case.
+- M3: `storeManifest` keeps `key` → the pack test «minus `key`» fails.
+
+**Premises:**
+- TRUE: `main.ts:747` calls `browserHostMain` with the default ids, so both gates read `browserExtensionIds()`.
+- TRUE: no consumer of the id remains outside `link-schema.ts` (checked with `rg`).
+- TRUE: the extension source never reads its own id (`runtime.id`/`getURL`).
+- TRUE: `linkState` returns `connected` first (`link-state.ts:24`), so the «stale» result after an upgrade never hides a live link.
+- TRUE: `dist/` is gitignored.
+
+**Attacks tried:**
+1. *Could the trusted origins widen?* No. The ids are a compile-time constant validated against `^[a-p]{32}$`, there is no config or env path, and allowed origins must match exactly.
+2. *An upgrade leaves a manifest with only the dev id.* Status reports «stale», while the dev copy keeps working. Verified in a scratch trace: both origins are written, and the host accepts dev and store but refuses `aaaa…`.
+3. *Is the zip the shipped set?* A scratch pack gave 12 files, no `key`, version 0.2.0, and the six justified permissions; the zip read back correctly with its own CRC-checked reader.
+4. *Does any `chrome.storage` use remain?* None.
+
+**Nits:**
+- `packages/browser/src/link-schema.ts:24-29`: the doc comment still says «PLACEHOLDER until then: `undefined`» although the id is now set.
+- The Implementation §2 still calls the id a placeholder. The Execution should record f995f962 as drift.
+
+**Executor behaviour:** the tests were written red first, the mutation claims hold, and the gate claims match mine.
