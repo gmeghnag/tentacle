@@ -346,6 +346,59 @@ screenshots. The mockup page was not opened.
   trip (pull-to-refresh, or returning to an empty project). This follows D2/D3
   as written.
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Review 1 (MEDIUM, a late create swaps out an opened row's session): fixed.**
+
+- `project-new-session.ts` — `openCreatedSession(list, open)`: opens only while
+  `list.isFocused()`.
+- `App.tsx` — the `Sessions` screen's `onCreated` goes through it with that
+  screen's `navigation`; import widened.
+- `project-new-session.test.ts` — 4 tests: the REAL `StackRouter` (resolved
+  through `@react-navigation/native` → `core` → `routers`, no new dependency)
+  under the real create flow (list in front → opens; row opened meanwhile →
+  stays; back on the list before it settles → opens), plus a source pin of the
+  `App.tsx` wiring.
+
+**Drift from D4/D7:** a finished create opens nothing also when the Sessions
+screen is mounted but not in front. If the person is back on the list when it
+settles, it opens (they tapped it, and the pill was still busy). A create that
+FAILS meanwhile keeps its error line for when they return. The drawer's flow is
+unchanged.
+
+**Red** (stub `openCreatedSession` that always opens, `App.tsx` untouched):
+
+```
+(fail) … > a row opened meanwhile stays: the new session does not replace it
+     "Sessions",
+  -  "ROW-X",
+  +  "NEW",
+(fail) … > the Sessions route opens through that guard, with its own navigation
+```
+
+**Mutations** (each applied by hand, run, reverted):
+
+```
+guard removed (always opens)        -> 13 pass, 1 fail
+  (fail) a row opened meanwhile stays
+guard inverted (!list.isFocused())  -> 11 pass, 3 fail
+  (fail) list still in front / row opened meanwhile / back on the list
+App.tsx bypasses openCreatedSession -> 13 pass, 1 fail
+  (fail) the Sessions route opens through that guard
+```
+
+**Checks run:** the test files that mention `App.tsx`, plus
+`drawer-new-session.test.ts`: 779 pass, 0 fail (43 files, `--parallel`). Biome
+on the 3 changed code files: clean. `bunx tsc -p apps/mobile`: no output. The
+full gate is the orchestrator's.
+
+**Not verified:** no simulator run. That the native stack's
+`navigation.isFocused()` reads false under an opened row is React Navigation's
+contract, modelled in the test by the router's focused route; check by tapping
+New session and then a row on a slow link. Flow 47 still not run.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; planner was the same model, so

@@ -66,3 +66,16 @@ export function projectNewSessionTap(view: ProjectNewSessionView): "create" | "r
   }
   return view.enabled ? "create" : "refuse";
 }
+
+/**
+ * A create that worked opens its session only while the list that started it is
+ * still in front. A row opened meanwhile leaves that list mounted underneath (so
+ * D7's dispose does not apply), and the stack reuses a focused `Session` route:
+ * opening then would swap the person's session for the new one. Not opened, the
+ * new session is listed at the next read (D7).
+ */
+export function openCreatedSession(list: { isFocused(): boolean }, open: () => void): void {
+  if (list.isFocused()) {
+    open();
+  }
+}

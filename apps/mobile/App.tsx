@@ -153,7 +153,11 @@ import { inUseCopies, prunePhotoCopies } from "./src/photo-copies.ts";
 import { PHOTO_SETTINGS } from "./src/photo-settings-expo.ts";
 import type { PhotoSettings } from "./src/photo-settings-store.ts";
 import { photosRoot, pickFromLibrary, takePhoto } from "./src/photo-source.ts";
-import { projectNewSessionTap, projectNewSessionView } from "./src/project-new-session.ts";
+import {
+  openCreatedSession,
+  projectNewSessionTap,
+  projectNewSessionView,
+} from "./src/project-new-session.ts";
 import {
   type ProjectObservation,
   type ProjectRecordLike,
@@ -3663,14 +3667,16 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                   })
                 }
                 onCreated={(sessionId) =>
-                  navigation.navigate("Session", {
-                    computerId: route.params.computerId,
-                    sessionId,
-                    title: NEW_SESSION_TITLE,
-                    archived: false,
-                    // No `cwd`: the screen asks `session/list` itself.
-                    focus: true,
-                  })
+                  openCreatedSession(navigation, () =>
+                    navigation.navigate("Session", {
+                      computerId: route.params.computerId,
+                      sessionId,
+                      title: NEW_SESSION_TITLE,
+                      archived: false,
+                      // No `cwd`: the screen asks `session/list` itself.
+                      focus: true,
+                    }),
+                  )
                 }
               />
             )}
