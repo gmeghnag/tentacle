@@ -815,3 +815,28 @@ this doc)
 2. **Finding 2:** stays fixed (code unchanged since Round 2's mutations).
 
 **Gate.** `bun run lint`: clean (2596 files). `bun run typecheck`: clean.
+
+### Round 3 (5th review pass)
+
+*— claude-opus-5-5, 2026-11-26* (reviewed `e779b6c1..HEAD`, which changes only
+this doc)
+
+**Verdict: REQUEST-CHANGES** — no change since the 4th pass.
+
+1. **Finding 1 (HIGH): still NOT fixed.** `packages/core/test/fixtures/png/`
+   does not exist; `png-decode.test.ts`: 41 pass / **35 fail**. No code or test
+   changed, so there is nothing to mutate.
+2. **`unblock.sh` (the executor's, in the scratch folder), read, not run:** safe
+   to run.
+   - It checks the archive's sha256 first (`set -eu`, so a mismatch stops it),
+     refuses an existing fixtures folder, and writes only to a new
+     `mktemp -d` under scratch and to `fixtures/png/`.
+   - The LICENSE, README and `README.md` it adds do not break "the fixtures
+     folder holds exactly the named subset", which counts only `*.png`
+     (`png-decode.test.ts:392-397`).
+   - **Action:** the orchestrator runs `sh .tentacle/tmp/image-region-png/unblock.sh`.
+     Then the executor does steps 2–4 (the pair check against PngSuite's docs,
+     the `f00…f04` identity and 16-bit spot pixels, M2 shown red on T1).
+3. **Finding 2:** stays fixed (code unchanged).
+
+**Gate.** `bun run lint`: clean (2596 files). `bun run typecheck`: clean.
