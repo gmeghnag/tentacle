@@ -494,4 +494,62 @@ gate and `tsc -p apps/mobile` not run (the orchestrator's).
 
 ## Review
 
-*— (reviewer), (date)*
+*— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner, different from the executor)
+
+**Verdict: REQUEST-CHANGES.**
+
+**Findings**
+
+1. **HIGH — gate red, T1/T2 absent** (`packages/core/test/png-decode.test.ts`; no
+   `packages/core/test/fixtures/png/`). Touched files: 352 pass, **35 fail**, every
+   one a PngSuite test ("fixture … is missing"). The plan's only independent
+   oracle (O12) is unproven, and the `f00…f04` identity and 16-bit hand-read spot
+   pixels are not written. Execution itself says "Do not merge". Fix: drop the
+   archive in `.tentacle/tmp/image-region-png/`, then Execution steps 1–4.
+2. **MEDIUM — D5 makes a view that works today fail** (`packages/tools/src/image-view.ts:145`,
+   `needsDownscale` `:340`; the refusal comes from `packages/core/src/png-decode.ts:377`).
+   Trace (`.tentacle/tmp/image-region-png/review-e2e{,-branch}.test.ts`, a flat
+   8000×4500 RGB PNG of 111 KB, stored high-only — legal on Anthropic,
+   `ANTHROPIC_MAX_IMAGE_EDGE = 8000`): **main** →
+   `big.png · 8000×4500 · low · 111 KB · low is not available for this image yet — sent at high`;
+   **branch**, default `low` →
+   `big.png: the PNG is 8000×4500: decoding it needs 206 MiB, over the 128 MiB limit` (isError),
+   and with `model.imageDetail: low` the file **can never be viewed** (no `detail`
+   to escape with; the message does not even suggest `high`). Same for a PNG this
+   strict parser refuses but a provider accepts, and for a full 48 MiB sub-cap.
+   Not in § Failure modes. Fix: when D5 (not an explicit `region`) is refused, fall
+   back to today's `serve` of `high` + `HIGH_ONLY_NOTE`; add a test (budget-over
+   high-only PNG at default and forced `low` → the `high` ref, not an error).
+
+**Gate (this review).** `bun run lint`: clean (2596 files). `bun run typecheck`
+(incl. `apps/mobile`, `apps/relay`): clean. Touched + fake-updated test files
+(12): 352 pass / 35 fail (all PngSuite). Full `bun run test` not run: red already
+on the fixtures.
+
+**Mutations** (applied together, run, restored by file copy; `git status` clean
+after): decode cost check disabled → both T3 tests fail; `unfilter` ignoring the
+row above → the every-filter test fails; region ignored (whole box always) → 10
+region tests fail. Non-vacuous for these; the Adam7/PngSuite pair oracles stay
+unproven (finding 1).
+
+**Attacks tried.**
+- Decompression bomb / lying header: cost judged from IHDR before inflate,
+  `maxOutputLength` = exact raw size, short output refused (`png-decode.ts:376-404`). Holds.
+- Region outside / tiny / float noise: `regionBox` refuses before any decode
+  (`image-view.ts` reads the header, then the box, then decodes). Holds.
+- Two regions in one batch, and D5 (whose input the scheduler cannot tell
+  apart): `image-decode` write claim + per-instance `oneAtATime` slot. Holds.
+- §7 "compute next to the code / pod not trusted": the tool exists only with a
+  daemon-side store (unchanged registration); no pod decodes, no new wire field,
+  no protocol note needed. Holds.
+- `TODO.md` copy of `771517b1`'s sections: same lines at the same place as
+  `main` (both at :97/:126) → no duplicate on merge.
+- Peak memory is above the stated "most one decode may allocate" (crop +
+  opaque-alpha copy in `renderRegion` come on top), ≈ 2–3× at worst; below
+  MEDIUM, noted only.
+
+**Executor behaviour.** Honest: it stopped at the fixture blocker instead of
+forging fixtures, marked the status PARTIAL, recorded its drifts and raised the
+D5 regression itself for the Review. Note for future repros: scripts in
+`.tentacle/tmp/<slug>/` importing `../../../packages/...` hit the MAIN checkout,
+not the worktree — a branch "after" repro must use the worktree's absolute path.
