@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,6 +11,11 @@ import {
   refuseUnreleasedEntries,
 } from "../release-plan.ts";
 import { type ReleaseDeps, runRelease } from "../release.ts";
+
+// The hooks and the runRelease cases spawn many real git processes: under a
+// loaded parallel gate they outlast Bun's 5 s default, and a killed `git push`
+// surfaces as an error with empty stderr.
+setDefaultTimeout(30_000);
 
 describe("parseReleaseVersion", () => {
   const ok = (v: string) => parseReleaseVersion(v, "0.1.0-beta.1", ["v0.1.0-beta.1"]);
