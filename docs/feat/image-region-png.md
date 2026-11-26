@@ -676,3 +676,25 @@ tests already fail.
 
 Once the fixtures land and T1/T2 pass (with M2 shown red on T1), this can be
 approved with no further code review of finding 2.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-26* (fresh context; reviewed `daebcb98..HEAD`, which
+changes only this doc)
+
+**Verdict: REQUEST-CHANGES** — no change since Round 2.
+
+1. **Finding 1 (HIGH): still NOT fixed.** `packages/core/test/fixtures/png/`
+   does not exist, and no archive is in `.tentacle/tmp/image-region-png/`.
+   `png-decode.test.ts`: 41 pass / **35 fail**. No code or test changed, so there
+   is nothing to mutate. More fix rounds cannot close this: the owner or
+   orchestrator must fetch the archive (the `curl` command in "Gate-fix round
+   after fix round 1"); then Execution steps 1–4 and M2 shown red on T1.
+2. **Finding 2:** stays fixed (code unchanged since Round 2's mutations).
+
+**Gate.** `bun run lint`: clean (2596 files). `bun run typecheck`: clean.
+
+**Recommendation to the orchestrator:** stop looping fix rounds; unblock the
+download, or decide with the owner whether the hand-computed and pngjs
+differential tests are enough to stand in for T1/T2. That is an owner decision,
+not a reviewer waiver.
