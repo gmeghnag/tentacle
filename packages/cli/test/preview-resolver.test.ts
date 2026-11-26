@@ -89,6 +89,14 @@ describe("prepare", () => {
     expect(r.calls).toEqual([]);
   });
 
+  test("the env's XDG_RUNTIME_DIR protects its rootless sockets", async () => {
+    const r = rig({ XDG_RUNTIME_DIR: "/xdg/user" });
+    r.state.answer = { ...inspect, Mounts: [{ Source: "/xdg/user", Destination: "/h" }] };
+    const prepared = await r.resolver.prepare(request);
+    expect(prepared.ok ? "" : prepared.reason).toContain("socket");
+    expect((await r.resolver.resolve(row)).ok).toBe(false);
+  });
+
   test("the pure refusals apply", async () => {
     const r = rig();
     r.state.answer = { ...inspect, HostConfig: { Privileged: true } };

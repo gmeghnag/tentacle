@@ -151,6 +151,9 @@ Owner-delegated. Each one is the recommended option. None weakens a §7 rule.
 - **OD4 — "The engine socket":** refuse a container with any mount whose `Source`
   or `Destination` is the endpoint's socket path or has basename `docker.sock` /
   `podman.sock`. A UI that drives the engine is root on the host.
+  Since fix round 1 also any `Source` that contains (is a parent directory of,
+  `/` included) the endpoint's socket, a default docker/podman socket, or a
+  rootless one under the serve's `XDG_RUNTIME_DIR` (or its `docker` dir).
 - **OD5 — Viewer = paired devices only:** tunnel methods require
   `principal.kind === "device"`. A `connect` TUI (token principal) may **answer**
   the ask (it is the owner), but cannot open a tunnel. This is stricter than the minimum.
@@ -423,6 +426,42 @@ contains the socket (`-v /var/run:/x`, `-v /:/host`), nor `CapAdd`/`PidMode:host
 `session/detach` closes no tunnel; a finished upstream whose phone stops acking
 holds its slot until the preview or the link ends; approving the same
 container+port twice makes two rows.
+
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Finding 1 (MEDIUM, parent mount bypasses OD4): fixed, uncommitted.**
+`preview-target.ts`: a mount `Source` that is an ancestor-or-equal of a guarded
+path is refused. Guarded: the endpoint's socket, `/var/run` and `/run`
+`docker.sock` + `podman/podman.sock`, and `$XDG_RUNTIME_DIR/{docker.sock,
+docker,podman/podman.sock}`. Paths are normalised first; the exact-path and
+basename checks stay. New optional input `runtimeDir`, passed by
+`preview-resolver.ts` from the serve's env.
+
+Red (tests first): `27 pass, 7 fail` (the three ACCEPTED cases, endpoint
+parents, default sockets, XDG, resolver). Green: `34 pass, 0 fail`; with
+`connection-preview.test.ts` `54 pass, 0 fail`; `biome check` on the 4 changed
+files clean. The reviewer's `od4-parent.ts` now prints `refused` for all four.
+
+Mutations (each run on the two test files, then reverted):
+
+```
+ancestor check off              → (fail) /var/run, /, /run, endpoint, default, XDG ×2   27 pass 7 fail
+default sockets dropped         → (fail) /run…, of a well-known socket                  32 pass 2 fail
+rootless paths dropped          → (fail) rootless…, XDG_RUNTIME_DIR (resolver)          32 pass 2 fail
+prefix without "/"              → (fail) a sibling, a child or a name prefix            33 pass 1 fail
+no path normalisation           → (fail) …however it is spelled                         33 pass 1 fail
+```
+
+**Consequence.** Mounting any parent of the endpoint's socket (e.g. the home
+directory with a socket under it) now refuses the preview.
+
+**Not covered (lexical check only).** Symlinks are not resolved, a named volume
+bound to such a directory is not seen, and a VM-prefixed `Source`
+(`/host_mnt/…`) would not match: verify with `docker inspect` of a
+`-v /var/run:/x` container on Docker Desktop. Full gate: not run (the
+orchestrator's script).
 
 ## Review
 

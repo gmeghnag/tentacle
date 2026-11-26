@@ -166,6 +166,73 @@ describe("refused", () => {
     }
   });
 
+  describe("a mounted parent directory of an engine socket", () => {
+    const at = (path: string): EngineEndpoint => ({
+      kind: "unix",
+      path,
+      local: true,
+      source: "test",
+    });
+    const mounting = (Source: string, endpoint: EngineEndpoint = UNIX, runtimeDir?: string) =>
+      previewTargetOf({
+        inspect: inspect({ Mounts: [{ Source, Destination: "/host" }] }),
+        port: 80,
+        engine: "docker",
+        endpoint,
+        ...(runtimeDir === undefined ? {} : { runtimeDir }),
+      });
+
+    for (const source of ["/var/run", "/", "/run"]) {
+      test(`${source}, the endpoint being /var/run/docker.sock`, () => {
+        refused(mounting(source, at("/var/run/docker.sock")), /socket/);
+      });
+    }
+
+    test("of the endpoint's own socket, any depth, however it is spelled", () => {
+      for (const source of [
+        "/Users",
+        "/Users/me",
+        "/Users/me/.docker/run",
+        "/Users/me/.docker/run/",
+        "//Users/./me",
+        "/Users/me/project/..",
+      ]) {
+        refused(mounting(source), /socket/);
+      }
+    });
+
+    test("of a well-known socket, whatever the endpoint is", () => {
+      for (const source of ["/var", "/var/run", "/run", "/run/podman", "/var/run/podman"]) {
+        refused(mounting(source), /socket/);
+      }
+    });
+
+    test("of a rootless socket under XDG_RUNTIME_DIR", () => {
+      for (const source of ["/xdg", "/xdg/user", "/xdg/user/docker", "/xdg/user/podman"]) {
+        refused(mounting(source, UNIX, "/xdg/user/"), /socket/);
+      }
+    });
+
+    test("a sibling, a child or a name prefix is still accepted", () => {
+      for (const source of [
+        "",
+        "/data",
+        "/var/runner",
+        "/var/lib/docker/volumes/v/_data",
+        "/run/secrets",
+        "/Users/me/project",
+        "/Users/me/.docker/ru",
+      ]) {
+        expect(mounting(source).ok).toBe(true);
+      }
+      for (const source of ["/xdg/user/app", "/xdg/use"]) {
+        expect(mounting(source, UNIX, "/xdg/user").ok).toBe(true);
+      }
+      // An empty runtime dir protects nothing extra (never `/docker`).
+      expect(mounting("/docker", UNIX, "").ok).toBe(true);
+    });
+  });
+
   test("a non-local engine (tcp, ssh)", () => {
     const remotes: EngineEndpoint[] = [
       { kind: "tcp", host: "h", port: 2375, local: false, source: "test" },

@@ -93,7 +93,8 @@ export function enginePreviewResolver(
       }
       return { ok: false, transient: true, reason: message(error) };
     }
-    return previewTargetOf({ inspect, port, engine, endpoint });
+    const runtimeDir = io.env.XDG_RUNTIME_DIR;
+    return previewTargetOf({ inspect, port, engine, endpoint, runtimeDir });
   };
 
   return {
