@@ -20,6 +20,7 @@
       "dependencies": {
         "@tentacle/protocol": "workspace:*",
         "@tentacle/relay": "workspace:*",
+        "uqr": "0.1.3",
       },
     },
     "apps/browser-extension": {

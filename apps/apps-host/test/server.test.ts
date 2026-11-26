@@ -71,6 +71,21 @@ describe("publish and visit", () => {
     );
   });
 
+  test("a forged Host header or query never changes the QR's encoded url", async () => {
+    const host = await startHost();
+    const id = await host.publish(publisher);
+    const nav = { ...APP_NAV, "sec-fetch-site": "none" };
+    const plain = await (await host.visit(id, nav)).text();
+    const forged = await host.call("/?host=evil.example&u=https://evil.example/", {
+      host: `${id}.${DOMAIN}`,
+      headers: { ...nav, "x-forwarded-host": "evil.example" },
+    });
+    const body = await forged.text();
+    expect(body).toContain(`<p class="qr-url">https://${id}.${DOMAIN}/</p>`);
+    expect(body).not.toContain("evil.example");
+    expect(body).toBe(plain);
+  });
+
   test("a link gets the warning; the same-origin navigation the exact bytes", async () => {
     const host = await startHost();
     const id = await host.publish(publisher);

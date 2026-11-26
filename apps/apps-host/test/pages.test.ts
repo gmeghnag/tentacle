@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { encode } from "uqr";
 import { type Page, appResponseHeaders, createPages, visitorView } from "../src/pages.ts";
 
 const ID = "abcdefghijklmnop";
@@ -160,6 +161,7 @@ describe("host pages", () => {
   test("no external resource and no URL but the configured ones", () => {
     const allowed = [
       "https://apps.example.so/report?app=abcdefghijklmnop",
+      `https://${ID}.apps.example.so/`,
       "https://example.so/terms?a=1&amp;b=2",
     ];
     for (const [, page] of all) {
@@ -292,5 +294,65 @@ describe("the warning's script", () => {
     const back = browser(storage, 10_500);
     expect(back.replaced).toEqual([]);
     expect(back.elements.stuck?.hidden).toBe(false);
+  });
+});
+
+describe("the warning's QR code", () => {
+  const CANONICAL = `https://${ID}.apps.example.so/`;
+
+  /** Read the module grid back out of the rendered SVG path. */
+  function matrixOf(body: string): boolean[][] {
+    const svg = /<svg class="qr-code" viewBox="0 0 (\d+) \d+"[\s\S]*?<path d="([^"]*)"/.exec(body);
+    const size = Number(svg?.[1]);
+    const grid = Array.from({ length: size }, () => new Array<boolean>(size).fill(false));
+    for (const m of (svg?.[2] ?? "").matchAll(/M(\d+) (\d+)h(\d+)v1h-\d+z/g)) {
+      for (let i = 0; i < Number(m[3]); i++) {
+        const row = grid[Number(m[2])];
+        if (row) row[Number(m[1]) + i] = true;
+      }
+    }
+    return grid.slice(4, size - 4).map((row) => row.slice(4, size - 4));
+  }
+
+  test("is an inline svg whose modules are exactly the canonical url's encoding", () => {
+    const { body } = pages.warning(ID);
+    expect(body).toContain("Open on your phone");
+    expect(body).toContain(`<p class="qr-url">${CANONICAL}</p>`);
+    expect(matrixOf(body)).toEqual(encode(CANONICAL, { ecc: "M", border: 0 }).data);
+    expect(matrixOf(body)).not.toEqual(
+      encode("https://other.apps.example.so/", { ecc: "M", border: 0 }).data,
+    );
+  });
+
+  test("stays dark on a light square in both themes", () => {
+    const { body } = pages.warning(ID);
+    expect(body).toContain('<rect width="');
+    expect(body).toContain('fill="#ffffff"');
+    expect(body).toContain('fill="#000000"');
+    const svg = body.split('<svg class="qr-code"')[1]?.split("</svg>")[0] ?? "";
+    expect(svg).not.toMatch(/currentColor|var\(--/);
+  });
+
+  test("is absent from every other page and from an invalid id's warning", () => {
+    for (const [name, page] of all) {
+      if (name === "warning") continue;
+      expect([name, page.body.includes('<svg class="qr-code"')]).toEqual([name, false]);
+    }
+    expect(pages.warning("ABC").body).not.toContain('<svg class="qr-code"');
+  });
+
+  test("a media query hides it on narrow screens", () => {
+    const style = inline(pages.warning(ID).body, "style")[0] ?? "";
+    expect(style).toMatch(/\.qr \{ display: none; \}/);
+    expect(style).toMatch(/@media \(min-width: 700px\) \{\s*\.qr \{ display: block;/);
+  });
+
+  test("the encoded url comes from the id and the domain, not from the request", () => {
+    // The page factory takes no request input; a different id or domain is the only way in.
+    const other = createPages({ ...CONFIG, domain: "apps.other.so" }).warning(ID).body;
+    expect(matrixOf(other)).toEqual(
+      encode(`https://${ID}.apps.other.so/`, { ecc: "M", border: 0 }).data,
+    );
+    expect(pages.warning(ID).body).toBe(pages.warning(ID).body);
   });
 });
