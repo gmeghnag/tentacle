@@ -234,6 +234,9 @@ const ICON = {
   // Three filled dots: the dots are the shape, so no stroke weight applies.
   ellipsis: () =>
     `<circle cx="4.4" cy="10" r="1.15" fill="currentColor" stroke="none"/><circle cx="10" cy="10" r="1.15" fill="currentColor" stroke="none"/><circle cx="15.6" cy="10" r="1.15" fill="currentColor" stroke="none"/>`,
+  // `bolt.fill`: the Send now pill's symbol (`Composer.tsx`, 13 pt), filled.
+  "bolt.fill": () =>
+    `<path d="M11.6 1.8 3.9 11.3h4.6l-1 7 7.6-9.5h-4.6z" fill="currentColor" stroke="none"/>`,
 };
 const WEIGHT = { light: 1.15, regular: 1.5, bold: 2.3 };
 /** An SF Symbol (`Icon.tsx`): `name`, point `size`, `weight` ∈ light | regular | bold. */
@@ -270,7 +273,10 @@ const MIC = {
  * The composer: `state` ∈ empty | draft | ready | dictating | transcribing;
  * `queued` = chips above the bar; `home` = keyboard closed (home indicator);
  * `caption` = the dictation clock beside the mic; `slot` overrides the face
- * (send | disabled | stop | later).
+ * (send | disabled | stop | later); `sendNow` = the ⇥ pill is offered;
+ * `compact` = the RESTING shape (docs/feat/mobile-composer-compact.md) — ONE
+ * row, the input on it as first child, `+` absolute, no dead ↑ (OD2) and no
+ * hint while the pill holds the right side (D4). Default: today's open field.
  */
 export function composer({
   state = "empty",
@@ -280,24 +286,40 @@ export function composer({
   slot,
   caption = "",
   home = true,
+  sendNow = false,
+  compact = false,
 } = {}) {
   const empty = text === "";
   const mic = MIC[state === "dictating" || state === "transcribing" ? state : "idle"];
-  const face = SLOT[slot ?? (state === "ready" || !empty ? "send" : "disabled")];
+  const faceKey = slot ?? (state === "ready" || !empty ? "send" : "disabled");
+  // OD2: only the DEAD face is left out; ■ Stop, ↑ and the clock are actions.
+  const face = !compact || faceKey !== "disabled" ? SLOT[faceKey] : "";
+  // D4: the pill is an action and keeps the row's right side; the hint goes.
+  const hint = compact && sendNow ? "" : placeholder;
   const chips = queued.length
     ? `<div class="k-queue">${queued.map((q) => `<div class="k-queue-chip k-t-subhead">${esc(q)}</div>`).join("")}</div>`
     : "";
+  // ONE body, both shapes, the input FIRST (`Composer.tsx` `styles.body`).
+  const body = `<div class="k-composer-row"${compact ? " data-compact" : ""}><div class="k-input" ${empty ? "data-empty" : ""}>${esc(empty ? hint : text)}</div>${plus(compact)}<span class="k-flex"></span>${sendNow ? SEND_NOW : ""}${caption ? `<span class="k-mic-caption">${esc(caption)}</span>` : ""}${mic}${face}</div>`;
   return out(
-    `${chips}<div class="k-composer" ${home ? "data-home" : ""}><div class="k-field"><div class="k-input" ${empty ? "data-empty" : ""}>${esc(empty ? placeholder : text)}</div><div class="k-composer-row">${composerParts.plus}<span class="k-flex"></span>${caption ? `<span class="k-mic-caption">${esc(caption)}</span>` : ""}${mic}${face}</div></div></div>`,
-    empty ? placeholder : text,
+    `${chips}<div class="k-composer" ${home ? "data-home" : ""}><div class="k-field">${body}</div></div>`,
+    empty ? hint : text,
   );
 }
 
+/** The ⇥ Send now pill (`Composer.tsx` `styles.sendNow`): bolt 13 pt, «Send now». */
+const SEND_NOW = `<span class="k-send-now">${icon("bolt.fill", { size: 13 }).html}<span>Send now</span></span>`;
+
+/** The `+`: in a body laid out by flow, or absolute on the resting row (`data-abs`). */
+const plus = (abs) =>
+  `<span class="k-hit"${abs ? " data-abs" : ""}><span class="k-circle">${icon("plus", { size: 20, weight: "light" }).html}</span></span>`;
+
 /** The composer's own buttons, for a «nuovo» layout of them (same markup as `composer`). */
 export const composerParts = {
-  plus: `<span class="k-hit"><span class="k-circle">${icon("plus", { size: 20, weight: "light" }).html}</span></span>`,
+  plus: plus(false),
   mic: MIC,
   slot: SLOT,
+  sendNow: SEND_NOW,
 };
 
 /** A bottom sheet over the scrim (`Sheet`): grabber, `radius.sheet`. */

@@ -53,7 +53,15 @@ const SCREENS = {
       K.assistantText({ markdown: "The lockfile is stale. Run:\n```sh\nbun install\n```\n- commit `bun.lock`\n- push again" }),
       K.stepRail(STEPS),
     ].map((p) => p.html).join("")}</div>`,
-    K.composer({ state: "empty", placeholder: "Message" }),
+    K.composer({ state: "empty", placeholder: "Message", compact: true }),
+  ],
+  "composer at rest (docs/feat/mobile-composer-compact.md): closed, Stop, Send now, opened": () => [
+    K.sessionHeader({ title: "Fix CI", dot: "idle" }),
+    `<div class="k-scroll"></div>`,
+    K.composer({ compact: true }),
+    K.composer({ compact: true, state: "draft", slot: "stop" }),
+    K.composer({ compact: true, state: "draft", slot: "stop", sendNow: true }),
+    K.composer({ state: "empty", home: false }),
   ],
   "step body open (diff) + thought row": () => [
     K.sessionHeader({ title: "Refactor", dot: "idle" }),

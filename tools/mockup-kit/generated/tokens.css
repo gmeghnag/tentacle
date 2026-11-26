@@ -439,6 +439,17 @@
   --m-composer-input-padding-top: 8px;
   --m-composer-input-padding-bottom: 4px;
   --m-composer-input-padding-horizontal: 10px;
+  --m-composer-body-column-gap: 4px;
+  --m-composer-body-padding-horizontal: 2px;
+  --m-composer-input-open-width: 100%;
+  --m-composer-input-open-margin-horizontal: -2px;
+  --m-composer-input-compact-flex: 1;
+  --m-composer-input-compact-margin-left: 38px;
+  --m-composer-input-compact-padding-top: 7px;
+  --m-composer-input-compact-padding-bottom: 7px;
+  --m-composer-plus-compact-left: 2px;
+  --m-composer-plus-compact-top: -4px;
+  --m-composer-plus-compact-margin-vertical: 0;
   --m-composer-row-height: 36px;
   --m-composer-row-gap: 4px;
   --m-composer-row-padding-horizontal: 2px;

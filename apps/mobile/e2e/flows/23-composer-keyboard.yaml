@@ -27,6 +27,26 @@ appId: so.tentacle.app
     file: _shot.yaml
     env:
       SHOT: "23-keyboard-closed"
+# docs/feat/mobile-composer-compact.md: at rest, with nothing in it, the field
+# is ONE row — `+`, the hint, the mic — and the dimmed ↑ that did nothing is not
+# drawn (OD1, OD2).
+- assertVisible:
+    id: "composer-compact"
+- assertNotVisible:
+    id: "composer-send"
+# The tap that OPENS it is the input's own focus: the shape change must not
+# remount it (the load-bearing rule — if it did, the keyboard would drop and the
+# `inputText` below would go nowhere).
+- tapOn:
+    id: "composer-input"
+- assertNotVisible:
+    id: "composer-compact"
+- assertVisible:
+    id: "composer-send"
+# Blur on an EMPTY field closes it again (OD3 is about holding something).
+- hideKeyboard
+- assertVisible:
+    id: "composer-compact"
 - tapOn:
     id: "composer-input"
 - inputText: "SLOW keyboard button"
@@ -54,6 +74,12 @@ appId: so.tentacle.app
 - inputText: "SLOW keyboard return"
 - assertVisible:
     id: "composer-filled"
+# OD3: the keyboard is down and the field HOLDS text, so it stays open (two rows).
+- hideKeyboard
+- assertNotVisible:
+    id: "composer-compact"
+- tapOn:
+    id: "composer-input"
 - pressKey: Enter
 - assertNotVisible:
     id: "composer-filled"

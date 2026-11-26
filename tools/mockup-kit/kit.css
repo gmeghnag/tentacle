@@ -428,10 +428,43 @@
 }
 .k-composer-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  height: var(--m-composer-row-height);
-  gap: var(--m-composer-row-gap);
+  gap: 0 var(--m-composer-row-gap);
   padding: 0 var(--m-composer-row-padding-horizontal);
+}
+/* The body in BOTH shapes (`Composer.tsx` `styles.body`), the input its first
+   child; column gap only, so the open shape's second line adds no height. */
+.k-composer-row[data-compact] {
+  position: relative;
+  height: var(--m-composer-row-height);
+}
+/* Open = today: the input takes the whole first line, its box widened by the
+   body's padding (it used to sit straight in the field). */
+.k-composer-row:not([data-compact]) .k-input {
+  flex-basis: var(--m-composer-input-open-width);
+  margin: 0 var(--m-composer-input-open-margin-horizontal);
+}
+/* Compact: one 22 pt line centred in the 36 pt row, after the absolute `+`. */
+.k-composer-row[data-compact] .k-input {
+  flex: var(--m-composer-input-compact-flex);
+  min-width: 0;
+  margin-left: var(--m-composer-input-compact-margin-left);
+  padding-top: var(--m-composer-input-compact-padding-top);
+  padding-bottom: var(--m-composer-input-compact-padding-bottom);
+  white-space: nowrap;
+}
+/* The resting row's `+` is out of flow at its left, the 44 pt target centred on
+   the line (`styles.plusCompact`; `margin: 0` undoes the flow hit's -4). */
+.k-composer-row[data-compact] .k-hit[data-abs] {
+  position: absolute;
+  left: var(--m-composer-plus-compact-left);
+  top: var(--m-composer-plus-compact-top);
+  margin: var(--m-composer-plus-compact-margin-vertical) 0;
+}
+/* Skipped entirely, gaps included — a 0-width spacer would still take two. */
+.k-composer-row[data-compact] .k-flex {
+  display: none;
 }
 .k-hit {
   width: var(--m-composer-hit-width);
@@ -545,9 +578,11 @@
   height: var(--m-composer-send-now-height);
   padding: 0 var(--m-composer-send-now-padding-horizontal);
   border-radius: var(--m-composer-send-now-border-radius);
-  background: var(--c-accent-soft);
+  /* `Composer.tsx` `styles.sendNow`: the fill is `palette.tint` and the label is
+     `typography.caption` (both drifted — reported by the mockup). */
+  background: var(--c-tint);
   color: var(--c-accent);
-  font: var(--t-footnote-size) / var(--t-footnote-lh) var(--t-footnote-family);
+  font: var(--t-caption-size) / var(--t-caption-lh) var(--t-caption-family);
 }
 .k-queue {
   display: flex;

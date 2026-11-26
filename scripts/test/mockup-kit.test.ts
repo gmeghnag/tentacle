@@ -530,3 +530,75 @@ describe("kit.js pure builders run without a DOM", () => {
     expect(nuovo.html).toContain('data-nuovo="chip"');
   });
 });
+
+/**
+ * docs/feat/mobile-composer-compact.md (owner OD1–OD3, D3/D4): the app's resting
+ * composer is ONE row, so the kit must be able to draw it — same body, the input
+ * first, the `+` out of flow, no dead ↑, and no hint beside the ⇥ pill.
+ */
+describe("the composer's compact (resting) shape", () => {
+  type Composer = (p?: Record<string, unknown>) => { html: string };
+  const body = async (p: Record<string, unknown>): Promise<string> => {
+    const { K } = await import("../../tools/mockup-kit/kit.js");
+    const html = (K.composer as Composer)(p).html;
+    return html.slice(html.indexOf('<div class="k-composer-row"'));
+  };
+
+  test("one row: the input is the body's FIRST child, `+` absolute, no dead ↑ (OD2)", async () => {
+    const rest = await body({ compact: true });
+    expect(rest).toContain('<div class="k-composer-row" data-compact>');
+    expect(rest.indexOf('<div class="k-input"')).toBeLessThan(rest.indexOf('<span class="k-hit"'));
+    expect(rest).toContain('<span class="k-hit" data-abs>');
+    // The dimmed ↑ that did nothing is simply not drawn.
+    expect(rest).not.toContain("k-slot");
+  });
+
+  test("■ Stop is an ACTION: it sits on the closed row (D3), ↑ and the clock too", async () => {
+    expect(await body({ compact: true, slot: "stop" })).toContain(
+      '<span class="k-slot" data-stop>',
+    );
+    expect(await body({ compact: true, slot: "later" })).toContain(
+      '<span class="k-slot" data-clock>',
+    );
+  });
+
+  test("the ⇥ pill keeps the right side and the hint goes (D4)", async () => {
+    const pill = await body({ compact: true, sendNow: true });
+    expect(pill).toContain('class="k-send-now"');
+    expect(pill).toContain('<div class="k-input" data-empty></div>');
+    // Without the pill the hint stays: the resting row says what the field is for.
+    expect(await body({ compact: true })).toContain(
+      '<div class="k-input" data-empty>Message tentacle</div>',
+    );
+  });
+
+  test("the open shape is untouched: hint, dimmed ↑, the `+` in flow", async () => {
+    const open = await body({ state: "empty" });
+    expect(open).not.toContain("data-compact");
+    expect(open).not.toContain("data-abs");
+    expect(open).toContain('<div class="k-input" data-empty>Message tentacle</div>');
+    expect(open).toContain('<span class="k-slot" data-dim>');
+  });
+
+  test("the body's CSS is the app's: column gap only, the compact line, the absolute `+`", async () => {
+    const css = kit["kit.css"];
+    const rule = (sel: string): string => {
+      const at = css.indexOf(`${sel} {`);
+      expect(at).toBeGreaterThan(0);
+      return css.slice(at, css.indexOf("}", at));
+    };
+    expect(rule(".k-composer-row")).toContain("flex-wrap: wrap");
+    expect(rule(".k-composer-row")).toContain("gap: 0 var(--m-composer-row-gap)");
+    expect(rule(".k-composer-row[data-compact]")).toContain("height: var(--m-composer-row-height)");
+    expect(rule(".k-composer-row[data-compact] .k-input")).toContain(
+      "margin-left: var(--m-composer-input-compact-margin-left)",
+    );
+    expect(rule(".k-composer-row[data-compact] .k-hit[data-abs]")).toContain("position: absolute");
+    // The two drifts the mockup reported: `palette.tint` and `typography.caption`.
+    const pill = rule(".k-send-now");
+    expect(pill).toContain("background: var(--c-tint)");
+    expect(pill).toContain("var(--t-caption-size)");
+    expect(pill).not.toContain("--c-accent-soft");
+    expect(pill).not.toContain("--t-footnote-size");
+  });
+});
