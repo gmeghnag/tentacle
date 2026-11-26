@@ -523,4 +523,34 @@ typecheck`, whole-repo lint. Post-merge TUI test: owner's.
 
 ## Review
 
-*— <model-id>, <YYYY-MM-DD>*
+*— claude-opus-5-5, 2026-11-26*
+
+**Verdict: APPROVE** (fresh context; scope `git diff main...HEAD`). No HIGH or MEDIUM findings.
+
+**Gate.** Touched tests (4 files): 78 pass, 0 fail. `bun run lint`: clean (2672 files). `bun run typecheck`: clean (all four tsc runs). Full `bun run test`: the first run had 4 fails + 1 error under load. A rerun was clean: **20450 pass, 5 skip, 0 fail**. No test in a touched file is skipped, so the skips are not this diff's. The first run's fails did not repeat and were not traced, so they are treated as host-load flakes.
+
+**Mutations (§9), mine, all reverted, `git status` clean afterwards:**
+- the projection ignores caps → T2(c) toggle and context count go red;
+- the main agent never gets `remoteAgents` → T3(a) ×2 go red;
+- `<` is not escaped in the JSON-quoted description → T1 closing-tag test goes red.
+
+The executor's other 7 mutations (M2, M4, M5, M7–M10) were not re-run. M2 also holds by construction: the runner deps are built at `wiring.ts:1115`, before `remoteAgents` is assigned at `:1151`, and they get the plain `environment`.
+
+**Premises checked against the code.**
+- `projectedHistory` is the only consumer of the block (`agent.ts:1153-1166`); the only other `new Agent` is the child (`subagent.ts:588`). TRUE.
+- Config `disabledTools` seeds the caps (`wiring.ts:1451-1459`, `:1511`), so a config-level `agent_task` off also hides the list. TRUE.
+- `host` comes from the configured card URL's origin (`a2a.ts:482`), not from the card, and URL userinfo/path never reach it. TRUE.
+- Remote types are still gated on `!tunnelled` (`wiring.ts:1061-1066`), so a pod gets no list. TRUE.
+
+**Attacks tried.**
+1. Prompt-injection through config text: `oneLine` strips control characters, and the renderer JSON-quotes the line and escapes `<`. A `</remote_agents>` cannot close the section (mutation above). Holds.
+2. Session toggle and cache: the two blocks are rendered once in the constructor, and the choice depends only on caps. Holds.
+3. Listed but not callable: the list is filtered by `remoteTypeNames`, so unbuildable, disabled, user-overridden and proposed agents are not listed. Holds.
+4. Leaking to children or pods: neither gets the list (see M2 and the tunnelled gate). Holds.
+5. Card text in the system head: not possible, `RemoteAgentLine` carries only owner config. Holds.
+
+**Notes (LOW, not blocking).**
+- The Execution section is signed `claude-sonnet-5-5`, but the exec commit `3d970af2` says `exec (deepseek)`. One of them is wrong; the orchestrator should fix the provenance.
+- This review is from the same model family as the plan's author (Opus), and the execution was by a different model.
+
+**How the executor behaved.** It disclosed its drift honestly (the JSON-quote amendment, T2(b)→T3(e)). It hardened a test (M10) after a mutation showed it was vacuous. It did not run the full gate, and said so.
