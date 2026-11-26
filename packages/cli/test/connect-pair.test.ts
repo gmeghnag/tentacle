@@ -116,7 +116,8 @@ describe("pairLaptop", () => {
     );
     // The key sent to the host is the key stored.
     const stored = await s.keys.file.get(record.id);
-    expect(stored).toEqual(s.seen[0]?.deviceKey);
+    expect(stored).toBeDefined();
+    expect(stored).toEqual(s.seen[0]?.deviceKey ?? new Uint8Array());
     expect(s.seen[0]).toMatchObject({ name: "my-laptop", perProject: true });
     expect(readFileSync(recordPath(s.configDir, "my-app"), "utf8")).not.toContain(
       encodeBase64Url(stored ?? new Uint8Array()),

@@ -184,7 +184,8 @@ describe("pairing against a real serve", () => {
     const { seen } = await drive(paired, await loadKey(keys, paired));
     expect(seen.discovery?.daemons[0]?.self).toBe(true);
     // `foldDiscovery` accepts what a real daemon announces for this record.
-    expect(seen.discovery?.daemons[0]?.cwd).toBe(paired.project?.cwd);
+    expect(paired.project?.cwd).toBeDefined();
+    expect(seen.discovery?.daemons[0]?.cwd).toBe(paired.project?.cwd ?? "");
   }, 30_000);
 });
 
