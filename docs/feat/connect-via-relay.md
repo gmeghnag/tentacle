@@ -668,3 +668,56 @@ not as the answer.
 6. **Command:** `tentacle connect --pair '<payload>'` once, then `tentacle connect <name>`.
 
 *— claude-opus-5-5 (orchestrator, recording the owner's answers), 2026-11-26*
+
+## Review (code, round 1 — fresh context)
+
+**Verdict: APPROVE-WITH-NITS (PASS).** No HIGH/MEDIUM finding. One item stays
+open before merge: **T0 is still unrun** (the reviewer's `security` call was
+denied too, not worked around). The code fails safe if T0 fails: `put` reads the
+item back and falls back to the `0600` file. A `security` that does not use
+exit 44 for a missing item only makes `--forget` print "key was not removed".
+
+**Gate (this worktree, 95a224c1).** Touched files: `117 pass, 0 fail` (6 files).
+`bun run lint`: clean. `bun run typecheck`: clean. `bun run test`: the first run
+had `20882 pass, 5 skip, 1 fail`. The failing test was not identified, and it did
+not repeat: the re-run gave `20883 pass, 5 skip, 0 fail`, and no new test skips.
+Treat it as a pre-existing parallel flake; an unchanged rerun on `main` decides it.
+
+**Mutations** (each applied, seen red, reverted; `git status` clean after):
+
+| Break | Red |
+|---|---|
+| `loadKey` falls back to the file store | "a read never falls back to the other store (F2)" |
+| `writeRecord` id check off | "never resurrects a forgotten record or overwrites a new pairing" |
+| `foldDiscovery` accepts another cwd | "another project's daemon changes nothing" |
+| token flags not refused with a name | the main + `routeConnect` D8 tests |
+| no pinned `remoteStatic` | the real-serve device tests + a dedicated wrong-pin test (`connect-device.test.ts:121`) |
+
+**Attacks tried (all found nothing).**
+- **§7 one session path and single broker:** only `deps.dial` is replaced. The
+  new `onClient` hook runs after `initialize`, gets the existing buffered sink,
+  and adds no broker or client.
+- **§7 secrets never in argv:** the key goes only to `security -i` on stdin. A read
+  takes it from stdout, and the id is checked as hex before reaching argv or a path.
+- **§7 raw terminal writes:** refresh and `lastAddress` failures are held until
+  `onClient`, then go through the sink. `pairLaptop` and `--forget` write before
+  any Ink mount.
+- **On-disk:** an unknown `v` or a name mismatch is refused, and the file is never
+  written or removed (`writeRecord` and `removeRecord` re-read first).
+- **Address poisoning through `daemon/discover`:** only `self` is used, only for
+  the same `cwd`, and the result is capped. The Noise pin makes a bad address a
+  DoS at worst, never an impersonation.
+- **Routing:** `--pair` and `--forget` accept no other flag. A URL is matched
+  case-insensitively. A name outside `NAME_RE` counts as missing, so it never
+  becomes a path.
+
+**Nits (no change required).**
+- Within one session, `memory.lastGood` is shared across redials. Once the relay
+  wins, later redials start there. The across-runs rule holds.
+- A record-write failure held before `onClient` is lost if `initialize` fails.
+
+**Executor (Sonnet 5.5):** the doc stays within what was verified. It flagged T0
+as unrun instead of faking it, and its claimed mutations reproduce. The reviewer
+is a different model family (Opus).
+
+*— claude-opus-5-5, 2026-11-26*
