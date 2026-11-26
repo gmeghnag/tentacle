@@ -16,6 +16,7 @@ import {
   type ArtifactListParams,
   type ArtifactReadParams,
   type AttachmentPutParams,
+  type BrowserStatusParams,
   type CancelParams,
   type ClearParams,
   type ClearResult,
@@ -428,6 +429,12 @@ export class Connection {
       case Method.SetCapability: {
         const { sessionId, kind, name, enabled } = params as SetCapabilityParams;
         return this.lookup(sessionId).setCapability({ kind, name, enabled }, this.autoAcceptBy);
+      }
+      // A READ of the user's Chrome for one session (docs/feat/browser-inspect.md
+      // B5b): async, no lock (AGENTS §7 peer); never claims the browser.
+      case Method.BrowserStatus: {
+        const { sessionId } = params as BrowserStatusParams;
+        return this.lookup(sessionId).browserStatus();
       }
       case Method.Snapshot:
         return this.snapshot(params as SnapshotParams);

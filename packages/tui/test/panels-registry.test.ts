@@ -145,9 +145,10 @@ describe("S7: a panel kind is described by its OWN descriptor, found by lookup",
     const kinds = PANEL_KINDS.map((k) => k.kind);
     // `/artifacts` (docs/feat/model-artifacts.md S6a) and `/schedule`
     // (docs/feat/cron-tool.md S5) joined the original three, then `/tools`
-    // (docs/feat/tool-toggles.md D7).
+    // (docs/feat/tool-toggles.md D7), then `/browser` (browser-inspect B6a).
     expect(kinds.slice().sort()).toEqual([
       "artifacts",
+      "browser",
       "mcp",
       "schedule",
       "sessions",

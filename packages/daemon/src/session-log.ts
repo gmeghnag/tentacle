@@ -51,6 +51,7 @@ import {
   replaceEntryBody,
   sanitizeUsageBody,
 } from "@tentacle/protocol";
+import { toWireCapabilities } from "./mapping.ts";
 
 /** One retained entry: its wire object (a checkpoint's built on first read) and its size, once known. */
 export interface Slot {
@@ -187,13 +188,10 @@ export class SessionLog {
    * is off — the last one of a segment wins, none = everything on.
    */
   capabilities(state: SessionCapabilities): void {
+    // A browser switch set live is RECORDED (B5b, Q2) — never restored from here.
     this.push({
       type: "capabilities",
-      capabilities: {
-        disabledMcp: [...state.disabledMcp],
-        disabledSkills: [...state.disabledSkills],
-        disabledTools: [...state.disabledTools],
-      },
+      capabilities: toWireCapabilities(state, state.browser !== undefined),
     });
   }
 

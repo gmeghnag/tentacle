@@ -18,6 +18,7 @@
 import type { TentacleConfig } from "@tentacle/config";
 import type { ArtifactSink, AttachmentSource, ScheduleLink, ToolImageStore } from "@tentacle/core";
 import {
+  type BrowserHostPort,
   Connection,
   LogSessionStore,
   SessionHost,
@@ -29,8 +30,10 @@ import { type DuplexChannel, type MessageEndpoint, messagePortChannel } from "@t
 import { logDaemonError } from "./daemon-log.ts";
 import "./pdf-worker-url.ts";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
 import type { BrowserToolset } from "@tentacle/tools";
 import { browserToolsetOf, createBrowserLink } from "./browser-link.ts";
+import { createBrowserHostPort, defaultBrowserLinkProbes } from "./browser-status.ts";
 import { daemonDocumentPolicy, daemonImagePolicy } from "./image-policy.ts";
 import { laptopArtifactSeed } from "./laptop-artifacts.ts";
 import { createMcpHub } from "./mcp-hub.ts";
@@ -165,6 +168,8 @@ export function workerSessionHost(
     readonly artifactSeed?: SessionHostOptions["artifactSeed"];
     /** The worker's browser toolset (docs/feat/browser-inspect.md B4): the laptop's own Chrome. */
     readonly browser?: BrowserToolset;
+    /** Its host port (B5b: switches, `browser/status`, group titles), passed beside `browser`. */
+    readonly browserPort?: BrowserHostPort;
     /**
      * The `a2a` cards, read ONCE before this host (owner decision (c),
      * docs/feat/a2a-client.md): every build freezes `cards()`, then refreshes.
@@ -200,6 +205,8 @@ export function workerSessionHost(
     // bytes (docs/feat/attachments-prompt.md D4). `undefined` = images off.
     ...(images ? { images } : {}),
     documents: daemonDocumentPolicy("host"),
+    // The laptop's own Chrome (B5b): the switches and `browser/status` exist here.
+    ...(deps.browserPort ? { browser: deps.browserPort } : {}),
     // A failed turn now ends in the stream (`turn_end.error`), not as a handler
     // throw: same policy as below — the real message to this LOCAL client, the
     // full error (with stack) to the daemon error log.
@@ -320,9 +327,14 @@ async function startWorker(
   // The per-daemon browser link (docs/feat/browser-inspect.md §1): lazy — it
   // dials the Chrome host's hub only when a B4 tool calls it. The worker dies
   // with its process, which closes the socket and releases its leases.
-  const browser = browserToolsetOf(
-    createBrowserLink({ configDir: config.configDir, daemonId: randomUUID() }),
-  );
+  const browserLink = createBrowserLink({ configDir: config.configDir, daemonId: randomUUID() });
+  const browser = browserToolsetOf(browserLink);
+  // Its host port (B5b), over the SAME link and toolset (one lease holder).
+  const browserPort = createBrowserHostPort({
+    link: browserLink,
+    toolset: browser,
+    probes: defaultBrowserLinkProbes({ configDir: config.configDir, home: homedir() }),
+  });
 
   // One skill scan for every session and for the `/name` list of a session
   // not created yet (docs/feat/skills-hot-reload.md).
@@ -335,6 +347,7 @@ async function startWorker(
     toolsReady: () => hub.ready(),
     onBuilt: (wired) => hub.onBuilt(wired.tools),
     browser,
+    browserPort,
     a2aCards,
     // D11: a RESUMED session's gallery, from the copy the MAIN thread keeps
     // beside the log. READ ONLY here — the main thread owns that dir (§7).

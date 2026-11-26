@@ -69,6 +69,7 @@ import { AttachmentStore, DAEMON_UPLOAD_BYTES, UploadBudget } from "./attachment
 import type { ModelLink } from "./connection.ts";
 import {
   type Attachment,
+  type BrowserHostPort,
   HostedSession,
   type RestoredSessionState,
   type SessionLogOptions,
@@ -79,6 +80,8 @@ import {
   type WorkflowWaitTiming,
   workflowCatalogueResult,
 } from "./hosted-session.ts";
+
+export type { BrowserHostPort } from "./hosted-session.ts";
 import { forgetLiveRegistration, writeLiveRegistration } from "./live-store.ts";
 import { fromWireCapabilities, toSessionSkills, toSessionTools } from "./mapping.ts";
 import {
@@ -351,6 +354,13 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * closed: absent → false.
    */
   readonly answersAutoAccept?: boolean;
+  /**
+   * The user's Chrome (docs/feat/browser-inspect.md B5b): passed by the hosts
+   * that build the browser tools (the worker, `serve`), beside them; never a
+   * pod daemon. Absent → `capabilities.browser` is never sent, the `browser`
+   * op is `InvalidParams`, and `browser/status` answers `available: false`.
+   */
+  readonly browser?: BrowserHostPort;
   /**
    * `serve` only: this computer's live sibling daemons and their addresses
    * (`daemon/discover`, docs/feat/sibling-discovery.md). Absent (a pod daemon,
@@ -1742,6 +1752,9 @@ export class SessionHost {
     bound.hosted = hosted;
     hosted.settingsReport = settingsReport;
     hosted.imagesPolicy = this.opts.images;
+    if (this.opts.browser !== undefined) {
+      hosted.attachBrowser(this.opts.browser);
+    }
     hosted.grants = grants;
     hosted.workloadShells = workloadShells;
     if (workflows) {

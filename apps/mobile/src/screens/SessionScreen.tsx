@@ -65,6 +65,7 @@ import type { AppLogField } from "../app-log.ts";
 import { ARTIFACT_SEEN } from "../artifact-seen-expo.ts";
 import { seenFor } from "../artifact-seen-store.ts";
 import { ASK_DETENT, ASK_PARKS, askBanner, askPresented, parkKey } from "../ask-park.ts";
+import { browserPageOf } from "../browser-view.ts";
 import { CHART_SETTINGS } from "../chart-settings-expo.ts";
 import type { ChartSettings } from "../chart-settings-store.ts";
 import { chatStatus, titleLabel } from "../chat-header.ts";
@@ -202,6 +203,7 @@ import { HeaderDot } from "../ui/HeaderDot.tsx";
 import { HeaderIcon } from "../ui/HeaderIcon.tsx";
 import { Icon, type IconName } from "../ui/Icon.tsx";
 import { MascotSceneLayer } from "../ui/MascotScene.tsx";
+import { RiskStrip } from "../ui/RiskStrip.tsx";
 import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { CompactSlotNode, ThinkingNode } from "../ui/StepNode.tsx";
 import { STICKY_HEAD_H, StickyHost, type StickyHostHandle } from "../ui/StickyStep.tsx";
@@ -218,6 +220,7 @@ import type { VoiceSettings } from "../voice-settings-store.ts";
 import { endedTurn, speakButtonOf, voiceComposerView } from "../voice-view.ts";
 import { type RunsState, catalogueFigure, workflowsHub } from "../workflow-runs-controller.ts";
 import { ActivitySheet } from "./ActivitySheet.tsx";
+import { BrowserPage } from "./BrowserPage.tsx";
 import { CommandsSheet } from "./CommandsSheet.tsx";
 import { PermissionSheetView } from "./PermissionSheet.tsx";
 import { RenameSheet } from "./RenameSheet.tsx";
@@ -1185,6 +1188,8 @@ export function SessionScreen({
   // Session info (docs/feat/mobile-session-info.md): the sheet, and which row the
   // person expanded. Every value it draws is decided in `session-info.ts`.
   const [infoOpen, setInfoOpen] = useState(false);
+  /** Which page the sheet shows: Session info, or its Browser page (B6b). */
+  const [infoPage, setInfoPage] = useState<"info" | "browser">("info");
   /**
    * Session info was opened ON a section (`openScheduled`), so the list scrolls
    * inside the sheet and the route opens at its largest detent (D3). It rides the
@@ -1265,6 +1270,7 @@ export function SessionScreen({
   // already resolved by `scheduledSection`, so it is never one the sheet will not
   // draw.
   const openInfo = (revealTo: SectionId | null = null) => {
+    setInfoPage("info");
     setExpanded(null);
     startReveal(revealTrack.current, revealTo);
     setInfoOpen(true);
@@ -1278,6 +1284,12 @@ export function SessionScreen({
   // growing a second wakes screen.
   const openScheduled = () =>
     openInfo(scheduledSection(info?.view ?? null, state.schedules?.length ?? 0));
+  // The risk strip's `Change ›` (browser-inspect B6b): Session info, ON its
+  // Browser page — the same one opening path.
+  const openBrowser = () => {
+    openInfo();
+    setInfoPage("browser");
+  };
   /**
    * Tools opened (D6): its controls always start fresh (a segment, a search and
    * an accordion are about the visit, not the session), and the controller is
@@ -1536,25 +1548,38 @@ export function SessionScreen({
     if (info !== null) {
       host.publish(
         "info",
-        <SessionInfoSheet
-          palette={palette}
-          view={info.view}
-          autoAcceptOn={controller.autoAcceptOn()}
-          autoAcceptError={info.autoAcceptError}
-          onAutoAccept={(on) => void controller.setAutoAccept(on)}
-          onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
-          onDeleteSchedule={(scheduleId) => void controller.deleteSchedule(scheduleId)}
-          scrollRef={(node) => {
-            infoScroller.current = node;
-          }}
-          onSectionLayout={revealOnLayout}
-          onRefresh={() => void controller.refreshInfo()}
-          onRetry={() => void controller.refreshInfo()}
-          expanded={expanded}
-          onExpand={setExpanded}
-          onOpenArtifacts={openArtifactsFromInfo}
-          onClose={closeInfoSheetOnly}
-        />,
+        infoPage === "browser" ? (
+          <BrowserPage
+            palette={palette}
+            view={browserPageOf(info)}
+            {...(info.view.banner === undefined ? {} : { banner: info.view.banner.text })}
+            onBack={() => setInfoPage("info")}
+            onClose={closeInfoSheetOnly}
+            onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
+            onLockedTap={() => playHaptic("light")}
+          />
+        ) : (
+          <SessionInfoSheet
+            palette={palette}
+            view={info.view}
+            autoAcceptOn={controller.autoAcceptOn()}
+            autoAcceptError={info.autoAcceptError}
+            onAutoAccept={(on) => void controller.setAutoAccept(on)}
+            onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
+            onDeleteSchedule={(scheduleId) => void controller.deleteSchedule(scheduleId)}
+            scrollRef={(node) => {
+              infoScroller.current = node;
+            }}
+            onSectionLayout={revealOnLayout}
+            onRefresh={() => void controller.refreshInfo()}
+            onRetry={() => void controller.refreshInfo()}
+            expanded={expanded}
+            onExpand={setExpanded}
+            onOpenArtifacts={openArtifactsFromInfo}
+            onOpenBrowser={() => setInfoPage("browser")}
+            onClose={closeInfoSheetOnly}
+          />
+        ),
       );
       host.publish(
         "tools",
@@ -2379,6 +2404,11 @@ export function SessionScreen({
           >
             {voiceView.notice}
           </Text>
+        )}
+        {/* The risk strip (browser-inspect B6b): by the composer, only while the
+          browser acts alone or shows secrets. */}
+        {state.riskStrip === null ? null : (
+          <RiskStrip palette={palette} items={state.riskStrip} onChange={openBrowser} />
         )}
         <Composer
           palette={palette}

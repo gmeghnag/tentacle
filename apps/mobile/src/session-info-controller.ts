@@ -13,6 +13,7 @@
 import type {
   ArtifactListResult,
   ArtifactMeta,
+  BrowserStatusResult,
   McpServerStatus,
   ScheduleDeleteResult,
   ScheduleRow,
@@ -57,6 +58,12 @@ export interface InfoSession {
    * absent: the handle has none, which reads as an older daemon.
    */
   readonly capabilities?: InfoCapabilities | undefined;
+  /**
+   * `browser/status` of this session (docs/feat/browser-inspect.md B6b): the
+   * link and the session's own tabs. Asked only where `capabilities` report a
+   * browser. Absent: the link reads `unknown`.
+   */
+  browserStatus?(): Promise<BrowserStatusResult>;
 }
 
 /**
@@ -176,6 +183,11 @@ export interface SessionInfoState {
    * after the sheet closes too (the hub's own summary), which is why it is here.
    */
   readonly tools: ToolsFacts;
+  /**
+   * The last `browser/status` read while the sheet is open (browser-inspect
+   * B6b); null: none yet, it failed, or the link dropped — never a stale one.
+   */
+  readonly browserStatus: BrowserStatusResult | null;
 }
 
 export interface SessionInfoController {
@@ -209,6 +221,13 @@ export interface SessionInfoController {
    * answer is stamped with the current generation (a reopen drops it, F5).
    */
   pullTools(): Promise<void>;
+  /**
+   * Read `browser/status` again, while the sheet is open and the session has the
+   * browser (browser-inspect B6b): what the screen calls when a browser tool
+   * finishes. The open, a refresh, the link's `up` and every `capabilities`
+   * report read it by themselves. Never rejects.
+   */
+  refreshBrowser(): Promise<void>;
   /** The switch's value now (the LINK's, so a flip elsewhere is already here). */
   autoAcceptOn(): boolean;
   /** Flip it; a rejection reverts and records why (F11). */
@@ -312,6 +331,46 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
   let changedBy: Record<string, string> = {};
   let capsError: { readonly kind: CapabilityKind; readonly text: string } | null = null;
   const listeners = new Set<(state: SessionInfoState) => void>();
+  /** Whether the sheet is open: `browser/status` is read only then. */
+  let watching = false;
+  let browserStatus: BrowserStatusResult | null = null;
+  /** The newest read wins: an older answer landing late is dropped. */
+  let browserSeq = 0;
+
+  /** Forget the status, and any read still in flight. */
+  function dropBrowser(): void {
+    browserSeq += 1;
+    browserStatus = null;
+  }
+
+  async function readBrowser(): Promise<void> {
+    if (!watching) {
+      return;
+    }
+    const handle = port.phase() === "open" ? port.session() : null;
+    if (
+      handle?.browserStatus === undefined ||
+      handle.capabilities?.current()?.browser === undefined
+    ) {
+      dropBrowser();
+      return;
+    }
+    browserSeq += 1;
+    const mine = browserSeq;
+    let read: BrowserStatusResult | null;
+    try {
+      read = await handle.browserStatus();
+    } catch {
+      // An older daemon, a dropped link, a session not open: `unknown`, and the
+      // switches still work from `capabilities`.
+      read = null;
+    }
+    if (mine !== browserSeq) {
+      return;
+    }
+    browserStatus = read;
+    emit();
+  }
 
   function facts(): InfoFacts {
     const handle = port.session();
@@ -402,6 +461,9 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
           changedBy = notes;
         }
         emit();
+        // The switches moved (or a re-attach reported them): the tabs and the
+        // link may have too.
+        void readBrowser();
       }) ?? null;
   }
 
@@ -422,6 +484,7 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
       autoAcceptError,
       openContext: pulled === null ? null : { used: pulled.used, exact: pulled.exact },
       entryCwd: entry.state === "ready" && entry.value !== null ? entry.value.cwd : null,
+      browserStatus,
       tools: {
         phase: gathered.phase,
         link: gathered.link,
@@ -504,6 +567,7 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
       artifactsPull = value;
     });
     await Promise.all([
+      readBrowser(),
       pull(async () => ({ servers: await port.mcpStatus() }), reportFor("mcp")).then(paintMcp),
       pull(async () => {
         const page = await port.sessionList();
@@ -555,6 +619,7 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
     },
     async open() {
       generation += 1;
+      watching = true;
       autoAcceptError = null;
       unlink?.();
       // A flip from ANOTHER device is a value this switch shows and never learns
@@ -574,6 +639,7 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
             void run();
             return;
           }
+          dropBrowser();
           emit();
         }) ?? null;
       await run();
@@ -638,8 +704,13 @@ export function createSessionInfo(port: InfoPort): SessionInfoController {
         ).then(paintSkills),
       ]);
     },
+    refreshBrowser() {
+      return readBrowser();
+    },
     close() {
       generation += 1;
+      watching = false;
+      dropBrowser();
       unlink?.();
       unlink = null;
       unSwitch?.();

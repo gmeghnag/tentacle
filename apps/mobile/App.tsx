@@ -206,6 +206,7 @@ import {
 import { sentPhotoSource } from "./src/sent-photos.ts";
 import { createFreshSession, createSessionController } from "./src/session-controller.ts";
 import type { InfoPort } from "./src/session-info-controller.ts";
+import type { CapabilityKind } from "./src/session-info.ts";
 import { createSessionListController, viewModel } from "./src/session-list-controller.ts";
 import { type SessionListState, type SessionRow, initialSessionList } from "./src/session-list.ts";
 import { createSessionRuntimes } from "./src/session-runtimes.ts";
@@ -675,9 +676,10 @@ function infoWiring(
                 remove: (scheduleId: string) => remote.deleteSchedule(scheduleId),
               },
             }),
-        // The MCP/skill switches (docs/feat/session-capabilities.md S5): the same
-        // handle's `capabilities()` / `onCapabilities` / `setCapability`, so the
-        // phone toggles through the one client stack like the TUI does.
+        // The MCP/skill switches (docs/feat/session-capabilities.md S5) and the
+        // browser's (browser-inspect B6b): the same handle's `capabilities()` /
+        // `onCapabilities` / `setCapability`, so the phone toggles through the one
+        // client stack like the TUI does.
         ...(typeof remote.setCapability !== "function"
           ? {}
           : {
@@ -685,10 +687,14 @@ function infoWiring(
                 current: () => remote.capabilities(),
                 onChange: (listener: Parameters<RemoteSession["onCapabilities"]>[0]) =>
                   remote.onCapabilities(listener),
-                set: (kind: "mcp" | "skill", name: string, enabled: boolean) =>
+                set: (kind: CapabilityKind, name: string, enabled: boolean) =>
                   remote.setCapability(kind, name, enabled),
               },
             }),
+        // The Browser page's one read (`browser/status`).
+        ...(typeof remote.browserStatus !== "function"
+          ? {}
+          : { browserStatus: () => remote.browserStatus() }),
       };
     },
     onLink: (listener: (status: "up" | "down") => void) =>

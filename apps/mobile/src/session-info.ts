@@ -25,6 +25,7 @@ import type {
 } from "@tentacle/protocol";
 import { unseenArtifacts } from "./artifact-gallery.ts";
 import type { ArtifactSeen } from "./artifact-seen-store.ts";
+import { browserRowValue } from "./browser-view.ts";
 import { sanitizeDisplay } from "./display-text.ts";
 import { keyedScheduleRows, scheduleMetaText, scheduleTitle } from "./schedule-view.ts";
 import type { StatusTone } from "./ui/StatusDot.tsx";
@@ -94,9 +95,15 @@ export interface InfoFacts {
   readonly artifacts?: ArtifactFacts;
 }
 
-/** Which kind of thing a switch hides from the model. */ export type CapabilityKind =
-  | "mcp"
-  | "skill";
+/** The kinds Session info lists as rows: one server, one skill. */
+export type ListedKind = "mcp" | "skill";
+
+/**
+ * What a `session/set_capability` of this phone can switch: a listed row, a tool
+ * (the browser group) or one of the browser's modes
+ * (docs/feat/browser-inspect.md B6b).
+ */
+export type CapabilityKind = ListedKind | "tool" | "browser";
 
 /** One `session/set_capability` this phone sent and has not had answered yet. */
 export interface CapabilityOp {
@@ -146,7 +153,7 @@ export interface SchedulesFeed {
 
 /** The trailing switch of one MCP server or skill row. */
 export interface RowSwitch {
-  readonly kind: CapabilityKind;
+  readonly kind: ListedKind;
   /** The RAW name the daemon knows it by (the row's title is sanitized). */
   readonly name: string;
   /** Visible to the model in this session. */
@@ -241,8 +248,9 @@ export interface InfoRow {
   /**
    * A tap OPENS another screen (docs/feat/model-artifacts.md D9): this row is a
    * way in, never a value — the sheet calls the route and closes itself.
+   * `browser` is the sheet's own Browser page (browser-inspect B6b).
    */
-  readonly opens?: "artifacts";
+  readonly opens?: "artifacts" | "browser";
 }
 
 /** The trailing Delete of one row (the schedule section's own control). */
@@ -443,7 +451,7 @@ export function switchPhase(input: {
   return input.state === undefined ? "unsupported" : "on";
 }
 
-export function listOf(state: SessionCapabilitiesWire | undefined, kind: CapabilityKind): string[] {
+export function listOf(state: SessionCapabilitiesWire | undefined, kind: ListedKind): string[] {
   if (state === undefined) {
     return [];
   }
@@ -533,7 +541,7 @@ export function changedSuffix(switches: CapabilitySwitches, key: string): string
 /** A row's trailing switch. A `locked` skill is a ghost switch, off (Owner Q5). */
 export function rowSwitch(
   switches: CapabilitySwitches,
-  kind: CapabilityKind,
+  kind: ListedKind,
   name: string,
   locked: boolean,
 ): RowSwitch {
@@ -553,7 +561,7 @@ export function rowSwitch(
  */
 export function switchNote(
   switches: CapabilitySwitches | undefined,
-  kind: CapabilityKind,
+  kind: ListedKind,
   computer: string,
   explain: boolean,
 ): string | undefined {
@@ -660,8 +668,17 @@ function sessionSection(facts: InfoFacts): InfoSection {
     };
   }
   const entry = facts.entry.value;
+  // The way into the Browser page (docs/feat/browser-inspect.md B6b): it comes
+  // from the session's own switches, so it needs no `session/list` entry, and it
+  // is absent where the host has no browser (`caps.browser`).
+  const browser = browserRowValue(facts.capabilities?.state);
+  const browserRows: InfoRow[] =
+    browser === null ? [] : [{ title: "Browser", value: browser, opens: "browser" }];
   if (entry === null) {
     // Not on the first page (F8): the rows are OMITTED, never rendered as "0".
+    if (browserRows.length > 0) {
+      return { id: "session", title: "Session", phase: "ready", rows: browserRows };
+    }
     return {
       id: "session",
       title: "Session",
@@ -688,6 +705,7 @@ function sessionSection(facts: InfoFacts): InfoSection {
       value: `${entry.jobs} ${entry.jobs === 1 ? "job" : "jobs"} running`,
     });
   }
+  rows.push(...browserRows);
   return { id: "session", title: "Session", phase: "ready", rows, dim: facts.link === "down" };
 }
 

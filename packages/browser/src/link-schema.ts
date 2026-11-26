@@ -59,6 +59,8 @@ export const HubHello = z.object({
 export const HubOp = z.discriminatedUnion("op", [
   z.object({ op: z.literal("claim"), sessionUid: z.string(), title: z.string() }),
   z.object({ op: z.literal("release"), sessionUid: z.string() }),
+  /** The session's title changed: its tab group follows (B5b; additive, the link version stays). */
+  z.object({ op: z.literal("retitle"), sessionUid: z.string(), title: z.string().max(200) }),
   z.object({ op: z.literal("tabs"), sessionUid: z.string() }),
   z.object({
     op: z.literal("open"),

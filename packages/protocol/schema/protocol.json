@@ -688,6 +688,72 @@
       "type": "object",
       "x-event-class": "display"
     },
+    "BrowserStatusParams": {
+      "additionalProperties": true,
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["sessionId"],
+      "type": "object"
+    },
+    "BrowserStatusResult": {
+      "additionalProperties": true,
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "heldElsewhere": {
+          "type": "boolean"
+        },
+        "link": {
+          "additionalProperties": true,
+          "properties": {
+            "managed": {
+              "type": "boolean"
+            },
+            "state": {
+              "enum": ["connected", "not_running", "extension_missing", "not_installed"],
+              "type": "string"
+            }
+          },
+          "required": ["managed", "state"],
+          "type": "object"
+        },
+        "tabs": {
+          "items": {
+            "additionalProperties": true,
+            "properties": {
+              "handedOver": {
+                "type": "boolean"
+              },
+              "id": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "title": {
+                "maxLength": 200,
+                "type": "string"
+              },
+              "traced": {
+                "type": "boolean"
+              },
+              "where": {
+                "maxLength": 2048,
+                "type": "string"
+              }
+            },
+            "required": ["handedOver", "id", "title", "traced", "where"],
+            "type": "object"
+          },
+          "maxItems": 64,
+          "type": "array"
+        }
+      },
+      "required": ["available", "tabs"],
+      "type": "object"
+    },
     "CancelParams": {
       "additionalProperties": true,
       "properties": {
@@ -5249,6 +5315,24 @@
     "SessionCapabilities": {
       "additionalProperties": true,
       "properties": {
+        "browser": {
+          "additionalProperties": true,
+          "properties": {
+            "actions": {
+              "enum": ["ask", "auto"],
+              "type": "string"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "secrets": {
+              "enum": ["masked", "clear"],
+              "type": "string"
+            }
+          },
+          "required": ["actions", "enabled", "secrets"],
+          "type": "object"
+        },
         "disabledMcp": {
           "items": {
             "$ref": "#/$defs/CapabilityName"
@@ -5941,7 +6025,7 @@
           "type": "boolean"
         },
         "kind": {
-          "enum": ["mcp", "skill", "tool"],
+          "enum": ["mcp", "skill", "tool", "browser"],
           "type": "string"
         },
         "name": {
@@ -8245,6 +8329,14 @@
       },
       "result": {
         "$ref": "#/$defs/AttachmentPutResult"
+      }
+    },
+    "browser/status": {
+      "params": {
+        "$ref": "#/$defs/BrowserStatusParams"
+      },
+      "result": {
+        "$ref": "#/$defs/BrowserStatusResult"
       }
     },
     "daemon/discover": {

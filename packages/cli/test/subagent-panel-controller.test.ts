@@ -384,6 +384,9 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       "capabilities",
       "onCapabilities",
       "setCapability",
+      // The user's Chrome (browser-inspect B6a): `/browser` and the status bar's
+      // sign read it through the session. Forwarded in `persistingController`.
+      "browserStatus",
       // The artifacts the model presented (docs/feat/model-artifacts.md S6a): the
       // panel's list and the opener's bytes, both through the session.
       "listArtifacts",

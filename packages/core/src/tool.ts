@@ -212,6 +212,12 @@ export interface ToolContext {
    * agent loop.
    */
   readonly shapeResult?: (result: ToolResult, signal?: AbortSignal) => Promise<ToolResult>;
+  /**
+   * The session's LIVE browser secrets switch (docs/feat/browser-inspect.md
+   * B5b), read at call time so a mid-turn flip reaches the next call. Absent →
+   * `"masked"` (the safe direction).
+   */
+  readonly browserSecrets?: () => "masked" | "clear";
 }
 
 export interface Tool<Input = unknown> {

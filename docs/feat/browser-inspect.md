@@ -522,6 +522,233 @@ slice table names B6 but the doc carried no Implementation section for it. Writt
 
 *— claude-sonnet-4-5, 2026-11-25*
 
+*(Superseded by «### B5b — Implementation» and «### B6 — Implementation» below.)*
+
+### Owner decision — B5b → B6
+
+Owner, 2026-11-25 ~20:40, verbatim: **«1»** = option (a) of «### B6 — STOP»: build B5b first (the per-session `capabilities.browser {enabled, secrets, actions}` wired through the daemon set/persist path, auto mode for browser actions via the single broker — never a lasting approval for pod-supplied input, §7 —, the secrets masking switch, and an additive `browser/status` read method for the phone page), then B6 complete as the owner's mockups (Q1 B, Q2 A, Q3 B, Q4 B; `.tentacle/mockups/browser-b6/`).
+
+STATUS B5b+B6: APPROVED (owner decision 2026-11-25)
+
+*— claude-opus-5-5 (planner, recording the owner's decision), 2026-11-25*
+
+### B5b — Implementation
+
+> `Type: feat (slice) · Size: M · Blast: load-bearing (the auto-answer path of the single broker, persisted caps, a new wire method) · Suited: Opus exec + fresh-context Opus review`
+
+#### Load-bearing assumption (PROVED from the source)
+
+**A browser auto answer can be given by the daemon that hosts the session, from that session's own LIVE switch, as an allow-once through the daemon's existing answer path — and that daemon is always a laptop host the user owns.**
+
+1. Browser tools exist only where `buildAgent` gets `options.browser` (`cli/src/wiring.ts:1149-1158`), passed only by the worker (`cli/src/worker.ts:127`, `:204`) and `serve` (`cli/src/serve.ts:268`, `:790`), never by `tunnelledAgent` / `podSessionHost` (B4 load-bearing check). So a `browser_action` ask is only ever raised inside a trusted laptop daemon; a pod daemon cannot reach `hub.sock` at all.
+2. The tool's ask lands in the hosted session's requester: the tools get `permissions.request` (`wiring.ts:1155`), whose requester is `awaitDecision` (`daemon/src/hosted-session.ts:1378`, `:1512`).
+3. That path already answers asks itself, "as the computer": `autoAnswers` (`:1825-1833`) → `autoAnswer` (`:1845-1854`) → `resolvePermission(…, "allow_once")`. The answer is never a rule, and it comes only after the ask is recorded and shown. It is re-decided at show time against live values (`:1591-1601`). It works unattended: `blockingUnsupported` is skipped when `autoAnswers` holds (`:1541-1543`).
+4. A daemon-internal slack never crosses the wire. `toPermissionRequestUpdate` builds the update field by field (`daemon/src/permission-map.ts:46-71`). The client rebuilds the request from an allowlist (`client/src/permission-router.ts:106-124`), which is the `hopAuto` pattern (`core/src/permission.ts:56-67`). Client-side, `autoApproves` refuses `browser_action` (`:353`), so no surface answers one.
+5. Today `autoAnswers` is gated on `answersAutoAccept`, which only `serve` sets (`serve.ts:815`). The browser branch must NOT be gated on it, because the worker hosts browser sessions too.
+
+**First executor step (red):** a daemon test raises `{kind: "browser_action", browserAuto: true}` on a host WITHOUT `answersAutoAccept`, with the session's `actions: "auto"`. It must be answered `allow_once`; today it never is.
+
+**Second assumption (the secrets switch is read live):** `ToolContext` is built once per turn (`agent/src/agent.ts:1446-1453`), and `setCapabilities` swaps `readCapabilities` (`:1107-1109`). A getter that dereferences `this.readCapabilities` at call time therefore sees a mid-turn flip. A getter that captures the function at turn start does not (mutation target).
+
+#### Preconditions (verified)
+
+- `SessionCapabilitiesSchema` holds the three disabled sets (`protocol/src/session.ts:1693-1697`). It is a strip schema (§7), so an optional field is free.
+- The delta path: `connection.ts:424-426` → `hosted-session.ts:3990-4027`. That path applies the op, calls `agent.setCapabilities`, writes `log.capabilities`, persists, and emits the display `capabilities` update with `by`. The log entry is non-critical (`session-log.ts:215-219`, `:596`); the update is display (`updates.ts:383-386`, `:597`).
+- The shared rule: `applyCapabilityOp` (`core/src/capabilities.ts:70`), also used by the client's pre-open preview.
+- Outside states go through `normalizeCapabilities` (`hosted-session.ts:638-645`), which rebuilds ONLY the three sets. That covers the seed (`:3961`: resume from the laptop copy, `/clear` fork, hop target) and the serve reload (`:1304-1311`).
+- The A2A adapter is our in-process driver and never sends `session/set_capability` (`daemon/src/external/session-driver.ts:1-12`; `rg setCapability packages/daemon/src/external` → no hit). `EXTERNAL_ANSWER.browser_action` is `"owner-only"` (`permission.ts:108`) and stays so.
+- The relay forwards frames with no method allowlist (`rg SetCapability apps/relay` → no hit).
+- Hub `claim` creates no Chrome UI (`apps/browser-extension/src/ops.js:415-417`), but it TAKES the lease (`cli/src/browser-host.ts:241-243`).
+
+#### Design
+
+1. **State (core).** In `core/src/capabilities.ts`:
+   - `BrowserSwitches = {secrets: "masked" | "clear"; actions: "ask" | "auto"}`.
+   - `SessionCapabilities.browser?: BrowserSwitches`. Absent means `BROWSER_DEFAULTS` (masked / ask).
+   - `browserSwitchesOf(caps)`.
+   - `CapabilityKind` gains `"browser"`. For a browser op, `applyCapabilityOp` maps name `"auto"` to `actions` and `"clear"` to `secrets`, with `enabled` meaning the non-default value. Any other name is a `CapabilityRefusal`. A no-op returns the identical state, as today.
+2. **Wire (protocol).**
+   - `BrowserCapabilitySchema = {enabled, secrets, actions}`, carried as `SessionCapabilitiesSchema.browser?`. It is **present ⇔ the session's host has the user's Chrome**, and the UIs use its presence as the availability signal.
+   - `enabled` is a **projection**: `toWireCapabilities` computes it as true iff no browser-group tool is in `disabledTools`. B4 drift 1 kept the group as the one truth, and `fromWireCapabilities` ignores `enabled`, so "enabled" is never stored twice. Setting it is the existing `{kind: "tool", name: "browser"}` op.
+   - `SetCapabilityParamsSchema.kind` gains `"browser"`; the names `auto` / `clear` are validated daemon-side.
+   - New method `browser/status` (point 6).
+   - **Versioning:** all additive, so no `protocol.d` note. An older daemon refuses kind `browser` with InvalidParams (the `tool`-kind precedent, `session.ts:1846-1848`) and answers `browser/status` with MethodNotFound. An older client drops `browser`. Stated limit: a FUTURE new enum value would fail an older client's parse, so that change will need a note.
+3. **Daemon set/persist.** `setCapability` refuses kind `browser` with InvalidParams «this session has no browser» when the host has no browser port. Otherwise it applies it like any op: `agent.setCapabilities`, `log.capabilities(next)` (the switch is recorded, Q2), persist, emit with `by`. `toWireCapabilities(state, browserAvailable)` adds `browser` only when the host has the browser. **Sweep:** switching `auto` ON answers the pending SHOWN asks that carry the slack, mirroring `setAutoAccept` (`:3915-3927`). Switching it OFF answers nothing.
+4. **Never restored, never carried (§7).** `browser` is set ONLY by a live `session/set_capability`. `normalizeCapabilities` keeps dropping it, and the doc comment there says so on purpose. That function covers the seed (resume, fork, hop) and the serve reload. A log a pod wrote, which the laptop persists, or an old record can therefore never turn auto or clear on: every created, re-created or reloaded session starts masked / ask. Stated behaviour: after a `serve` restart, auto and clear are off. This follows the precedent of B4 fix round 1 #3, where the browser is off after a restart.
+5. **Auto through the single broker.**
+   - Core: `PermissionRequest.browserAuto?: true` is a slack. It is laptop-internal and never on the wire. Only the browser tools' `gate()` sets it, and only when the verdict is not `hard`. Q3: payment clicks and password/card typing ALWAYS ask. Cross-domain navigation and the first action on a handed-over tab are not `hard`, so in auto they are answered.
+   - The tool never reads `actions`: it states eligibility, and the daemon decides on the live switch.
+   - Pure `browserAutoAnswers(req, caps)` in core: `kind === "browser_action" && browserAuto === true && actions === "auto"`.
+   - `hosted-session.autoAnswers` becomes `browserAutoAnswers(req, this.caps) || <the existing rule>`. The new branch is gated on neither `answersAutoAccept` nor `autoAccept`.
+   - `autoApproves` is unchanged, so the session's auto-accept never answers a browser ask.
+   - Each answer is `allow_once`, shown and resolved to every attached client (the audit trail), and never a rule.
+6. **`browser/status` (read).**
+   - Params: `{sessionId}`. Result: `{available, link?: {state: "connected" | "not_running" | "extension_missing" | "not_installed", managed}, heldElsewhere?, tabs: [{id, title, where, handedOver, traced}] ≤ 64}`.
+   - It is answered by `HostedSession.browserStatus()` through a host port, the `SessionHost` option `browser?: BrowserHostPort {status(uid); retitle(uid, title)}`. The worker and `serve` pass it, beside `browser`. A pod passes none, so it answers `{available: false}`. This settles Review B6 attack 3.
+   - The port lives in cli `browser-status.ts`. A connected link gives `connected` directly. Otherwise it probes: the manifest check (extracted from `statusBrowser`, `browser-install.ts:123-156`, into a pure helper), `probeSocket(hub)`, Chrome running (`pgrep -x "Google Chrome"`, darwin), and the managed-policy path. The pure `linkState(facts)` in `@tentacle/browser` turns these into the state.
+   - **Tabs are read only for a session that already claimed.** An unclaimed session gets `[]` with no hub op: a read never takes a lease. A hub refusal of the lease gives `heldElsewhere: true` with `[]`.
+   - `where` is host + path only: query and fragment are dropped, then the session redactor's `url()` runs. `title` goes through the redactor and `textNet`, capped at 200 chars.
+   - Async handler, no lock (§7 peer).
+7. **The secrets switch in the tools.**
+   - `ToolContext.browserSecrets?: () => "masked" | "clear"` (core `tool.ts`). The agent builds it live (assumption 2). Absent means masked.
+   - Each toolset call picks its redactor: the session's when masked; when clear, the new `IDENTITY_REDACTOR` (same interface, passthrough, in `@tentacle/browser`), with `textNet` skipped.
+   - Still masked in clear mode: an ask's title and detail (asks travel to the phone and to notifications), and DOM password / cc / otp values. Those values are never read, extension-side; D2 names headers, cookies and tokens only.
+   - `tools.redactSecrets` (the global transform) still applies if the user set it.
+   - Results produced in clear stay in clear in history and in the log (Q2). Switching back to masked masks only new results.
+8. **Group retitle (Q9, B4 drift 2), through the same port.** `HostedSession.setTitle` (`:4858`) and the port's attach call `retitle(uid, title)`. The toolset keeps the title for the first `claim`, and for a session that has claimed sends a new hub op `retitle {sessionUid, title}` (ownership: `holds`). The extension calls `tabGroups.update` with `tentacle · <title>` and keeps the tabs. Best effort: an error is swallowed, for example from an older loaded extension that does not know the op. The HubOp change is additive, so `BROWSER_LINK_VERSION` does not move (B4 precedent).
+
+#### Files (dependency order)
+
+1. `packages/protocol/src/session.ts` (`BrowserCapabilitySchema`, `capabilities.browser`, kind `browser`, `BrowserStatus{Params,Result}Schema`), `methods.ts` (`Method.BrowserStatus = "browser/status"` + `RequestSchemas`). `protocol.json` is regenerated at merge (never by hand).
+2. `packages/core/src/capabilities.ts`, `permission.ts` (`browserAuto` doc + `browserAutoAnswers`), `tool.ts` (`ToolContext.browserSecrets`).
+3. `packages/browser/src/redact.ts` (`IDENTITY_REDACTOR`), `link-schema.ts` (op `retitle`), `link-state.ts` (NEW, `linkState`); `apps/browser-extension/src/ops.js` (`retitle`).
+4. `packages/agent/src/agent.ts` (the live getter in `toolContext`).
+5. `packages/daemon/src/hosted-session.ts` (browser branch of `setCapability` + availability + sweep, `autoAnswers`, the `normalizeCapabilities` comment, `browserStatus()`, `setTitle` → `retitle`, the settings-swap path carrying `this.caps.browser`), `mapping.ts`, `connection.ts` (`Method.BrowserStatus`), `session-host.ts` (`browser?: BrowserHostPort` → hosted sessions).
+6. `packages/client/src/remote-client.ts` (`browserStatus`), `remote-session.ts` (kind union + `browserStatus()`).
+7. `packages/tools/src/browser.ts` (redactor pick, slack in `gate()`, `status(uid)`, `retitle`).
+8. `packages/cli/src/browser-status.ts` (NEW, the port), `browser-install.ts` (the pure manifest check), `worker.ts` / `serve.ts` (pass the port).
+9. `changelog.d/browser-inspect-switches.added.md`. No UI: without B6 nobody can turn auto or clear on, so B5b alone merges in the safe state.
+
+#### Failure modes
+
+| Case | How it converges |
+|---|---|
+| Pod session / host without the port | kind `browser` → InvalidParams; status `{available:false}`; no `capabilities.browser` → the UIs hide everything |
+| Resume / fork / hop / serve reload whose record says auto or clear (incl. a pod-written log) | dropped by `normalizeCapabilities` → masked / ask |
+| Auto switched OFF while an eligible ask is shown, or between its raise and show | `autoAnswer` / the show-time re-check read the live switch → a human answers |
+| Auto switched ON with eligible asks pending | the sweep answers the shown ones; `hard` ones stay |
+| `hard` action in auto | no slack → asks (Q3) |
+| Session auto-accept ON, browser auto OFF | `autoApproves` unchanged → a human answers |
+| Nobody attached (phone asleep) | auto: the daemon answers (OD5 skip); ask: held for a client, as today |
+| A2A caller | cannot set (the adapter never sends `set_capability`), cannot answer (`owner-only`) |
+| Agent rebuilt by a settings change | the swap applies `this.caps` incl. `browser` (test) |
+| Older daemon | InvalidParams → the existing `switchFailedNotice`; status MethodNotFound → link «unknown» |
+| Chrome closed / hub restarting during status | probes → `not_running` / `extension_missing`; tabs `[]`; never throws except UnknownSession |
+| Retitle on an older loaded extension | error swallowed; group keeps the uid title |
+| Two clients toggle at once | one total order, last echo wins (existing F4) |
+| Clear mode and the log | clear values land in `<uid>.jsonl` (Q2, accepted); the `capabilities` entry records `clear` |
+
+#### Tests (red first; each with its mutation target)
+
+- **core:** the browser-op table: on, off, idempotent identity, unknown name refused. The `browserAutoAnswers` table. `autoApproves` still refuses `browser_action` that carries `browserAuto` (mutation: the slack passes `autoApproves` → fail).
+- **protocol:** `browser` accepted and stripped on an older shape; `browser/status` registered; a `capabilities` entry with no `browser` still parses.
+- **daemon `browser-switches.test.ts`:**
+  - set → log entry + emit + `by`;
+  - no port → InvalidParams;
+  - **the load-bearing red** (auto answer on a host without `answersAutoAccept`);
+  - a `hard` ask in auto is not answered;
+  - the session's auto-accept never answers a browser ask;
+  - switching off before show → not answered;
+  - the switch-on sweep;
+  - **seed and reload with auto/clear in the record → masked / ask** (mutation: `normalizeCapabilities` keeps `browser` → fail);
+  - the emitted `permission_request` JSON never contains `browserAuto`.
+- **client:** `toPermissionRequest` never yields `browserAuto`, even with the field planted on the wire update.
+- **agent:** a mid-turn flip to clear is seen by the next call (mutation: capture at turn start → fail).
+- **tools:**
+  - a planted token is visible only in clear (read, net get), and the ask stays masked in clear;
+  - `gate()` sets the slack iff not `hard` (mutation: always set → fail);
+  - status of an unclaimed session → zero backend calls;
+  - `where` drops the query.
+- **cli:** the `linkState` table via injected probes; wiring: the pod paths get no port; single broker: the auto answer is reached through `wired.permissions`, and a second broker never sees it (the B5 spy pattern).
+- **extension:** `retitle` updates the group title and keeps the tabs.
+- **log:** a planted token is absent from `<uid>.jsonl` when masked and present when clear (extends the B4 log test).
+
+*— claude-opus-5-5, 2026-11-25*
+
+### B6 — Implementation
+
+> `B6a TUI · Size: M · Blast: cross-module · Suited: Sonnet exec` — `B6b iPhone · Size: M · Blast: cross-module · Suited: Sonnet exec` — ONE fresh-context Opus review over both (fewer reviews). B6b: simulator screenshots of every state below before the next build. Starts after B5b merges.
+
+#### Load-bearing assumption
+
+**Every mockup state is a pure function of (a) the session's `capabilities` (snapshot + display update; `browser` present ⇔ available) and (b) one `browser/status` read, and every change is a `session/set_capability`.** It holds by construction after B5b, and B6 adds no wire and no daemon code. Proof at the end of Execution: `git diff --stat` touches only `packages/tui`, `apps/mobile`, the pure client view module and the fragments; a view test renders every state from fixtures.
+
+#### Preconditions (verified)
+
+- **TUI:**
+  - Panels are one registry line each (`tui/src/panels/registry.ts:92`); `/tools` is `panels/tools.ts`.
+  - The switch helpers are in `capability-toggles.ts`: `switchGlyph` `:119`, `groupSwitch` `:182`, `CAPS_HINT` `:206`, `switchOp` `:212`, `switchFailedNotice` `:234`.
+  - The status marker `capsMarker` (`:258`) is used by `app-layout.ts:278` → `AppView.tsx:288`.
+- **Phone:**
+  - `SessionInfoSheet.tsx`: the Session band ends with Auto-accept (`:418-433`); `onSwitch` takes only `"mcp" | "skill"` (`:48`).
+  - `tools-view.ts:36` likewise; `session-info.ts` is the view-model.
+- **Client:** `RemoteSession.setCapability(kind)` (`client/src/remote-session.ts:483`).
+- **Mockup facts** (`.tentacle/mockups/browser-b6/`, decoded data module):
+  - Link states: connected · not running · extension missing · org-managed.
+  - Sheet row value: `◉ On · asks · masked ›`.
+  - Page: back «Session info». Bands «Chrome» (Link), «This session» («Browser tools», «Act without asking», «Show secrets»), and «Tabs · tentacle · <title>» with subtitles «Opened by the agent» / «Handed over by you · acting asks first».
+  - Strip: `Secrets visible · Browser acts alone` + «Change ›» → the Browser page.
+  - `⊘ N tools off` stops counting the default-off browser group.
+- **Q4 is iPhone-only.** The proposal's TUI composer strip is dropped; the TUI's sign is Q2-A's status bar.
+
+#### Design
+
+- **Shared pure (client):** `packages/client/src/browser-status-view.ts` (bundled into the phone, like `pending-capabilities.ts`):
+  - `linkLabel(status)`: `◉ connected` / `○ Chrome not running` / `✕ extension missing` / `✕ not installed — run tentacle browser install` / `unknown`, plus `managed by your organization`;
+  - `tabSubtitle(tab)`;
+  - `statusRefreshDue(event)`: true on open or attach, on a `capabilities` update, and on the `tool_call_update` that completes a `browser_*` call.
+- **B6a TUI:**
+  - Pure `tui/src/browser-view.ts`:
+    - `browserPanelRows(caps, status)`: title + link; three switches, with `browser tools` via `groupSwitch`, and auto and clear `[–]` locked while the tools are off; then the tabs.
+    - `browserStatusSign(caps, status)`: `◉ chrome N tabs` only while enabled, plus `▲ AUTO` / `▲ SECRETS VISIBLE` only when on; null otherwise.
+    - `browserSubcommand(arg)`: the shortcuts `/browser on|off|auto|ask|clear|masked`.
+  - `capsMarker` excludes the browser group.
+  - `panels/browser.ts` (same keys and hint as `/tools`) + one registry line; `/browser` in `commands.ts`; `CapKind` gains `"browser"`.
+  - The sign renders in `app-layout.ts` / `AppView.tsx` with the existing `warn` styler. Glyph and upper case carry the meaning; colour only reinforces it (owner colour-blind).
+  - With no `caps.browser`: the notice «no browser in this session».
+- **B6b iPhone:**
+  - Pure `apps/mobile/src/browser-view.ts`:
+    - `browserRowValue(caps)`;
+    - `browserPageBands(caps, status, title)`;
+    - `riskStripItems(caps)`: null unless enabled and (auto or clear);
+    - `switchDisabled(caps)`: auto and clear dimmed while the tools are off, per the UI empty-action standard (dimmed + light haptic + inline label).
+  - `SessionInfoSheet.tsx`: a «Browser» row with chevron in the Session band, only when `caps.browser` is present. `onSwitch` gains the kinds `"tool" | "browser"`.
+  - New dumb `screens/BrowserPage.tsx`. The controller reads `browser/status` on open and on `statusRefreshDue`.
+  - `RiskStrip` above the composer in `SessionScreen.tsx`: square, full width, `--c-warn-text` on `--c-warn-bg`, glyph + word; «Change ›» opens the page.
+- **Turning the tools off keeps auto/clear's stored values**: dimmed, with sign and strip hidden. Turning the tools back on shows `▲ AUTO` at once.
+
+#### Files
+
+`packages/client/src/browser-status-view.ts` (NEW) · `packages/tui/src/{browser-view.ts (NEW), panels/browser.ts (NEW), panels/registry.ts, commands.ts, capability-toggles.ts, app-layout.ts, AppView.tsx}` · `apps/mobile/src/{browser-view.ts (NEW), screens/BrowserPage.tsx (NEW), screens/SessionInfoSheet.tsx, screens/SessionScreen.tsx, session-info.ts, session-controller.ts}` + its navigation entry · `changelog.d/browser-inspect-ui.added.md`.
+
+#### Failure modes
+
+| Case | Behaviour |
+|---|---|
+| `caps.browser` absent (pod, older daemon) | no row, no switches, no sign |
+| `browser/status` errors / MethodNotFound | link «unknown»; the switches still work from `capabilities` |
+| A set fails | the existing failure notice / phone error; the UI shows only the daemon's echo, never a local guess (red: render from intent) |
+| Two devices | both converge on the `capabilities` echo |
+| The user closes a tab in Chrome | count refreshed at the next `statusRefreshDue` trigger — **debt**: a display update pushed on hub events (free to add, §7) |
+
+#### Tests
+
+- `tui/test/browser-view.test.ts`: a table over every mockup state (connected default, auto + clear, not running, extension missing, managed, unavailable): rows, sign, subcommands, `capsMarker` without the browser group.
+- An ink app test (the `caps-before-first-message-app.test.tsx` pattern): `/browser` → space on auto sends `set_capability{kind: "browser", name: "auto", enabled: true}`. `▲ AUTO` appears only after the echo (mutation: render from local intent → fail).
+- Mobile view tests: row value, strip null for the defaults, switch disabled. A screen test: «Change ›» navigates to the page.
+- Client view tests: link labels, the refresh rule.
+- Validation (not a test): a simulator sweep of every state, both themes.
+
+*— claude-opus-5-5, 2026-11-25*
+
+#### B6a amendments (the executor, where the plan contradicted the code)
+
+- **Files the list misses.** The design needs them and adds no wire and no daemon code:
+  - `cli/src/local-runtime.ts`: the TUI's session is a wrapper that forwards each method, so `browserStatus` needs a one-line forward. The load-bearing proof's file set is therefore «tui, mobile, the client view module, that forward, the fragments».
+  - `tui/src/`: `commands/browser.ts` (NEW), `commands/registry.ts` and `commands/context.ts` (a command is its own file; `commands.ts` only derives the vocabulary), `panels/types.ts`, `panel.ts`, `usePanels.ts`, `useBrowserStatus.ts` (NEW: nothing held a `browser/status` read), `App.tsx` (wiring), `app-types.ts`, `status-line.ts` and `components/StatusBar.tsx` (the status row's width is budgeted in the first and painted by the second).
+- **«The browser is on» is not the wire's `enabled`.** `enabled` is false as soon as ONE browser tool is off (`core/src/capabilities.ts:53`), while auto still answers the others (`browserAutoAnswers`, `core/src/permission.ts`, reads only `actions`). Hiding `▲ AUTO` there would be false. So the browser is on, for the sign and the locks, while ANY browser tool is offered (`browserOffered`, in the client view module, for B6b's strip too).
+- **A session not open yet** reports no `caps.browser` (the pre-open preview has none): `/browser` says it applies to a started session, not «no browser».
+- **Locked switches in the shortcuts:** with the tools off, `/browser auto|clear` is refused with a notice; `ask|masked` (the safe direction) is sent.
+- **`heldElsewhere`** gets its own panel row, and the sign shows no tab count (never «0 tabs» for a list that was not read).
+
+#### B6b amendments (the executor, where the plan contradicted the code)
+
+- **The sheet's controller is `session-info-controller.ts`**, not `session-controller.ts`: it owns the pulls, the generation counter and the switches' follow, so the `browser/status` read lives there. Files the list misses: `session-screen-controller.ts` (the strip must follow the switches with the sheet CLOSED, and it sees a browser tool finish), `App.tsx` (the port forwards `browserStatus`), `ui/RiskStrip.tsx`.
+- **No navigation entry.** The Browser page is a page of the Session info sheet: the screen publishes it on the same `info` route (`sheet-plan.ts` unchanged), with `‹ Session info` back.
+- **`SessionInfoSheet.onSwitch` stays `mcp | skill`** (its rows switch nothing else); the kinds `tool | browser` are on the controller's `setCapability` and the Browser page's `onSwitch`.
+- **The phone has no `⊘ N tools off` marker** (`toolsSummary` counts servers and skills only): nothing to change.
+- **`tabSubtitle(tab, auto)`**: under auto a handed-over tab reads «Handed over by you» (B6a's recorded debt: the mockup's «acting asks first» is false then).
+
 ## Execution
 
 ### B1 — `@tentacle/browser` pure core (as built)
@@ -676,6 +903,185 @@ changed). One doc edit: the «B6 plan (executor proposal)» above.
   worktree root.
 
 *— claude-sonnet-4-5, 2026-11-25*
+
+### B5b — the switches, the auto answer, `browser/status` (as built) — DONE
+
+**Load-bearing check, re-run first.** All five points of «### B5b — Implementation» hold at
+`78717493` (`autoAnswers` gated on `answersAutoAccept` + `autoAccept`; `autoAnswer` →
+`resolvePermission(allow_once)`; the show-time re-check; the OD5 skip; the field-by-field
+`toPermissionRequestUpdate`). **Red** (`packages/daemon/test/browser-switches.test.ts` A1, before
+any daemon edit, core op already in): `timed out: () => !hosted.running` — a `browserAuto` ask
+with `actions: auto` on a host without `answersAutoAccept` was never answered. Green after the
+daemon branch.
+
+Built, in the plan's order:
+1. **Protocol** — `SessionCapabilitiesSchema.browser? {enabled, secrets, actions}`, kind
+   `browser` on `SetCapabilityParamsSchema`, `BrowserStatus{Params,Result}Schema` +
+   `MAX_BROWSER_STATUS_TABS` (`protocol/src/session.ts`); `Method.BrowserStatus` +
+   `RequestSchemas` (`methods.ts`). `protocol.json` regenerated (`bun run schema:export`) and the
+   two new methods' fixtures added to `protocol/test/json-schema.test.ts` (its coverage test
+   demands one per method). No `protocol.d` note (additive).
+2. **Core** — `BrowserSwitches`, `BROWSER_DEFAULTS`, `browserSwitchesOf`, `browserToolsEnabled`
+   (the `enabled` projection), kind `browser` + `applyBrowserOp` (identity on no-op, refusal on
+   any name but `auto`/`clear`) in `capabilities.ts`; `PermissionRequest.browserAuto` +
+   `browserAutoAnswers` in `permission.ts` (`autoApproves` untouched); `ToolContext.browserSecrets`.
+3. **`@tentacle/browser`** — `IDENTITY_REDACTOR` (`redact.ts`), op `retitle` (`link-schema.ts`),
+   pure `linkState` (`link-state.ts`, NEW); extension `retitle` (`ops.js`: updates `s.title`
+   and the group title, keeps the session and its tabs; unclaimed → refused).
+4. **Agent** — `toolContext.browserSecrets` dereferences `this.readCapabilities` at call time.
+5. **Daemon** — `BrowserHostPort` (`hosted-session.ts`, re-exported by `session-host.ts`);
+   `SessionHost` option `browser` → `hosted.attachBrowser(port)` right after construction (the
+   `imagesPolicy` shape, not a 16th constructor argument — the port is not needed inside the
+   constructor: a reloaded session's caps are normalized, so no browser ask can auto-answer
+   there). `autoAnswers` = `browserAutoAnswers(req, this.caps) ||` the existing rule;
+   `setCapability`: kind `browser` without a port → InvalidParams «this session has no browser»,
+   the switch-on sweep after the emit; `toWireCapabilities(state, browserAvailable)`;
+   `fromWireCapabilities` reads `browser` (so a record carries it, Q2) and `normalizeCapabilities`
+   keeps dropping it (comment says why); `hasDisabled` counts a switch that is on (a new segment
+   re-states it); the log writer goes through `toWireCapabilities`; `browserStatus()` (no port →
+   `{available:false, tabs:[]}`, a port fault → `{available:true, tabs:[]}`); `setTitle` →
+   `port.retitle` (swallowed). `connection.ts` routes `Method.BrowserStatus` (async, no lock).
+6. **Client** — `RemoteClient.browserStatus`, the `browser` kind on `setSessionCapability` /
+   `setCapabilityOn` / `RemoteSession.setCapability`, `RemoteSession.browserStatus()`.
+7. **Tools** — per call, `run` records the live `ctx.browserSecrets()`; `redactor`/`clean` pick
+   `IDENTITY_REDACTOR` and skip `textNet` in clear; the ask's title/detail go through a separate
+   always-masked path; `gate()` sets `browserAuto` iff `!verdict.hard`; `status(uid)` (no claim →
+   `[]` and no op; lease refusal → `heldElsewhere`; host+path only, masked, ≤ 64 tabs, titles
+   ≤ 200) and `retitle(uid, title)` (kept for the first `claim`, sent when claimed, errors
+   swallowed).
+8. **CLI** — `browser-status.ts` (NEW: `createBrowserHostPort`, `defaultBrowserLinkProbes` with
+   `pgrep -x "Google Chrome"` on darwin); `nativeHostInstalled` + `chromeManaged` extracted from
+   `statusBrowser` (same output); the worker and `serve` build the port over their ONE link +
+   toolset and pass it as `SessionHost.browser`; `podSessionHost` / tunnelled paths untouched.
+
+**Drift from the Implementation (and why):**
+- **D1 — `seedCapabilities` is a second layer.** N1 (seed with auto/clear) stayed GREEN under
+  the plan's mutation «`normalizeCapabilities` keeps `browser`»: `seedCapabilities` builds its
+  state from the three sets only, so the seed's `browser` never reaches `normalizeCapabilities`.
+  Safe direction (two layers). The test's mutation comment now names the mutation that reds it
+  (both layers), verified below. The reload path (N2) is guarded by `normalizeCapabilities` alone.
+- **D2 — a pre-open browser flip is refused client-side** (`RemoteSession.setCapability` on a
+  lazy session throws «the browser switches apply to an open session»). The plan did not cover
+  the pre-open preview; previewing a switch whose availability is only known after the open
+  would be a guess. `CapabilityFlip` / `SwitchFailure` keep their three kinds.
+- **D3 — the `tools` redactor pick is per SESSION per call** (a `modes` map set at `run` start),
+  not threaded through every helper: concurrent calls of one session read the switch as of the
+  latest call start. The ask path never depends on it (always masked).
+- **D4 — changelog fragment named `browser-inspect-switches.added.md`** (the plan's name and the
+  `browser-inspect-tools.added.md` precedent): `browser-inspect.added.md` and
+  `browser-inspect.changed.md` already exist from earlier slices, one bullet each.
+- **D5 — the mobile app and the TUI keep their own 3-kind `CapabilityKind` / `CapKind`**: no UI
+  in B5b (B6). The phone parses the optional `browser` and ignores it.
+
+**Mutations** (each applied to the source, the named test run, the file restored from a scratch
+copy; `git status` confirmed the restores):
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | browser branch of `autoAnswers` gated on `answersAutoAccept` | daemon A1, W4 |
+| M2 | `normalizeCapabilities` keeps `browser` | daemon N2 (N1 green → D1) |
+| M2b | M2 + `seedCapabilities` carries `seed.browser` | daemon N1, N2 |
+| M3 | drop the switch-on sweep | daemon W4 |
+| M4 | `autoApproves` lets `browser_action` + `browserAuto` through | core autoApproves row, daemon W2, client slack test |
+| M5 | agent getter captures `this.readCapabilities` at turn start | agent mid-turn flip |
+| M6 | `gate()` sets the slack on every ask | tools: payment click, password typing rows |
+| M7 | `run` ignores `ctx.browserSecrets` | tools read + net get, daemon L1 (`<uid>.jsonl`) |
+| M8 | the ask's title/detail through the mode's redactor | tools «ask stays masked in clear» |
+| M9 | `status` claims first | tools «unclaimed: zero hub ops» |
+| M10 | `wiring.ts` hands the browser tools a second broker | cli single-broker (turn hangs, no click) |
+
+**Tests added** (all green): `daemon/test/browser-switches.test.ts` (15: A1 load-bearing, S1–S3,
+W1–W5, N1–N3, P1–P2, L1), `core/test/browser-switches.test.ts` (10), `protocol/test/browser-switches.test.ts`
+(6), `tools/test/browser-switches.test.ts` (10), `agent/test/browser-secrets-live.test.ts` (1),
+`browser/test/link-state.test.ts` (6), `cli/test/browser-status.test.ts` (8: port table,
+faults, pod has no port, worker single-broker auto answer), +1 in
+`client/test/browser-action-permission.test.ts`, +1 in `apps/browser-extension/test/ops.test.ts`.
+
+**Verification run here** (narrow, per the budget): the 24 touched/covering files → `247 pass,
+0 fail`; `bunx biome check` on the 33 changed files → clean; `tsc` over the touched import graph
+(scratch tsconfig extending the root one, entry points `cli/src/main.ts`, `serve.ts`, `worker.ts`
+and every new test) → 0 errors. The full gate (`bun run check`, incl. `tsc -p apps/mobile`) is
+the orchestrator's script.
+
+**Unverified:** the real-Chrome path of `retitle` (`chrome.tabGroups.update` on a live group) and
+`pgrep` probing — covered by fakes only; verify with `tentacle browser status` + a rename in a
+live session with the extension reloaded.
+
+*— claude-opus-5-5, 2026-11-25*
+
+### B6a — TUI (as built) — DONE (B6b iPhone not touched)
+
+**Load-bearing check, re-run first** (at `cdfe11ab`): HOLDS. `caps.browser` is on the wire
+(`protocol/src/session.ts`, built by `daemon/src/mapping.ts:157`), `RemoteSession.setCapability`
+takes kind `browser` and `RemoteSession.browserStatus()` exists (`client/src/remote-session.ts:517`).
+No wire or daemon change was needed: `git diff HEAD --stat -- packages/protocol packages/daemon
+packages/agent apps` is empty, so `protocol.json` is untouched. The plan's file SET was wrong
+(«B6a amendments», written before the code).
+
+**Red first.** The three new suites against empty stubs of the two pure modules: `2 pass, 42 fail`,
+all on assertions (the two passes are the «another tool is not due» negatives). After the
+implementation: `44 pass, 0 fail`.
+
+Built:
+1. **Client** — `browser-status-view.ts` (NEW): `browserOffered`, `linkLabel`, `tabSubtitle`,
+   `statusRefreshDue`; exported for B6b.
+2. **CLI** — the runtime's session wrapper forwards `browserStatus` (`local-runtime.ts`).
+3. **TUI, pure** — `browser-view.ts` (NEW): panel rows and their ops, the sign, `/browser <word>`,
+   `browserDoneKey`. `capability-toggles.ts`: kind and `caps.browser`; `capsMarker` skips the
+   browser group. `status-line.ts`: the sign is budgeted right after the ctx figure; short, its
+   text goes first and the `▲` warnings stay.
+4. **TUI, wiring** — `panels/browser.ts` + one registry line, `commands/browser.ts`,
+   `useBrowserStatus.ts` (one effect of its own; `App` keeps its 22), `sendSwitch` in `App.tsx`
+   shared by Space and the shortcuts (the Space code moved, unchanged), `StatusBar.tsx` paints the
+   warnings with `palette().warn`.
+
+**Drift from the Implementation:** the five points of «B6a amendments», and:
+- Five existing pins gained the new command/panel (`app-commands`, `commands-registry`,
+  `panels-registry`, `app-panels-structure`; `/help`'s visible window now checks `/browser`,
+  because `/move` scrolled out).
+- A locked row says `browser tools off` on itself; Space on it (or on a tab row) is silent.
+- The mockup HTML was not consulted (outside this worktree): every string is the plan's.
+
+**Mutations** (`.tentacle/tmp/browser-inspect/mutate-b6a.ts`: one at a time, file restored; all RED):
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | `sendSwitch` flips `auto` locally (render from intent — the plan's target) | app «`▲ AUTO` only after the echo» |
+| M2 | `browserOffered` = every tool on (the wire's `enabled`) | 3: partly-off rows, sign, client rule |
+| M3 | `capsMarker` counts the browser group | view marker, app `/browser off` |
+| M4 | the sign says `0` for an unread list | view «no count» |
+| M5 | no sequence guard in the hook | app «older answer landing late» |
+| M6 | a failed read keeps the old status | app «fails after a good one» |
+| M7 | `doneKey` not a trigger | app «finished browser tool re-reads» |
+| M8 | `panelOpen` not a trigger | app «opening the panel re-reads» |
+| M9 | accepted reads not pushed to the panel | app «opening the panel re-reads» |
+| M10 | no tools-off lock on `/browser auto\|clear` | view «tools off» |
+| M11 | panel rows not locked while off | view «tools off … locked» |
+| M12 | a short row drops the warnings | view «warnings stay» |
+| M13 | tab title not through `oneLine` | view «one clean line» |
+| M14 | own op not recorded as pending | app `/browser off` echo |
+| M15 | a session without the browser is read | app «no browser», «older answer» |
+| M16 | the CLI forward dropped | cli «forwards the read» |
+
+**Verification run here** (narrow): `bun test --parallel packages/tui/test` + the client view,
+`local-runtime`, `session-capabilities-resume` and `browser-status` files → `3214 pass, 0 fail`
+(five app-test sync points tightened afterwards; that file and four neighbours re-run: `75 pass,
+0 fail`). `bunx biome check` on `cli/src`, `client/src`, `tui/src`, `tui/test` and the touched
+test files → clean. `tsc` over the touched import graph (scratch
+`.tentacle/tmp/browser-inspect/tsconfig.b6a.json`) → ONE error, in a file this slice does not
+touch: `agent/src/harness/a2a-map.ts(520,5)` TS2739 (`URL`); whether the full config shows it too
+is for the orchestrator's gate (`bun run check`), not run here.
+
+**Unverified / debt:**
+- No live TUI run against a real Chrome; the frames are ink-testing-library's.
+- The handed-over subtitle «acting asks first» (mockup) is FALSE while auto is on: B5b answers a
+  handed-over tab's first action in auto. Owner/B6b to reword.
+- Another device turning auto/clear on adds no transcript notice; only the sign changes.
+- A tab closed in Chrome shows until the next refresh trigger (the plan's debt).
+- NOT part of B6a and still open before merge: «Owner request — extension icon» (the PNGs are not
+  embedded by `browser-extension-assets.ts`).
+
+*— claude-sonnet-5-5, 2026-11-26*
 
 ## Review
 
@@ -958,3 +1364,230 @@ Mockups `.tentacle/mockups/browser-b6/index.html`. Owner, verbatim: «per browse
 - **Executor behaviour**: correct escalation per §0 (stopped, cited, two options, no scope picked alone); it self-reports a wrong `cd` to the main checkout (read-only, re-verified).
 
 *— claude-opus-5-5, 2026-11-25*
+
+### Owner request — extension icon (2026-11-26 ~01:15)
+
+Owner: «il plugin chrome è pronto? se non hai finito completa anche quello, con tanto di logo piccolo stesso colore dell'app» → «intendevo polipetto». Done by the orchestrator in this branch: `apps/browser-extension/icons/icon-{16,32,48,128}.png` = Polpetto in COLOUR as the app icon shows him (owner screenshot «questo intendevo»): `apps/mobile/src/mascot-scenes.ts` `MASCOT_BITMAP` with the `cyan` palette (`MASCOT_PALETTES.cyan`: K #0E8AA8, E #083A47, F #5FE0F2, S #3FCFE6, B #B7F3FB), transparent background, integer-scaled pixels (16 px is a downscale); `manifest.json` `icons` + `action.default_icon`. **Open for the executor (with B6):** `packages/cli/src/browser-extension-assets.ts` embeds TEXT files only, so `tentacle browser install` would write a manifest pointing at icons it never writes — Chrome then refuses to load the extension. Embed the PNGs as binary (e.g. Bun `with { type: "file" }` read as bytes, or base64 constants generated from the files) and make `browser-install.ts` write them byte-exact; `browser-install.test.ts` must fail while an icon is missing or stale (red first). Do not merge before this holds.
+
+*— claude-opus-5-5 (orchestrator), 2026-11-26*
+
+## Execution
+
+### B6b — iPhone, and the extension icon (as built) — both DONE in code; simulator sweep NOT run
+
+**Load-bearing check, re-run first** (at `6b058b8a`): HOLDS. `capabilities.browser` is on the wire and
+`RemoteSession.setCapability` takes `browser` / `browserStatus()` exists
+(`client/src/remote-session.ts`); every state below is built from those two reads and sent as
+`session/set_capability`. `git diff --stat -- packages/protocol packages/daemon packages/agent
+packages/tui apps/browser-extension` is empty: no wire or daemon change, `protocol.json` untouched.
+The plan's file set was wrong («B6b amendments»).
+
+**Red first** (empty stubs of `browser-view.ts`, `BrowserPage.tsx`, `RiskStrip.tsx`):
+`browser-view.test.ts` 3 pass / 20 fail (the passes are negatives); `session-info-browser.test.ts`
+3 / 10 (a few fail on the missing `refreshBrowser`, not on an assertion; M4–M12 prove them);
+`browser-page.test.ts` 0 / 7; the client subtitle test 1 fail; `browser-install.test.ts` 7 / 2.
+The `browserPageOf` test came after its function (M16 proves it).
+
+Built:
+1. **Client** — `browser-status-view.ts`: `tabSubtitle` takes `auto`.
+2. **Mobile, pure** — `browser-view.ts` (NEW): row value, Browser page bands, strip words, locks,
+   finished-browser-tool count. `session-info.ts`: the Session band's `Browser` row (also for a
+   session off the first `session/list` page); `CapabilityKind` gains `tool | browser`.
+3. **Controllers** — the info controller reads `browser/status` only while the sheet is open (open,
+   refresh, link up, every `capabilities` report, a finished browser tool); last read wins; a failure,
+   link down or close clears it. The screen controller follows the switches for the whole attach
+   (`riskStrip`).
+4. **Render / wiring** — `screens/BrowserPage.tsx` (NEW), `ui/RiskStrip.tsx` (NEW), the row in
+   `SessionInfoSheet.tsx`, the strip above the composer and the page swap in `SessionScreen.tsx`, a
+   locked row's light haptic, `App.tsx`'s port.
+5. **Icons** — `cli/src/browser-extension-icons.ts` (NEW, base64 of the four PNGs),
+   `browser-extension-assets.ts` embeds them as bytes, `install` writes them byte-exact. The test
+   fails on a missing, stale or text-mangled icon, and on any new file under `icons/`.
+6. Changelog: the plan's B6 fragment `changelog.d/browser-inspect-ui.added.md`, rewritten as ONE
+   bullet for TUI + iPhone + icon (`browser-inspect.added.md` already holds B1's bullet).
+
+**Words chosen here** (the mockup HTML is outside this worktree and was not read; the rest is the
+plan's «Mockup facts»): risky row value `◉ On · ▲ AUTO · ▲ CLEAR`, `○ Off`; lock label «Browser
+tools off»; the tabs/notes rows («Tabs unknown», «No tabs», «Another tentacle process holds the
+browser»). A tab row shows its title and who opened it, not its address (address only when the title
+is empty).
+
+**Mutations** (`.tentacle/tmp/browser-inspect/mutate-b6b.ts`: one at a time, file restored; all RED):
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | render from local intent (a set flips the state before the echo) | 1 |
+| M2 | strip ignores the tools being off | 1 |
+| M3 | lock follows the wire's `enabled` | 1 |
+| M4 | no sequence guard on the status read | 2 |
+| M5 | a failed read keeps the old answer | 1 |
+| M6 | the screen does not follow the switches | 2 |
+| M7 | a finished browser tool not followed | 1 |
+| M8 | close keeps reading | 1 |
+| M9 | leave keeps the follow | 1 |
+| M10 | a `capabilities` report does not re-read | 1 |
+| M11 | link down keeps the status | 1 |
+| M12 | read without `caps.browser` | 1 |
+| M13 | `Change ›` opens the sheet, not the page | 1 |
+| M14 | locked row has no tap | 1 |
+| M15 | no Browser row off the first page | 1 |
+| M16 | the page shows a server's refusal | 1 |
+| M17 | subtitle ignores auto | 2 |
+| M18 | an unread tab list says «No tabs» | 1 |
+| M19 | an icon missing from the embedded table | 2 |
+| M20 | a stale icon | 2 |
+| M21 | icons written as text | 1 |
+
+**Verification run here** (narrow): mobile session / sheet / hub / artifact / schedule / band / a11y
+files, the browser files of client, tui, cli and the extension, the changelog tests → `1496 pass, 0
+fail` (94 files). `bunx biome check` on `apps/mobile/{App.tsx,src,test}` and
+`packages/{client,cli}/{src,test}` → clean. Scoped `tsc` (scratch `tsconfig.b6b.json`: touched mobile
+files) → clean; `tsconfig.b6b-root.json` (cli + client) → only `agent/src/harness/a2a-map.ts(520,5)`,
+a file not touched here (same as B6a). The full gate is the orchestrator's script, not run here.
+
+**Unverified / debt:**
+- **No simulator sweep** of the states (both themes): owed before the next iOS build. The screen's
+  join (strip above composer, page swap) is asserted on `SessionScreen.tsx`'s SOURCE, not rendered.
+- The extension with its icons was not loaded in a real Chrome (`chrome://extensions`).
+- The TUI still says «acting asks first» under auto (it calls `tabSubtitle` without `auto`; B6a code,
+  out of this slice).
+- While `session/list` is loading or failed, Session info has no Browser row (the strip still reaches
+  the page when auto/clear are on).
+- A tab closed in Chrome shows until the next refresh trigger (the plan's debt).
+
+*— claude-sonnet-5-5, 2026-11-26*
+
+### Fix round 1 (Review B5b + B6a + B6b + icon: 2 MEDIUM)
+
+1. **FIXED — the TUI said «acting asks first» under auto.** `packages/tui/src/browser-view.ts`
+   `tabRows(status, auto)` now passes `auto` to `tabSubtitle`; `browserPanelRows` gives it
+   `caps?.browser?.actions === "auto"` (the same read the auto row and the `▲ AUTO` sign use; the
+   phone reads `browser.actions` the same way). That closes the B6b debt bullet above.
+   Test `browser-view.test.ts` «auto on: a handed-over tab no longer claims acting asks first».
+   - RED before the fix, on the assertion: `-"… · Handed over by you"` /
+     `+"… · Handed over by you · acting asks first"`. 26 pass / 1 fail.
+   - Mutation `tabSubtitle(tab, true)`: RED, «connected, defaults: … the tabs» fails, so the
+     default (ask) row is pinned too. Restored.
+2. **FIXED — a lost lease was reported as `heldElsewhere`.** `packages/tools/src/browser.ts`
+   `status()`: only `held by another tentacle process` gives `heldElsewhere: true`.
+   `does not hold the browser` / `has not claimed the browser` are the two messages `call()`
+   already treats as a lost lease. On either, `status()` drops the uid from `claimed` and returns
+   `{ tabs: [] }`. It never re-claims: a read never takes the lease, and the next tool call claims
+   again through `claim()`. This is the plan's failure row «hub restarting during status → tabs []».
+   Test `browser-switches.test.ts` «a lost lease (hub restarted) is not heldElsewhere …». It
+   checks `[]`, that the last op is the `tabs` read itself (no claim), and that a second
+   `status` makes ZERO hub ops (the claim is forgotten).
+   - RED before the fix: `+ "heldElsewhere": true`. 10 pass / 1 fail.
+   - Mutation: `claimed.delete(uid)` commented out. RED: the second read still sends `tabs`.
+     Restored.
+   - Note: the hub's `tabs` op only ever answers `does not hold` (`cli/src/browser-host.ts:252`).
+     So `status()` now shows `heldElsewhere` only for a hub that says `held by another …`. In
+     practice the status read shows `[]` in both cases. A session whose claim was refused is
+     never in `claimed`, so it never reaches the hub anyway.
+
+**Checks run here:** `bun test` on browser-switches, browser (tools), browser-view,
+browser-panel-app and cli browser-host gave 81 pass, 0 fail. `bunx biome check --write` on the 4
+changed files fixed formatting only, and the files are clean after it. I did not run the full
+gate; the orchestrator's script runs it.
+
+*— claude-opus-5-5, 2026-11-26*
+
+## Review
+
+### Review B5b + B6a + B6b + icon (fresh context, `git diff main...HEAD` at `78c66c46`)
+
+**Verdict: REQUEST-CHANGES** — two MEDIUM findings. Both are display bugs and both are small fixes. No §7 invariant is broken.
+
+**Findings**
+1. **MEDIUM: the TUI says «acting asks first» while auto is on.** `packages/tui/src/browser-view.ts:72` calls `tabSubtitle(tab)` without `auto`, and the phone passes it (`apps/mobile/src/browser-view.ts:147`).
+   - Scenario: `/browser auto` is on and the user hands over a tab. The `/browser` panel shows `Handed over by you · acting asks first`, but B5b answers that first action by itself (`firstOnHandedOver` is not `hard`, `classify.ts:146`). The UI states a safety property that is false.
+   - The executor wrote this down as debt in B6a and again in B6b, but it is one argument to add. Fix: pass `browserSwitchesOf(caps).actions === "auto"`. Add a row to the view table for it.
+2. **MEDIUM: a lost lease is reported as `heldElsewhere`.** `packages/tools/src/browser.ts:885` maps «does not hold the browser» to `heldElsewhere: true`. The same toolset's `call()` (`:215`) treats that same message as «hub restarted, lease lost» and claims again.
+   - Scenario: the user quits and reopens Chrome, so the native host restarts and every lease is gone, but `claimed` still has the uid. On the next `browser/status`, the hub answers the `tabs` op with «this session does not hold the browser» (`cli/src/browser-host.ts:252`). The TUI and the phone then say «Another tentacle process holds the browser» and show no tab count. This lasts until the session's next browser tool call.
+   - The plan's failure row «hub restarting during status» says this case gives `tabs []`, not this state. Fix: only `held by another tentacle process` means `heldElsewhere`. On «does not hold», drop the uid from `claimed` and return `tabs: []` (no claim: a read never takes the lease). Add a test for it.
+
+**Gate (run here):**
+- The 27 test files this diff touches, run with `bun test --parallel`: **301 pass, 0 fail**.
+- `bun run typecheck` (root + mobile + relay): clean.
+- `bun run lint`: clean (2615 files).
+- The full `bun run test` was not run. That is the orchestrator's merge gate.
+
+**Mutations (mine; each file restored from a scratch copy, `git status` empty after each):**
+
+| Mutation | Result |
+|---|---|
+| browser branch of `autoAnswers` gated on `answersAutoAccept` | RED: A1 and W4 |
+| no-port check removed from `setCapability` | RED: S2 |
+| `toWireCapabilities` always adds `browser` | RED: S2 |
+| status `hostPath` keeps `?query` | RED: tools «host + path only» |
+| one base64 byte changed in `icon-48` | RED: 2 install tests |
+| browser clause of `hasDisabled` → `false` | **GREEN, nothing pins it** |
+
+The last row is below MEDIUM: it only affects the RECORD that a new segment restates auto or clear (Q2 audit), never what is restored.
+
+**Premises re-checked (TRUE):**
+- There is one `new HostedSession` site (`session-host.ts:1713`), so `attachBrowser` reaches every session, the reloaded ones included.
+- No restore path lets `browser` through. `normalizeCapabilities` covers reload, `seedCapabilities` rebuilds only the three sets, and the laptop's `wireCapabilities` (`cli/src/session-capabilities.ts:21`) drops it. A resume record that says auto therefore reaches no daemon.
+- `autoApproves` is unchanged.
+- The hub gates `retitle` and `tabs` on `holds` (`browser-host.ts:252`).
+- Only the TUI and the phone send `session/set_capability`.
+
+**Attacks tried:**
+1. A pod forging `capabilities.browser` or a fake `browser/status`. Result: display only. A pod has no port, no browser tools and no hub. On the laptop, `autoApproves` refuses `browser_action`, and the slack never crosses the wire.
+2. Auto carried across resume, `/clear`, hop or a `serve` reload. Result: three layers drop it.
+3. A secrets mode race between concurrent calls in one session (D3). Result: a call in flight takes the mode of the latest call start. That only moves toward what the user just chose. Asks are always masked.
+4. `useBrowserStatus` re-reading on every render. Result: no, `caps` is React state.
+5. Icon drift. Result: caught (row above).
+6. A2A. Result: it never sets a switch, and `browser_action` stays `owner-only`.
+
+**Holds:**
+- The single-broker auto answer is daemon-side and on the live switch, and a `hard` ask always asks.
+- The UIs render from the echo only.
+- `browser/status` never claims a lease and runs without a lock.
+
+**Not verified:**
+- No simulator sweep (owed before the next iOS build).
+- No real-Chrome `retitle`.
+- No extension load with the icons.
+
+**Executor behaviour:**
+- Honest about drift (D1–D5 and the amendments are accurate) and about what was not verified.
+- It did log finding 1, but logged it as debt instead of fixing a one-line false safety label.
+
+**Model:** Opus. The planner was also Opus (claude-opus-5-5), so this pass shares the planner's model family. B6 was executed by Sonnet.
+
+*— claude-opus-5-5, 2026-11-26*
+
+### Round 2
+
+Reviewed `git diff HEAD~1` at `5e5ee40b`.
+
+**Verdict: PASS.** Both MEDIUM findings are fixed, each fix is pinned by a test, and I found no regression.
+
+**Finding 1 (the TUI said «acting asks first» under auto).** Fixed.
+- `tui/src/browser-view.ts` now hands `tabRows` the live `actions === "auto"`, which reaches `tabSubtitle(tab, auto)`.
+- New test: the view row «auto on: a handed-over tab no longer claims acting asks first».
+- Mutation (drop `auto` from the call): that test goes RED.
+
+**Finding 2 (a lost lease was reported as `heldElsewhere`).** Fixed.
+- `tools/src/browser.ts` `status()` now says `heldElsewhere` only for «held by another tentacle process». On «does not hold» or «has not claimed», it forgets the uid in `claimed` and returns `tabs: []`, without claiming again.
+- New test, in `tools/test/browser-switches.test.ts`. It checks three things:
+  - the lost lease is not `heldElsewhere`;
+  - the read itself makes no claim;
+  - a second read makes no hub op at all.
+- Mutation (map «does not hold» to `heldElsewhere`): RED.
+- Mutation (keep the uid in `claimed`): RED.
+- After each mutation, the file was restored from a scratch copy and `git status` was empty.
+
+**Gate:**
+- Regression run with `bun test --parallel` over `tools/test`, `tui` `browser-view` + `browser-panel-app`, and `cli` `browser-status`: **631 pass, 0 fail**.
+- `bun run typecheck` (root + mobile + relay): clean.
+- `bun run lint`: clean (2615 files).
+
+**Note (below MEDIUM, no change needed).** `heldElsewhere` can now never be set in practice.
+- The hub returns «held by another tentacle process» only to a `claim` (`browser/src/ownership.ts:19`), and `status()` never claims.
+- The `tabs` op is refused only with «does not hold» (`cli/src/browser-host.ts:252`).
+- So if another daemon really took the uid's lease, the UI shows `tabs: []` instead of «held elsewhere». The session's next tool call still reports that refusal itself.
+- Display only, and it errs toward showing less. Either remove the field and the row, or derive it from a hub fact (`leases.get(uid)`) in a later pass.
+
+*— claude-opus-5-5, 2026-11-26*

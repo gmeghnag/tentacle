@@ -43,6 +43,7 @@ import {
   withPhase,
 } from "./artifact-join.ts";
 import { ASK_PARKS, parkKey } from "./ask-park.ts";
+import { browserDoneKey, riskStripItems } from "./browser-view.ts";
 import {
   COMPACTED_SHOWN_MS,
   type OutcomeLine,
@@ -87,6 +88,7 @@ import {
   type SessionInfoState,
   createSessionInfo,
 } from "./session-info-controller.ts";
+import type { CapabilityKind } from "./session-info.ts";
 import {
   type RenameState,
   renameErrorText,
@@ -284,6 +286,12 @@ export interface SessionScreenState {
    * while it is closed. The header's model and context bar live in `view`.
    */
   readonly info: SessionInfoState | null;
+  /**
+   * The strip above the composer while the browser acts alone or shows secrets
+   * (docs/feat/browser-inspect.md B6b): its words, from the session's live
+   * switches (sheet open or not); null otherwise.
+   */
+  readonly riskStrip: readonly string[] | null;
   /** Whether the rename field is open (Owner decision 5: tap the title). */
   readonly renaming: RenameState | null;
   /**
@@ -527,8 +535,11 @@ export interface SessionScreenController {
   setAutoAccept(on: boolean): Promise<void>;
   /** The switch's value NOW (the session's shared link: a flip elsewhere is here). */
   autoAcceptOn(): boolean;
-  /** An MCP server's or skill's switch (docs/feat/session-capabilities.md S5). */
-  setCapability(kind: "mcp" | "skill", name: string, enabled: boolean): Promise<void>;
+  /**
+   * An MCP server's or skill's switch (docs/feat/session-capabilities.md S5),
+   * or the browser's (the tool group, auto, clear: browser-inspect B6b).
+   */
+  setCapability(kind: CapabilityKind, name: string, enabled: boolean): Promise<void>;
   /**
    * Delete one armed scheduled wake (docs/feat/cron-tool.md S6, M7): the row's
    * RAW id. The row leaves when the daemon's next table says so — never on a
@@ -715,6 +726,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   };
   /** The last attached handle's `onSubagents`/`onJobs` subscriptions. */
   let activityWatch: (() => void) | undefined;
+  /** The last attached handle's switches subscription (the risk strip's feed). */
+  let capsWatch: (() => void) | undefined;
   /** The rows whose kill is in flight (mobile-activity-panel Design 4): one per row. */
   const rowStops = new Set<string>();
   /**
@@ -1234,6 +1247,9 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       thumbnails,
       compose: composeView().bar,
       info: info === null ? null : info.state(),
+      riskStrip: riskStripItems(
+        status.phase === "open" ? infoPort?.session()?.capabilities?.current() : undefined,
+      ),
       renaming,
       sends,
       activity,
@@ -1492,10 +1508,26 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
   function emit(): void {
     render.now();
   }
+  /** The rows last counted for finished browser tools, and that count. */
+  let browserRows: State["rows"] | null = null;
+  let browserDone = 0;
+  /** A browser tool that finished makes the open sheet's status stale (B6b). */
+  function followBrowserTools(): void {
+    if (info === null || transcript.rows === browserRows) {
+      return;
+    }
+    browserRows = transcript.rows;
+    const done = browserDoneKey(transcript.rows);
+    if (done !== browserDone) {
+      browserDone = done;
+      void info.refreshBrowser();
+    }
+  }
   function notifyListeners(): void {
     if (disposed) {
       return;
     }
+    followBrowserTools();
     const next = state();
     deps.onChange?.(next);
     for (const listener of listeners) {
@@ -1577,6 +1609,10 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     });
     activityWatch?.();
     activityWatch = watchActivity(result.session);
+    // The switches are followed for the whole attach, sheet open or not: another
+    // device turning auto or clear on must show the strip here (B6b).
+    capsWatch?.();
+    capsWatch = infoPort?.session()?.capabilities?.onChange(() => emit());
     // The header's context bar needs a figure NOW: a session attached after its
     // turns has no `agent_usage` to measure from (the TUI asks at attach too).
     if (info !== null) {
@@ -2210,6 +2246,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       sessionTitleWatch = undefined;
       activityWatch?.();
       activityWatch = undefined;
+      capsWatch?.();
+      capsWatch = undefined;
       await deps.controller.leave(deps.sessionId);
       emit();
     },
@@ -2366,6 +2404,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       sessionTitleWatch = undefined;
       activityWatch?.();
       activityWatch = undefined;
+      capsWatch?.();
+      capsWatch = undefined;
       // Idempotent and identity-scoped: a dispose that lands AFTER the next
       // screen mounted its requester withdraws nothing.
       releaseRequester();

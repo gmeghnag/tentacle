@@ -1,4 +1,4 @@
-import type { WorkflowRow } from "@tentacle/protocol";
+import type { BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
 /**
  * The panels' state rules and executors (docs/feat/app-decomposition.md S7).
  * Every DECISION stays where it was and stays pure — `panels/registry.ts` +
@@ -28,6 +28,7 @@ import type { SessionController, SessionDirectory } from "./app-types.ts";
 import { oneLine } from "./commands.ts";
 import { SCHEDULE_UNSUPPORTED } from "./commands/schedule.ts";
 import { type OpenPanel, applyPanel } from "./panel.ts";
+import { withBrowserData } from "./panels/browser.ts";
 import { isScheduleOpen, withSchedulesData, withSchedulesState } from "./panels/schedule.ts";
 import {
   deleteFailedNotice,
@@ -111,6 +112,8 @@ export interface PanelsLayer {
    * it the panel is the snapshot it was opened on.
    */
   setSchedulesData(rows: readonly ScheduleDockRow[] | undefined, now: number): void;
+  /** An open `/browser` panel follows the latest `browser/status` read (browser-inspect B6a). */
+  setBrowserData(status: BrowserStatusResult | null): void;
   /** Write the `/workflow` panel's cursor (its own move answer). */
   setWorkflowState(state: WorkflowState): void;
   /**
@@ -218,6 +221,11 @@ export function usePanels(host: PanelsHost): PanelsLayer {
   const setSchedulesData = useCallback(
     (rows: readonly ScheduleDockRow[] | undefined, now: number) =>
       setPanel((p) => withSchedulesData(p, rows, now)),
+    [setPanel],
+  );
+
+  const setBrowserData = useCallback(
+    (status: BrowserStatusResult | null) => setPanel((p) => withBrowserData(p, status)),
     [setPanel],
   );
 
@@ -417,6 +425,7 @@ export function usePanels(host: PanelsHost): PanelsLayer {
     setSessionsState,
     setSchedulesState,
     setSchedulesData,
+    setBrowserData,
     setWorkflowState,
     setWorkflowsData,
     setCatalogueData,

@@ -1,4 +1,4 @@
-import type { ArtifactMeta, WorkflowRow } from "@tentacle/protocol";
+import type { ArtifactMeta, BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
 import type { ArtifactsData } from "../artifacts-panel.ts";
 /**
  * The panel MODEL (docs/feat/app-decomposition.md S7): the three open panels as
@@ -101,7 +101,30 @@ export interface WorkflowPanel {
   readonly catalogue?: CatalogueView;
 }
 
-export type OpenPanel = TreePanel | SessionsPanel | ArtifactsPanel | SchedulesPanel | WorkflowPanel;
+/**
+ * `/browser` (docs/feat/browser-inspect.md B6a): the switches (read live from the
+ * session, like every switch panel) over the link and the session's tabs.
+ */
+export interface BrowserPanel {
+  readonly kind: "browser";
+  /** The last `browser/status` read; null: not read, or the read failed. */
+  readonly data: BrowserStatusResult | null;
+  readonly tree: TreeState;
+}
+
+export type OpenPanel =
+  | TreePanel
+  | SessionsPanel
+  | ArtifactsPanel
+  | SchedulesPanel
+  | WorkflowPanel
+  | BrowserPanel;
+
+export const browserPanel = (data: BrowserStatusResult | null = null): BrowserPanel => ({
+  kind: "browser",
+  data,
+  tree: TREE_START,
+});
 
 /** The `/schedule` panel (docs/feat/cron-tool.md S5): the daemon's table, or `undefined` until it reports. */
 export const schedulesPanel = (

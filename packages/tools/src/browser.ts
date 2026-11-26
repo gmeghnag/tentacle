@@ -18,6 +18,7 @@ import {
   type ActionVerdict,
   type ElementFacts,
   type HubOp,
+  IDENTITY_REDACTOR,
   NO_EXTENSION_MESSAGE,
   type NetFilter,
   type NetRecord,
@@ -102,9 +103,31 @@ export interface BrowserImageLimits {
   readonly ask?: PermissionRequester;
 }
 
+/** One tab as `browser/status` lists it (B5b): masked, query-less, capped. */
+export interface BrowserStatusTab {
+  readonly id: number;
+  readonly title: string;
+  readonly where: string;
+  readonly handedOver: boolean;
+  readonly traced: boolean;
+}
+
+/** The most tabs `status` lists (the wire's `MAX_BROWSER_STATUS_TABS`). */
+const STATUS_TABS_MAX = 64;
+const STATUS_TITLE_MAX = 200;
+const STATUS_WHERE_MAX = 2048;
+
 export interface BrowserToolset {
   /** The nine tools, sharing this daemon's per-session state. */
   tools(limits: BrowserImageLimits): Tool[];
+  /**
+   * The session's tabs for `browser/status` (B5b). A READ: a session that has
+   * not claimed the browser gets `[]` with NO hub op (a read never takes the
+   * lease); a hub refusal of the lease is `heldElsewhere`. Never throws.
+   */
+  status(uid: string): Promise<{ tabs: BrowserStatusTab[]; heldElsewhere?: true }>;
+  /** The session's title changed: kept for its first claim, sent to a claimed group (best effort). */
+  retitle(uid: string, title: string): void;
 }
 
 const tabField = z
@@ -124,6 +147,16 @@ const cap = (s: string, max = BROWSER_TEXT_MAX): string =>
   s.length > max ? `${s.slice(0, max)}\n… [${s.length - max} more chars not shown]` : s;
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/** Host + path only (B5b status): the query and fragment never leave; not a URL → "". */
+function hostPath(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.host}${u.pathname}`;
+  } catch {
+    return "";
+  }
+}
+
 /** A per-tab key: reads overlap, an action is exclusive on its tab (§2). */
 function tabKey(mode: ResourceKey["mode"]) {
   return (input: unknown): readonly ResourceKey[] | "exclusive" => {
@@ -136,9 +169,17 @@ export function createBrowserToolset(options: BrowserToolsetOptions): BrowserToo
   const { backend } = options;
   const redactors = new Map<string, Redactor>();
   const claimed = new Set<string>();
-  const net = options.textNet ?? ((t: string) => t);
+  const titles = new Map<string, string>();
+  const textNet = options.textNet ?? ((t: string) => t);
+  /**
+   * The session's `secrets` switch as its CURRENT call read it (B5b): set by
+   * `run` from `ctx.browserSecrets` (live, at call start). Absent → masked.
+   */
+  const modes = new Map<string, "masked" | "clear">();
+  const isClear = (session: string): boolean => modes.get(session) === "clear";
 
-  const redactor = (session: string): Redactor => {
+  /** The session's masking redactor: one key per session, so tags correlate. */
+  const sessionRedactor = (session: string): Redactor => {
     let r = redactors.get(session);
     if (r === undefined) {
       r = createRedactor();
@@ -146,12 +187,22 @@ export function createBrowserToolset(options: BrowserToolsetOptions): BrowserToo
     }
     return r;
   };
+  /** The redactor a RESULT goes through: passthrough while the session is in clear. */
+  const redactor = (session: string): Redactor =>
+    isClear(session) ? IDENTITY_REDACTOR : sessionRedactor(session);
+  /** The generic text net, skipped in clear (`tools.redactSecrets` still applies after). */
+  const net = (session: string, text: string): string => (isClear(session) ? text : textNet(text));
   /** Page-derived text: URL params, then the generic net, then the inline cap. */
-  const clean = (session: string, text: string): string => cap(net(redactor(session).url(text)));
+  const clean = (session: string, text: string): string =>
+    cap(net(session, redactor(session).url(text)));
+  /** Masked in every mode: an ask's title and detail travel to the phone and notifications. */
+  const masked = (session: string, text: string): string =>
+    cap(textNet(sessionRedactor(session).url(text)));
 
   async function claim(session: string): Promise<void> {
     if (claimed.has(session)) return;
-    await backend.call({ op: "claim", sessionUid: session, title: session.slice(0, 8) });
+    const title = titles.get(session) ?? session.slice(0, 8);
+    await backend.call({ op: "claim", sessionUid: session, title });
     claimed.add(session);
   }
 
@@ -198,10 +249,12 @@ export function createBrowserToolset(options: BrowserToolsetOptions): BrowserToo
     ctx: ToolContext,
     body: (session: string) => Promise<ToolResult>,
   ): Promise<ToolResult> => {
+    // Read the switch LIVE, once per call (a mid-turn flip reaches the next call).
+    modes.set(ctx.sessionId, ctx.browserSecrets?.() ?? "masked");
     try {
       return await body(ctx.sessionId);
     } catch (e) {
-      return fail(net(redactor(ctx.sessionId).url(errorOf(e))));
+      return fail(net(ctx.sessionId, redactor(ctx.sessionId).url(errorOf(e))));
     }
   };
 
@@ -300,8 +353,8 @@ export function createBrowserToolset(options: BrowserToolsetOptions): BrowserToo
     ask: PermissionRequester | undefined,
   ): Promise<ToolResult | undefined> {
     if (!verdict.ask) return undefined;
-    const why = clean(s, verdict.reasons.join(" · "));
-    const what = clean(s, title);
+    const why = masked(s, verdict.reasons.join(" · "));
+    const what = masked(s, title);
     if (ask === undefined) {
       return fail(`not done: ${what} needs the user's OK (${why}), and no one can be asked here`);
     }
@@ -313,6 +366,10 @@ export function createBrowserToolset(options: BrowserToolsetOptions): BrowserToo
         title: what,
         detail: why,
         input: {},
+        // Eligible for the session's AUTO mode unless `hard` (Q3: payment,
+        // password / card typing always ask). The tool never reads `actions`:
+        // the hosting daemon decides on the live switch (B5b).
+        ...(verdict.hard ? {} : { browserAuto: true as const }),
       },
       {
         ...(ctx.toolCallId !== undefined ? { toolCallId: ctx.toolCallId } : {}),
@@ -817,6 +874,47 @@ export function createBrowserToolset(options: BrowserToolsetOptions): BrowserToo
         createTypeTool(limits.ask),
         closeTool,
       ];
+    },
+    async status(uid) {
+      // A read never takes the lease: no claim, no op, for a session that has none.
+      if (!claimed.has(uid)) return { tabs: [] };
+      let r: Record<string, unknown>;
+      try {
+        r = obj(await backend.call({ op: "tabs", sessionUid: uid }));
+      } catch (e) {
+        const error = errorOf(e);
+        if (/held by another tentacle process/.test(error))
+          return { tabs: [], heldElsewhere: true };
+        // A lost lease (the hub restarted): forget it, never re-claim (the next
+        // tool call claims again, as `call` does).
+        if (/does not hold the browser|has not claimed the browser/.test(error)) {
+          claimed.delete(uid);
+        }
+        return { tabs: [] };
+      }
+      const list = Array.isArray(r.tabs) ? r.tabs.map(obj) : [];
+      // Always masked (the phone shows it): the session's redactor, then the net.
+      const shown = (text: string, max: number): string =>
+        textNet(sessionRedactor(uid).url(text)).slice(0, max);
+      return {
+        tabs: list
+          .filter((t) => typeof t.id === "number" && Number.isInteger(t.id) && t.id >= 0)
+          .slice(0, STATUS_TABS_MAX)
+          .map((t) => ({
+            id: t.id as number,
+            title: shown(str(t.title), STATUS_TITLE_MAX),
+            where: shown(hostPath(str(t.url)), STATUS_WHERE_MAX),
+            handedOver: t.handedOver === true,
+            traced: t.traced === true,
+          })),
+      };
+    },
+    retitle(uid, title) {
+      const text = title.slice(0, STATUS_TITLE_MAX);
+      titles.set(uid, text);
+      if (!claimed.has(uid)) return;
+      // Best effort: an older loaded extension does not know the op.
+      backend.call({ op: "retitle", sessionUid: uid, title: text }).catch(() => {});
     },
   };
 

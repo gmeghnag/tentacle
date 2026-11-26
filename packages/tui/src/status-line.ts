@@ -217,6 +217,13 @@ export interface StatusLayoutInput {
   readonly pillHint?: string;
   /** ` · ↑3 more (↓ to follow)` / ` · expanded` / `` — whole or dropped, never cut. */
   readonly suffix: string;
+  /**
+   * The user's Chrome (`browserStatusSign`, browser-inspect B6a): its quiet
+   * text and the `▲` warnings. Right after the ctx figure; it wins over the path,
+   * the hint, `↑ ↓`, the meter's bar and the suffix. Short: the text goes first,
+   * the warnings stay.
+   */
+  readonly browser?: { readonly text: string; readonly warnings: readonly string[] } | null;
 }
 
 export interface StatusLayout {
@@ -233,6 +240,8 @@ export interface StatusLayout {
   readonly compact: boolean;
   /** The scroll/expand hint when it fits whole; `""` when dropped. */
   readonly suffix: string;
+  /** The browser sign as painted, each part with its ` · `; `""` when absent or dropped. */
+  readonly browser: { readonly text: string; readonly warn: string };
   readonly hint: string | null;
   /**
    * The pill as painted, and its CELL range on the row `[start, end)` (0-based,
@@ -267,6 +276,22 @@ function cutLink(text: string, max: number): string {
   return head.endsWith("…") ? head : `${head}…`;
 }
 
+/** The sign's two parts in `room` cells: both, else the warnings alone, else neither. */
+function browserParts(
+  sign: StatusLayoutInput["browser"],
+  room: number,
+): { text: string; warn: string } {
+  if (!sign) {
+    return { text: "", warn: "" };
+  }
+  const text = `${SEP}${sign.text}`;
+  const warn = sign.warnings.length === 0 ? "" : `${SEP}${sign.warnings.join(" ")}`;
+  if (cellWidth(text) + cellWidth(warn) <= room) {
+    return { text, warn };
+  }
+  return { text: "", warn: cellWidth(warn) <= room ? warn : "" };
+}
+
 /**
  * ONE row, decided here (pure; the component only paints it). When the line is
  * short things give way in this order: the PATH shrinks (to `MIN_PATH`), the
@@ -289,14 +314,16 @@ function layoutRow(input: StatusLayoutInput): StatusLayout {
   const linkFull = linkText ? cellWidth(linkText) + SEP.length : 0;
   const linkMin = linkText ? Math.min(linkFull, cellWidth(firstWord(linkText)) + SEP.length) : 0;
   const badgeMin = target ? minBadgeCells(target) + SEP.length : 0;
+  const browser = browserParts(input.browser, width - meterCells - linkMin - badgeMin);
+  const browserCells = cellWidth(browser.text) + cellWidth(browser.warn);
   // The hint (` · ↑3 more …`) is whole or dropped (`statusLayout` also drops it
   // when it would cost the badge its name).
   const suffixCells = cellWidth(input.suffix);
   const suffix =
-    input.suffix !== "" && width - meterCells - suffixCells >= linkMin + badgeMin
+    input.suffix !== "" && width - meterCells - browserCells - suffixCells >= linkMin + badgeMin
       ? input.suffix
       : "";
-  const avail = width - meterCells - cellWidth(suffix);
+  const avail = width - meterCells - browserCells - cellWidth(suffix);
 
   let badgeParts: { prefix: string; name: string } | null = null;
   let linkCells = 0;
@@ -353,6 +380,7 @@ function layoutRow(input: StatusLayoutInput): StatusLayout {
       linkWidth +
       cellWidth(badgePart) +
       cellWidth(meterText(input.meter, v.compact)) +
+      browserCells +
       cellWidth(suffix) +
       (v.hint
         ? cellWidth(input.hint) +
@@ -378,7 +406,7 @@ function layoutRow(input: StatusLayoutInput): StatusLayout {
   const pillHint = pillFits ? ` ${pillHintRaw}   ` : "";
   const pill = pillFits ? { text: pillTextRaw, start: width - pillCells, end: width } : null;
   const lead = [path, tokens].filter((p): p is string => p !== null && p !== "").join(SEP);
-  const plain = `${link}${badgePart}${lead}${lead ? SEP : ""}${meterText(input.meter, v.compact)}${suffix}${
+  const plain = `${link}${badgePart}${lead}${lead ? SEP : ""}${meterText(input.meter, v.compact)}${browser.text}${browser.warn}${suffix}${
     // A focused pill's hint, then auto-accept, then ` · <pill>`: one box, and
     // `plain` says exactly what the component paints (the tests pin both).
     pillHint === "" ? "" : pillHint
@@ -392,6 +420,7 @@ function layoutRow(input: StatusLayoutInput): StatusLayout {
     tokens,
     compact: v.compact,
     suffix,
+    browser,
     hint,
     pill,
     pillHint,

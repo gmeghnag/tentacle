@@ -137,3 +137,18 @@ export function createRedactor(key: Uint8Array = randomKey()): Redactor {
 
   return { mask, headers, cookieHeader, setCookie, url, body };
 }
+
+/**
+ * The «clear» mode's redactor (docs/feat/browser-inspect.md B5b): the same
+ * interface, every value passed through. Used ONLY for a tool result while the
+ * session's `secrets` switch says `clear`; an ask's title and detail are still
+ * masked (they travel to the phone and to notifications).
+ */
+export const IDENTITY_REDACTOR: Redactor = {
+  mask: (_kind, _name, value) => value,
+  headers: (h) => ({ ...h }),
+  cookieHeader: (value) => value,
+  setCookie: (value) => value,
+  url: (s) => s,
+  body: (text) => text,
+};

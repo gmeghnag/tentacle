@@ -10,7 +10,7 @@ import type {
   SessionCapabilities,
   SkillListing,
 } from "@tentacle/agent";
-import type { ToolResult } from "@tentacle/core";
+import { type ToolResult, browserSwitchesOf, browserToolsEnabled } from "@tentacle/core";
 import {
   type AttachmentRef,
   BLOCKING_UPDATE_TYPES,
@@ -139,24 +139,40 @@ export function toSessionTools(entries: readonly BuiltinToolEntry[]): SessionToo
   return { tools: entries.slice(0, MAX_TOOL_LIST).map((e) => ({ ...e })) };
 }
 
-/** A session's switches as the wire carries them (fresh arrays: the state stays immutable). */
-export function toWireCapabilities(state: SessionCapabilities): SessionCapabilitiesWire {
+/**
+ * A session's switches as the wire carries them (fresh arrays: the state stays
+ * immutable). `browser` only when the session's host has the user's Chrome
+ * (B5b: its presence is the UIs' availability signal); its `enabled` is the
+ * PROJECTION of the `browser` tool group, never stored twice.
+ */
+export function toWireCapabilities(
+  state: SessionCapabilities,
+  browserAvailable = false,
+): SessionCapabilitiesWire {
   return {
     disabledMcp: [...state.disabledMcp],
     disabledSkills: [...state.disabledSkills],
     disabledTools: [...state.disabledTools],
+    ...(browserAvailable
+      ? { browser: { enabled: browserToolsEnabled(state), ...browserSwitchesOf(state) } }
+      : {}),
   };
 }
 
 /**
  * Wire switches (a client's seed, a log entry) as the agent's state: an absent
- * `disabledTools` (an older peer or log) reads as none off.
+ * `disabledTools` (an older peer or log) reads as none off. A `browser` is read
+ * as it says (`enabled` ignored: it is a projection) — the daemon's
+ * `normalizeCapabilities` is what never lets it apply (B5b).
  */
 export function fromWireCapabilities(wire: SessionCapabilitiesWire): SessionCapabilities {
   return {
     disabledMcp: wire.disabledMcp,
     disabledSkills: wire.disabledSkills,
     disabledTools: wire.disabledTools ?? [],
+    ...(wire.browser
+      ? { browser: { secrets: wire.browser.secrets, actions: wire.browser.actions } }
+      : {}),
   };
 }
 

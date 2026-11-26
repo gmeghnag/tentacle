@@ -13,6 +13,7 @@ import type { AttachmentRef, ChatMessage, ScheduledRef } from "@tentacle/core";
 import {
   type ArtifactListResult,
   type ArtifactMeta,
+  type BrowserStatusResult,
   type CompactResult,
   type DocumentContent,
   DomainErrorCode,
@@ -483,11 +484,16 @@ export class RemoteSession implements SessionStreamListener {
    * older daemon) also clears the state, so the toggles hide (F7).
    */
   async setCapability(
-    kind: "mcp" | "skill" | "tool",
+    kind: "mcp" | "skill" | "tool" | "browser",
     name: string,
     enabled: boolean,
   ): Promise<SessionCapabilitiesWire> {
     if (this.isLazy()) {
+      // The browser switches exist only on a live session of a host that has
+      // the user's Chrome (B5b): nothing to preview before the open.
+      if (kind === "browser") {
+        throw new Error("the browser switches apply to an open session");
+      }
       return this.notePreOpenFlip({ kind, name, enabled });
     }
     if (this.id === null && this.opening !== null) {
@@ -504,6 +510,18 @@ export class RemoteSession implements SessionStreamListener {
       }
       throw error;
     }
+  }
+
+  /**
+   * `browser/status` of this session (docs/feat/browser-inspect.md B5b): the
+   * link and the session's own tabs. Rejects when the session is not open.
+   */
+  async browserStatus(): Promise<BrowserStatusResult> {
+    const id = this.id;
+    if (id === null) {
+      throw new Error("the session is not open");
+    }
+    return this.client.browserStatus(id);
   }
 
   /**

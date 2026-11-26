@@ -6,7 +6,7 @@ import {
   initialWake,
   wakeStep,
 } from "@tentacle/core";
-import type { ArtifactMeta, WorkflowRow } from "@tentacle/protocol";
+import type { ArtifactMeta, BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
 import { useApp, useInput, useStdout } from "ink";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { AppView } from "./AppView.tsx";
@@ -45,6 +45,7 @@ import {
   blinkState,
   syncBlink,
 } from "./blink.ts";
+import { browserDoneKey } from "./browser-view.ts";
 import {
   type CapOp,
   type CapsView,
@@ -82,6 +83,7 @@ import {
 } from "./permission-ui.ts";
 import type { ScheduleDockRow } from "./schedule-view.ts";
 import { useAttachments } from "./useAttachments.ts";
+import { useBrowserStatus } from "./useBrowserStatus.ts";
 import { useCatalogue } from "./useCatalogue.ts";
 import { useDock } from "./useDock.ts";
 import { useHop } from "./useHop.ts";
@@ -990,6 +992,20 @@ export function App({
   /** The command port's re-read trigger: a STABLE callback over the live binding. */
   const askCatalogue = useCallback(() => refreshCatalogueRef.current(), [refreshCatalogueRef]);
 
+  /** Forward ref: `usePanels` (below) owns the panel write the browser read makes. */
+  const setBrowserPanelRef = useRef<(status: BrowserStatusResult | null) => void>(() => {});
+  const followBrowser = useCallback((status: BrowserStatusResult | null) => {
+    setBrowserPanelRef.current(status);
+  }, []);
+  // The user's Chrome (browser-inspect B6a): `/browser` and the status bar's sign.
+  const { status: browserStatus, statusRef: browserStatusRef } = useBrowserStatus({
+    sessionRef,
+    caps,
+    doneKey: caps?.browser === undefined ? 0 : browserDoneKey(st.items),
+    panelOpen: panel?.kind === "browser",
+    onStatus: followBrowser,
+  });
+
   const view = frameLayout({
     state: st,
     permission,
@@ -1011,6 +1027,7 @@ export function App({
     panel,
     sessionId: sessionRef.current?.sessionId ?? null,
     capsPhase: sessionCapsPhase(sessionRef.current, caps),
+    browserStatus,
     field,
     attach,
     skills: skills(),
@@ -1187,6 +1204,27 @@ export function App({
    * disarms it first, so a stale fire can never blank a fresh figure.
    */
   const compactedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * Send one switch (Space in a panel, or `/browser <word>`). Its echo is this
+   * TUI's own, so no notice; a refusal is said. Nothing flips locally.
+   */
+  const sendSwitch = useCallback(
+    (op: CapOp): void => {
+      const session = sessionRef.current;
+      if (!session?.setCapability) {
+        return;
+      }
+      capsPendingRef.current = [...capsPendingRef.current, op];
+      const done = (): void => {
+        capsPendingRef.current = settled(capsPendingRef.current, op);
+      };
+      session.setCapability(op.kind, op.name, op.enabled).then(done, (error: unknown) => {
+        done();
+        pushNotice(switchFailedNotice(op, error));
+      });
+    },
+    [pushNotice],
+  );
   const clearCompacted = useCallback(() => {
     if (compactedTimerRef.current !== null) {
       clearTimeout(compactedTimerRef.current);
@@ -1462,6 +1500,7 @@ export function App({
     setSessionsState,
     setSchedulesState,
     setSchedulesData,
+    setBrowserData,
     setWorkflowsData,
     setCatalogueData,
     fetchWorkflowStep,
@@ -1485,6 +1524,7 @@ export function App({
   });
 
   setCataloguePanelRef.current = (cat: CatalogueView) => setCatalogueData(cat, Date.now());
+  setBrowserPanelRef.current = setBrowserData;
 
   /**
    * The daemon's `schedules` report, for EVERY surface at once (cron-tool fix
@@ -1887,6 +1927,9 @@ export function App({
           flushNow,
           setScrollOffset,
           askContext,
+          capsRef,
+          sendSwitch,
+          browserStatusRef,
         },
         raw,
         again,
@@ -1895,6 +1938,8 @@ export function App({
     [
       askCatalogue,
       askContext,
+      browserStatusRef,
+      sendSwitch,
       attachCommand,
       clipboard,
       cwd,
@@ -2127,14 +2172,7 @@ export function App({
         if (why !== null) pushNotice(why);
         return;
       }
-      capsPendingRef.current = [...capsPendingRef.current, op];
-      const done = (): void => {
-        capsPendingRef.current = settled(capsPendingRef.current, op);
-      };
-      session.setCapability(op.kind, op.name, op.enabled).then(done, (error: unknown) => {
-        done();
-        pushNotice(switchFailedNotice(op, error));
-      });
+      sendSwitch(op);
     },
     setSessionsState,
     // `/artifacts`' Enter / `s` / `n`: the panel already decided WHICH version

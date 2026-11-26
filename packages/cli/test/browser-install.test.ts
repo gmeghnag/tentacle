@@ -56,17 +56,49 @@ describe("browser install copies the extension", () => {
     const app = join(import.meta.dir, "..", "..", "..", "apps", "browser-extension");
     const onDisk = [
       "manifest.json",
-      ...readdirSync(join(app, "src")).map((f) => `src/${f}`),
+      ...["src", "icons"].flatMap((dir) => readdirSync(join(app, dir)).map((f) => `${dir}/${f}`)),
     ].sort();
     expect(Object.keys(EXTENSION_ASSETS).sort()).toEqual(onDisk);
     for (const rel of onDisk) {
-      expect(EXTENSION_ASSETS[rel]).toBe(readFileSync(join(app, rel), "utf8"));
+      const asset = EXTENSION_ASSETS[rel] ?? "";
+      // As base64, so a mismatch is compared byte for byte (PNGs are binary).
+      expect(Buffer.from(asset).toString("base64")).toBe(
+        readFileSync(join(app, rel)).toString("base64"),
+      );
     }
     // Install writes the table, whatever is (not) next to this build.
     installBrowser({ ...env, extensionAssets: { "manifest.json": "{}", "src/a.js": "x" } });
     const dest = join(env.configDir, "browser", "extension");
     expect(readFileSync(join(dest, "src", "a.js"), "utf8")).toBe("x");
     expect(existsSync(wrapperPath(env.configDir))).toBe(true);
+  });
+});
+
+// Chrome refuses to load an extension whose manifest names a file that is not there.
+describe("browser install writes the icons", () => {
+  const app = join(import.meta.dir, "..", "..", "..", "apps", "browser-extension");
+
+  test("every icon the INSTALLED manifest names is written, byte-exact PNG", () => {
+    installBrowser(env);
+    const dest = join(env.configDir, "browser", "extension");
+    const manifest = JSON.parse(readFileSync(join(dest, "manifest.json"), "utf8")) as {
+      icons?: Record<string, string>;
+      action?: { default_icon?: Record<string, string> };
+    };
+    const named = [
+      ...Object.values(manifest.icons ?? {}),
+      ...Object.values(manifest.action?.default_icon ?? {}),
+    ];
+    expect(Object.keys(manifest.icons ?? {})).toEqual(["16", "32", "48", "128"]);
+    for (const rel of named) {
+      const file = join(dest, rel);
+      expect(existsSync(file)).toBe(true);
+      if (existsSync(file)) {
+        const bytes = readFileSync(file);
+        expect([...bytes.subarray(0, 4)]).toEqual([0x89, 0x50, 0x4e, 0x47]);
+        expect(bytes.toString("base64")).toBe(readFileSync(join(app, rel)).toString("base64"));
+      }
+    }
   });
 });
 

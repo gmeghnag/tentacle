@@ -4,10 +4,11 @@ import manifest from "../../../apps/browser-extension/manifest.json" with { type
  * B5 addition 3): `tentacle browser install` writes these files to
  * `<configDir>/browser/extension`, so it works from the compiled binary
  * (`~/bin/tentacle`), where `apps/browser-extension` does not exist next to it.
- * `with { type: "text" }` makes the bundler inline each file's content.
+ * `with { type: "text" }` makes the bundler inline each file's content; the
+ * binary PNG icons are base64 in `browser-extension-icons.ts`.
  *
- * A file added to `apps/browser-extension/{manifest.json,src/}` must be added
- * here too: `browser-install.test.ts` fails while one is missing or stale.
+ * A file added to `apps/browser-extension/{manifest.json,src/,icons/}` must be
+ * added here too: `browser-install.test.ts` fails while one is missing or stale.
  */
 // Each `@ts-expect-error`: TS cannot type a JS / HTML file imported AS TEXT
 // (TS7016 / TS2307); Bun inlines its content as a string.
@@ -23,11 +24,21 @@ import page from "../../../apps/browser-extension/src/page.js" with { type: "tex
 import popupHtml from "../../../apps/browser-extension/src/popup.html" with { type: "text" };
 // @ts-expect-error see above
 import popup from "../../../apps/browser-extension/src/popup.js" with { type: "text" };
+import { EXTENSION_ICONS_BASE64 } from "./browser-extension-icons.ts";
 
 const text = (v: unknown): string => (typeof v === "string" ? v : JSON.stringify(v, null, 2));
 
+/** The PNG icons the manifest names, as their exact bytes. */
+const icons: Record<string, Uint8Array> = Object.fromEntries(
+  Object.entries(EXTENSION_ICONS_BASE64).map(([rel, data]) => [
+    rel,
+    new Uint8Array(Buffer.from(data, "base64")),
+  ]),
+);
+
 /** Relative path under the extension folder → file content. */
-export const EXTENSION_ASSETS: Readonly<Record<string, string>> = {
+export const EXTENSION_ASSETS: Readonly<Record<string, string | Uint8Array>> = {
+  ...icons,
   "manifest.json": text(manifest),
   "src/background.js": text(background),
   "src/console-hook.js": text(consoleHook),

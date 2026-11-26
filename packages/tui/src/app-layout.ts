@@ -1,4 +1,4 @@
-import type { WorkflowRow } from "@tentacle/protocol";
+import type { BrowserStatusResult, WorkflowRow } from "@tentacle/protocol";
 /**
  * docs/feat/app-decomposition.md S10 — the frame's VIEW-MODEL, pure and
  * React-free (AGENTS §7: every decision with branching lives in a pure module,
@@ -39,6 +39,7 @@ import {
   listVisible,
 } from "./background-list.ts";
 import type { BackgroundAgentRow } from "./background-view.ts";
+import { browserStatusSign } from "./browser-view.ts";
 import { type CapsPhase, capsMarker } from "./capability-toggles.ts";
 import {
   type QuitConfirmFacts,
@@ -145,6 +146,11 @@ export interface FrameInput {
    */
   readonly capsPhase?: CapsPhase;
   /**
+   * The session's last `browser/status` read (browser-inspect B6a): the status
+   * bar's tab count. Null/absent: not read — the sign then shows no count.
+   */
+  readonly browserStatus?: BrowserStatusResult | null;
+  /**
    * The session is open daemon-side (`SessionController.opened()`), so a panel
    * can tell "not started yet" from "this runtime has none"
    * (docs/fix/workflows-ux.md S1: the `/workflow` panel said "this session is not
@@ -219,6 +225,7 @@ export function frameLayout(input: FrameInput) {
     panel,
     sessionId,
     capsPhase,
+    browserStatus,
     sessionOpened,
     field,
     attach,
@@ -275,7 +282,9 @@ export function frameLayout(input: FrameInput) {
     ? panelView(panel, columns, panelMaxBody(termRows), sessionId, capsPhase, sessionOpened)
     : null;
   // The status-line marker while something is off (owner Q2): null otherwise.
-  const capsShown = capsMarker(capsPhase?.kind === "on" ? capsPhase.caps : undefined);
+  const liveCaps = capsPhase?.kind === "on" ? capsPhase.caps : undefined;
+  const capsShown = capsMarker(liveCaps);
+  const browserSign = browserStatusSign(liveCaps, browserStatus ?? null);
   // Rows above the input/panel while a turn runs: the thinking line + the
   // queued-message lines (each one row: `wrap="truncate-end"`) + the send-now
   // hint row under them + one blank row between the hint and the thinking line.
@@ -486,6 +495,7 @@ export function frameLayout(input: FrameInput) {
     inputBoxRows,
     listView,
     capsShown,
+    browserSign,
     shown,
     slot,
     runningRows,

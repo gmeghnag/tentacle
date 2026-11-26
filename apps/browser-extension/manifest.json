@@ -3,6 +3,12 @@
   "name": "tentacle browser",
   "version": "0.1.0",
   "description": "Lets tentacle see the tabs of its own group in this Chrome, and nothing else.",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAruiJ+p8Fr+cMdp+uiPZ2ko4tnjdY9wpoGSL/XIlSeHkzK8X/Elqeve61zVwGlDjzGlLx/+21EezLABa+X9VjOUQsNPucCo0khCYGH4feBMwbMxfPdqNzzTZmgWphJpl/kvrZVaqGpdPUO0ovvITbdx1kZVDEPsaSAbicGnXLUHuNFg6c6eSk8j6vQBU/FsGPakzllMOp8LXjFk6bJjvqZY6z/mBTVEIjeqyoWAy17uuYNu9cf2rkgwZApmD8WUrZ6gidkcyyYDaMmmntM+gD32T7p1SdEQB56eOs2MRhZPKpV2T6vCqykosFP/73/11LgCmCjhWbolZO0VuEV15kCQIDAQAB",
   "permissions": [
     "nativeMessaging",
@@ -14,7 +20,10 @@
     "storage"
   ],
   "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "src/background.js", "type": "module" },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
@@ -23,5 +32,13 @@
       "all_frames": false
     }
   ],
-  "action": { "default_title": "tentacle browser", "default_popup": "src/popup.html" }
+  "action": {
+    "default_title": "tentacle browser",
+    "default_popup": "src/popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    }
+  }
 }
