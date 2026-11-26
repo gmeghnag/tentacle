@@ -17,6 +17,8 @@ import background from "../../../apps/browser-extension/src/background.js" with 
 // @ts-expect-error see above
 import consoleHook from "../../../apps/browser-extension/src/console-hook.js" with { type: "text" };
 // @ts-expect-error see above
+import labels from "../../../apps/browser-extension/src/labels.js" with { type: "text" };
+// @ts-expect-error see above
 import ops from "../../../apps/browser-extension/src/ops.js" with { type: "text" };
 // @ts-expect-error see above
 import page from "../../../apps/browser-extension/src/page.js" with { type: "text" };
@@ -42,6 +44,7 @@ export const EXTENSION_ASSETS: Readonly<Record<string, string | Uint8Array>> = {
   "manifest.json": text(manifest),
   "src/background.js": text(background),
   "src/console-hook.js": text(consoleHook),
+  "src/labels.js": text(labels),
   "src/ops.js": text(ops),
   "src/page.js": text(page),
   "src/popup.html": text(popupHtml),

@@ -3,6 +3,7 @@
 // ownership; this layer still refuses what Chrome would let through but we must
 // not touch (extension pages, chrome://, non-http(s)), and it reports facts —
 // the decision to ask is the daemon's (docs/feat/browser-inspect.md §5).
+import { groupLabel } from "./labels.js";
 export const DEBUGGER_IDLE_MS = 10 * 60 * 1000;
 
 export function isTouchable(url) {
@@ -97,7 +98,10 @@ export function createOps({
     );
     if (s.groupId === undefined) {
       s.groupId = groupId;
-      await chrome.tabGroups.update(groupId, { title: `tentacle · ${s.title}`, color: "grey" });
+      await chrome.tabGroups.update(groupId, {
+        title: groupLabel(s.title, session),
+        color: "grey",
+      });
     }
     s.tabs.add(tabId);
     tabSession.set(tabId, session);
@@ -396,7 +400,7 @@ export function createOps({
     if (!s) return fail("this session has not claimed the browser");
     s.title = op.title;
     if (s.groupId !== undefined) {
-      await chrome.tabGroups.update(s.groupId, { title: `tentacle · ${s.title}` });
+      await chrome.tabGroups.update(s.groupId, { title: groupLabel(s.title, op.sessionUid) });
     }
     return ok({});
   }
@@ -408,13 +412,6 @@ export function createOps({
       tracing.delete(tab);
       tabSession.delete(tab);
       await detach(tab);
-    }
-    if (s.groupId !== undefined) {
-      try {
-        await chrome.tabGroups.update(s.groupId, { title: `tentacle · ${s.title} (ended)` });
-      } catch {
-        // group already gone
-      }
     }
     sessions.delete(op.sessionUid);
     return ok({});

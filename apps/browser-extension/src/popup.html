@@ -1,11 +1,106 @@
 <!doctype html>
+<html lang="en">
 <meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="light dark" />
+<title>tentacle browser</title>
 <style>
-  body { font: 13px system-ui; width: 260px; padding: 10px; }
-  button, select { width: 100%; margin-top: 6px; }
-  #state { color: #555; }
+  :root {
+    --bg: #f7f6f9;
+    --fg: #1c1b20;
+    --muted: #6b6874;
+    --line: #e1dfe7;
+    --hover: #eceaf2;
+    --sel: #e6dcf3;
+    --accent: #5b2a86;
+    --on-accent: #ffffff;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17151c;
+      --fg: #ecebf0;
+      --muted: #9a97a6;
+      --line: #2b2833;
+      --hover: #221f2a;
+      --sel: #31264a;
+      --accent: #c9a6f2;
+      --on-accent: #17151c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; width: 320px; background: var(--bg); color: var(--fg);
+    font: 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  header svg { width: 22px; height: 22px; shape-rendering: crispEdges; flex: none; }
+  header h1 { margin: 0; font-size: 14px; font-weight: 650; letter-spacing: .01em; flex: 1; }
+  #link { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+  #link i { width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--muted); }
+  #link.on i { background: var(--accent); border-color: var(--accent); }
+  h2 {
+    margin: 0; padding: 8px 12px 4px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+  }
+  ul { list-style: none; margin: 0; padding: 0; max-height: 240px; overflow-y: auto; }
+  li { border-top: 1px solid var(--line); }
+  li:last-child { border-bottom: 1px solid var(--line); }
+  li button {
+    all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 8px;
+    width: 100%; min-height: 40px; padding: 4px 12px 4px 9px; cursor: pointer;
+    border-left: 3px solid transparent;
+  }
+  li button:hover { background: var(--hover); }
+  li button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  li button[aria-selected="true"] { background: var(--sel); border-left-color: var(--accent); }
+  .txt { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  [aria-selected="true"] .name { font-weight: 650; }
+  .name.unnamed { font-style: italic; color: var(--muted); }
+  .sid { font: 11px var(--mono); color: var(--muted); }
+  .tick { width: 14px; text-align: center; color: var(--accent); font-weight: 700; visibility: hidden; }
+  [aria-selected="true"] .tick { visibility: visible; }
+  .empty { padding: 22px 16px 18px; text-align: center; }
+  .empty svg { width: 36px; height: 36px; opacity: .55; shape-rendering: crispEdges; }
+  .empty p { margin: 8px 0 0; font-weight: 600; }
+  .empty small { display: block; margin-top: 4px; color: var(--muted); font-size: 12px; }
+  footer { padding: 10px 12px 12px; }
+  #give {
+    all: unset; box-sizing: border-box; display: block; width: 100%; min-height: 34px;
+    padding: 8px 10px; text-align: center; font-weight: 600; cursor: pointer;
+    background: var(--accent); color: var(--on-accent); border-radius: 4px;
+  }
+  #give:hover:not(:disabled) { filter: brightness(1.1); text-decoration: underline; }
+  #give:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+  #give:disabled { background: transparent; color: var(--muted); border: 1px dashed var(--muted); cursor: default; }
+  #msg { margin: 6px 0 0; min-height: 15px; font-size: 11px; color: var(--muted); text-align: center; }
+  [hidden] { display: none !important; }
 </style>
-<div id="state">…</div>
-<select id="session"></select>
-<button id="give">Give this tab to tentacle (read-only until it asks)</button>
+<header>
+  <svg id="mascot" viewBox="0 0 9 9" aria-hidden="true"><rect x="2" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="3" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="4" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="5" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="6" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="1" width="1" height="1" fill="#0E8AA8"/><rect x="2" y="1" width="1" height="1" fill="#3FCFE6"/><rect x="3" y="1" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="1" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="1" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="1" width="1" height="1" fill="#3FCFE6"/><rect x="7" y="1" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="2" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="2" width="1" height="1" fill="#3FCFE6"/><rect x="2" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="3" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="7" y="2" width="1" height="1" fill="#3FCFE6"/><rect x="8" y="2" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="3" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="2" y="3" width="1" height="1" fill="#083A47"/><rect x="3" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="3" width="1" height="1" fill="#083A47"/><rect x="7" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="8" y="3" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="4" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="2" y="4" width="1" height="1" fill="#083A47"/><rect x="3" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="4" width="1" height="1" fill="#083A47"/><rect x="7" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="8" y="4" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="5" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="5" width="1" height="1" fill="#B7F3FB"/><rect x="2" y="5" width="1" height="1" fill="#B7F3FB"/><rect x="3" y="5" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="5" width="1" height="1" fill="#3FCFE6"/><rect x="5" y="5" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="5" width="1" height="1" fill="#B7F3FB"/><rect x="7" y="5" width="1" height="1" fill="#B7F3FB"/><rect x="8" y="5" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="6" width="1" height="1" fill="#0E8AA8"/><rect x="2" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="3" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="7" y="6" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="7" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="2" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="3" y="7" width="1" height="1" fill="#0E8AA8"/><rect x="4" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="5" y="7" width="1" height="1" fill="#0E8AA8"/><rect x="6" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="7" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="8" y="7" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="8" width="1" height="1" fill="#0E8AA8"/><rect x="2" y="8" width="1" height="1" fill="#0E8AA8"/><rect x="4" y="8" width="1" height="1" fill="#0E8AA8"/><rect x="6" y="8" width="1" height="1" fill="#0E8AA8"/><rect x="7" y="8" width="1" height="1" fill="#0E8AA8"/></svg>
+  <h1>tentacle</h1>
+  <span id="link"><i></i><span id="linktext">…</span></span>
+</header>
+<section id="list-view" hidden>
+  <h2>Choose a session</h2>
+  <ul id="sessions" role="listbox" aria-label="Choose a session"></ul>
+</section>
+<section id="empty-view" class="empty" hidden>
+  <svg viewBox="0 0 9 9" aria-hidden="true"><rect x="2" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="3" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="4" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="5" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="6" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="1" width="1" height="1" fill="#0E8AA8"/><rect x="2" y="1" width="1" height="1" fill="#3FCFE6"/><rect x="3" y="1" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="1" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="1" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="1" width="1" height="1" fill="#3FCFE6"/><rect x="7" y="1" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="2" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="2" width="1" height="1" fill="#3FCFE6"/><rect x="2" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="3" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="7" y="2" width="1" height="1" fill="#3FCFE6"/><rect x="8" y="2" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="3" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="2" y="3" width="1" height="1" fill="#083A47"/><rect x="3" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="3" width="1" height="1" fill="#083A47"/><rect x="7" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="8" y="3" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="4" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="2" y="4" width="1" height="1" fill="#083A47"/><rect x="3" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="4" width="1" height="1" fill="#083A47"/><rect x="7" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="8" y="4" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="5" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="5" width="1" height="1" fill="#B7F3FB"/><rect x="2" y="5" width="1" height="1" fill="#B7F3FB"/><rect x="3" y="5" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="5" width="1" height="1" fill="#3FCFE6"/><rect x="5" y="5" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="5" width="1" height="1" fill="#B7F3FB"/><rect x="7" y="5" width="1" height="1" fill="#B7F3FB"/><rect x="8" y="5" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="6" width="1" height="1" fill="#0E8AA8"/><rect x="2" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="3" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="7" y="6" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="7" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="2" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="3" y="7" width="1" height="1" fill="#0E8AA8"/><rect x="4" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="5" y="7" width="1" height="1" fill="#0E8AA8"/><rect x="6" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="7" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="8" y="7" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="8" width="1" height="1" fill="#0E8AA8"/><rect x="2" y="8" width="1" height="1" fill="#0E8AA8"/><rect x="4" y="8" width="1" height="1" fill="#0E8AA8"/><rect x="6" y="8" width="1" height="1" fill="#0E8AA8"/><rect x="7" y="8" width="1" height="1" fill="#0E8AA8"/></svg>
+  <p>No tentacle session is using the browser</p>
+  <small>Ask a session to open a page.</small>
+</section>
+<section id="unlinked-view" class="empty" hidden>
+  <svg viewBox="0 0 9 9" aria-hidden="true"><rect x="2" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="3" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="4" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="5" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="6" y="0" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="1" width="1" height="1" fill="#0E8AA8"/><rect x="2" y="1" width="1" height="1" fill="#3FCFE6"/><rect x="3" y="1" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="1" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="1" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="1" width="1" height="1" fill="#3FCFE6"/><rect x="7" y="1" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="2" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="2" width="1" height="1" fill="#3FCFE6"/><rect x="2" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="3" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="2" width="1" height="1" fill="#5FE0F2"/><rect x="7" y="2" width="1" height="1" fill="#3FCFE6"/><rect x="8" y="2" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="3" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="2" y="3" width="1" height="1" fill="#083A47"/><rect x="3" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="3" width="1" height="1" fill="#083A47"/><rect x="7" y="3" width="1" height="1" fill="#5FE0F2"/><rect x="8" y="3" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="4" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="2" y="4" width="1" height="1" fill="#083A47"/><rect x="3" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="4" width="1" height="1" fill="#083A47"/><rect x="7" y="4" width="1" height="1" fill="#5FE0F2"/><rect x="8" y="4" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="5" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="5" width="1" height="1" fill="#B7F3FB"/><rect x="2" y="5" width="1" height="1" fill="#B7F3FB"/><rect x="3" y="5" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="5" width="1" height="1" fill="#3FCFE6"/><rect x="5" y="5" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="5" width="1" height="1" fill="#B7F3FB"/><rect x="7" y="5" width="1" height="1" fill="#B7F3FB"/><rect x="8" y="5" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="6" width="1" height="1" fill="#0E8AA8"/><rect x="2" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="3" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="4" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="5" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="6" y="6" width="1" height="1" fill="#5FE0F2"/><rect x="7" y="6" width="1" height="1" fill="#0E8AA8"/><rect x="0" y="7" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="2" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="3" y="7" width="1" height="1" fill="#0E8AA8"/><rect x="4" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="5" y="7" width="1" height="1" fill="#0E8AA8"/><rect x="6" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="7" y="7" width="1" height="1" fill="#3FCFE6"/><rect x="8" y="7" width="1" height="1" fill="#0E8AA8"/><rect x="1" y="8" width="1" height="1" fill="#0E8AA8"/><rect x="2" y="8" width="1" height="1" fill="#0E8AA8"/><rect x="4" y="8" width="1" height="1" fill="#0E8AA8"/><rect x="6" y="8" width="1" height="1" fill="#0E8AA8"/><rect x="7" y="8" width="1" height="1" fill="#0E8AA8"/></svg>
+  <p>Not linked to tentacle</p>
+  <small>Run <code>tentacle browser install</code>, then restart Chrome.</small>
+</section>
+<footer id="footer">
+  <button id="give" type="button">Give this tab to tentacle</button>
+  <div id="msg" role="status">Read-only until the session asks.</div>
+</footer>
 <script src="popup.js" type="module"></script>

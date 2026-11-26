@@ -201,7 +201,7 @@ export function createBrowserToolset(options: BrowserToolsetOptions): BrowserToo
 
   async function claim(session: string): Promise<void> {
     if (claimed.has(session)) return;
-    const title = titles.get(session) ?? session.slice(0, 8);
+    const title = titles.get(session) ?? "";
     await backend.call({ op: "claim", sessionUid: session, title });
     claimed.add(session);
   }
