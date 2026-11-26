@@ -22,6 +22,7 @@ import {
   type KnownSessionUpdateParams,
   PROTOCOL_VERSION,
   type QuestionRequestUpdate,
+  QuestionRequestUpdateSchema,
 } from "@tentacle/protocol";
 import { ToolRegistry } from "@tentacle/tools";
 import { RpcError, RpcPeer, createChannelPair } from "@tentacle/transport";
@@ -53,8 +54,12 @@ const QUESTION = {
   reply: { maxChars: 4000 },
 };
 
+const WF = { name: "rassegna", runId: "wf-1", stepId: "generate", index: 1, count: 5 };
+
 /** A daemon whose one tool raises a remote question through the session's broker. */
-function daemon(opts: { background?: boolean; answersAutoAccept?: boolean } = {}) {
+function daemon(
+  opts: { background?: boolean; answersAutoAccept?: boolean; workflow?: boolean } = {},
+) {
   const responses: PermissionResponse[] = [];
   const childSignal = new AbortController();
   /** The asker's own withdrawal (a `both` race lost): `options.withdraw`. */
@@ -74,6 +79,9 @@ function daemon(opts: { background?: boolean; answersAutoAccept?: boolean } = {}
           const response = await permissions.request(QUESTION, {
             toolCallId: "c1",
             origin: "subagent",
+            // The workflow driver's own origin (a step's ask); this fake tool is
+            // the step's child, so it is the only way to raise one here.
+            ...(opts.workflow ? { workflow: WF } : {}),
             agent: opts.background
               ? { type: "a2a:acme", description: "review", id: "sa-1" }
               : { type: "a2a:acme", description: "review" },
@@ -199,6 +207,29 @@ describe("question_request: raised, replayed, answered", () => {
         }),
       ),
     ).toBe(DomainErrorCode.PermissionNotPending);
+  });
+
+  test("a workflow step's question keeps its run attribution on the wire", async () => {
+    // Mutation: the daemon forwards `workflow` to the permission branch only
+    // (docs/fix/a2a-question-workflow-label.md, repro line 1) → red.
+    const d = daemon({ workflow: true });
+    const a = await d.connect();
+    await a.client.request("session/open", { sessionId: "S", create: true });
+    const turn = prompt(a.client);
+    await until(() => a.questions().length === 1);
+    const q = a.questions()[0];
+    if (!q) throw new Error("no question");
+    expect(q.workflow).toEqual(WF);
+    // And a client's own parse of that very update accepts it.
+    expect(QuestionRequestUpdateSchema.safeParse(q).success).toBe(true);
+    await a.client.request("session/answer_question", {
+      sessionId: "S",
+      requestId: q.requestId,
+      answer: "release-1",
+    });
+    await turn;
+    await until(() => d.responses.length === 1);
+    expect(d.responses[0]?.message).toBe("release-1");
   });
 
   test("a skip (no answer) → allowed: false, no message", async () => {

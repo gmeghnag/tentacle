@@ -54,6 +54,8 @@ export interface WorkflowRunScreenProps {
   readonly onMode: (mode: RunMode) => void;
   /** The slim row's `Review`: bring the parked ask's sheet back over this run. */
   readonly onReviewAsk: () => void;
+  /** The slim row's `Answer`: open a question's own text field (it sends nothing). */
+  readonly onOpenAnswer: () => void;
   readonly onStop: () => void;
   readonly onResume: () => void;
   readonly onRerun: (stepId: string) => void;
@@ -85,11 +87,13 @@ function AskPanel({
   palette,
   bar,
   onReviewAsk,
+  onOpenAnswer,
   onOpenSession,
 }: {
   readonly palette: Palette;
   readonly bar: AskBar;
   readonly onReviewAsk: () => void;
+  readonly onOpenAnswer: () => void;
   readonly onOpenSession: () => void;
 }): JSX.Element {
   const row =
@@ -97,8 +101,10 @@ function AskPanel({
       ? {
           title: bar.ask.title,
           origin: bar.ask.origin === undefined ? "This run" : originWords(bar.ask.origin).lead,
-          action: "Review",
-          onPress: onReviewAsk,
+          // The controller decided the word (`askBarFor`); a question takes text,
+          // not a grant, so its tap opens the sheet's field.
+          action: bar.action === "answer" ? "Answer" : "Review",
+          onPress: bar.action === "answer" ? onOpenAnswer : onReviewAsk,
         }
       : bar.kind === "foreign"
         ? {
@@ -629,6 +635,7 @@ export function WorkflowRunScreen(props: WorkflowRunScreenProps): JSX.Element {
           palette={palette}
           bar={state.askBar}
           onReviewAsk={props.onReviewAsk}
+          onOpenAnswer={props.onOpenAnswer}
           onOpenSession={props.onOpenSession}
         />
       ) : null}

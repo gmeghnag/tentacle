@@ -2207,6 +2207,7 @@ function WorkflowRunRoute({
         onBack={onBack}
         onMode={(mode) => controller.setMode(mode)}
         onReviewAsk={() => controller.reviewAsk()}
+        onOpenAnswer={() => controller.openAnswer()}
         onStop={() => void controller.stop()}
         onResume={() => void controller.resume()}
         onRerun={(stepId) => void controller.rerun(stepId)}
