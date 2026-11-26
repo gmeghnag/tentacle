@@ -144,6 +144,35 @@ describe("serve's own daemon record (owner Q6)", () => {
     expect(readDaemonRecords(configDir)).toEqual([]);
   });
 
+  test("every start sweeps a dead pid's record, and `stop` drops the exit net", async () => {
+    // docs/fix/daemon-records-stale.md. A REALLY dead pid: nothing is injected.
+    const gone = Bun.spawn(["true"]);
+    await gone.exited;
+    const dir = mkdtempSync(join(tmpdir(), "serve-devices-sweep-"));
+    dirs.push(dir);
+    const config = await loadConfig({
+      configDir: join(dir, "config"),
+      cwd: dir,
+      scaffold: false,
+      env: { HOME: dir, TENTACLE_MODEL_API_KEY: "k" },
+    });
+    const { writeDaemonRecord } = await import("@tentacle/daemon");
+    writeDaemonRecord(config.configDir, {
+      pid: gone.pid,
+      host: "127.0.0.1",
+      port: 4001,
+      tls: false,
+      cwd: dir,
+      startedAt: 5,
+    });
+    const listeners = process.listenerCount("exit");
+    const handle = await startDaemon(config, { host: "127.0.0.1", port: 0 });
+    handles.push(handle);
+    expect(readdirSync(join(config.configDir, DAEMONS_DIR))).toEqual([`${process.pid}.json`]);
+    await handles.pop()?.stop();
+    expect(process.listenerCount("exit")).toBe(listeners);
+  });
+
   test("a TLS server records `tls: true` (what `pair` needs to say wss)", async () => {
     // No real cert here: the record is the contract, so the field is pinned
     // through the store's own reader with a hand-written record.
