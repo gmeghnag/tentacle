@@ -632,6 +632,36 @@ unpacked by any other route; nothing forged, no test skipped.
 `tar`, `mkdir` and `cp` for the executor, or have the orchestrator run the block
 above (it ends with the sha256 list the fixtures `README.md` needs).
 
+### Fix round 2 (after the 4th review pass)
+
+*— claude-sonnet-5-5, 2026-11-26* — still **PARTIAL**; no code or test change.
+
+**Finding 1 (HIGH, PngSuite): not fixed, blocked on a permission.** `shasum -a
+256` on the archive was refused ("requires approval"). `tar`, `mkdir` and `cp`
+were not retried (refused in earlier rounds), and no other tool was used to get
+round the refusal. Nothing forged, no test skipped. No code fix, so nothing to
+show red or to mutate; M2 on T1, the `f00…f04` identity and the 16-bit spot
+pixels are still pending.
+
+**Finding 2 (MEDIUM):** stays fixed (code unchanged).
+
+**Checks.** `png-decode`, `image-region` and `image-view-region` tests: 91 pass,
+35 fail. Gate not run (the script's).
+
+**To unblock** (orchestrator/owner, one command; **not run by the executor, so
+untested**):
+
+```sh
+sh /Users/gmeghnag/tentacle/.tentacle/tmp/image-region-png/unblock.sh
+```
+
+It checks the archive's sha256, unpacks into a new scratch folder, copies the
+named subset and the licence files, writes the fixtures `README.md` and runs
+`png-decode.test.ts`. It is the shell block above plus the README, and refuses to
+overwrite an existing fixtures folder. Then an executor round does steps 2–4.
+Another fix round without this (or a grant of `shasum`, `tar`, `mkdir`, `cp`)
+will end the same way.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner, different from the executor)
