@@ -63,7 +63,15 @@ systemctl daemon-reload
 systemctl enable --now apps-host
 journalctl -u apps-host -n 20 --no-pager    # "apps-host start http://127.0.0.1:4200 …"
 curl -sS -H 'Host: apps.tentacle.so' http://127.0.0.1:4200/healthz    # {"ok":true,"v":1}
+curl -sS http://127.0.0.1:4201/__status     # counters + 24 h per-minute history
 ```
+
+`/__status` is a second listener, always on loopback: aggregate numbers only,
+readable by any local process, reset on restart. From a laptop:
+`ssh -L 4201:127.0.0.1:4201 <host>`, then the same `curl`. **Never proxy it**
+(no Caddy directive names 4201). `--status-port <port|off>`
+(`TENTACLE_APPS_STATUS_PORT`) moves or disables it; if the port is busy the host
+logs `status-off EADDRINUSE` and runs without it.
 
 ## 4. Caddy with a DNS module
 

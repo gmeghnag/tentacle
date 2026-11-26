@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { APPS_LIMITS, APPS_LIMIT_NAMES, limitEnv, limitFlag } from "../src/limits.ts";
-import { appsHostUsage, parseAppsHostArgs } from "../src/main.ts";
+import { DEFAULT_APPS_STATUS_PORT, appsHostUsage, parseAppsHostArgs } from "../src/main.ts";
 
 const REQUIRED = [
   "--domain",
@@ -36,6 +36,7 @@ describe("parseAppsHostArgs", () => {
       operatorDir: "/etc/tentacle-apps",
       trustProxy: false,
       limits: {},
+      statusPort: DEFAULT_APPS_STATUS_PORT,
       help: false,
     });
   });
@@ -114,6 +115,45 @@ describe("parseAppsHostArgs", () => {
       expect(error([...REQUIRED, "--terms-url", url])).toContain("--terms-url");
     }
     expect(error([...REQUIRED, "--data-dir", " "])).toContain("--data-dir");
+  });
+
+  test("the status port: on by default; a flag or the environment, and the flag wins", () => {
+    expect(DEFAULT_APPS_STATUS_PORT).toBe(4201);
+    expect(ok(REQUIRED).statusPort).toBe(4201);
+    expect(ok([...REQUIRED, "--status-port", "5001"]).statusPort).toBe(5001);
+    const env = { TENTACLE_APPS_STATUS_PORT: "5002" };
+    expect(ok(REQUIRED, env).statusPort).toBe(5002);
+    expect(ok([...REQUIRED, "--status-port", "5001"], env).statusPort).toBe(5001);
+    expect(ok([...REQUIRED, "--status-port", "off"]).statusPort).toBeUndefined();
+    expect(ok(REQUIRED, { TENTACLE_APPS_STATUS_PORT: "off" }).statusPort).toBeUndefined();
+  });
+
+  test("an invalid status port is a refusal, naming the source", () => {
+    for (const value of ["0", "65536", "1.5", "on", ""]) {
+      expect(error([...REQUIRED, "--status-port", value])).toBe(
+        "--status-port must be a port number or off",
+      );
+      expect(error(REQUIRED, { TENTACLE_APPS_STATUS_PORT: value })).toBe(
+        "TENTACLE_APPS_STATUS_PORT must be a port number or off",
+      );
+    }
+    expect(error([...REQUIRED, "--status-port"])).toBe("--status-port needs a value");
+  });
+
+  test("a status port equal to the main port is refused, however the two were set", () => {
+    const refused = "--status-port must differ from --port";
+    expect(error([...REQUIRED, "--status-port", "4200"])).toBe(refused);
+    expect(error([...REQUIRED, "--port", "4201"])).toBe(refused);
+    expect(error(REQUIRED, { TENTACLE_APPS_PORT: "9000", TENTACLE_APPS_STATUS_PORT: "9000" })).toBe(
+      refused,
+    );
+    expect(error([...REQUIRED, "--port", "4201", "--status-port", "off"])).toBe("");
+  });
+
+  test("--help names the status flag, its default and the variable", () => {
+    for (const text of ["--status-port", "4201", "TENTACLE_APPS_STATUS_PORT", "/__status"]) {
+      expect(appsHostUsage()).toContain(text);
+    }
   });
 
   test("an unknown argument is refused; --help needs nothing else", () => {

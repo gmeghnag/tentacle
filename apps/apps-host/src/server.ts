@@ -14,6 +14,8 @@ import {
 } from "@tentacle/protocol";
 import { clientIpOf, limiterKeyOf } from "@tentacle/relay/client-ip";
 import { createLogLimiter } from "@tentacle/relay/log-limit";
+import { createMinuteStats } from "@tentacle/relay/status";
+import { startStatusListener } from "@tentacle/relay/status-listener";
 import { type RandomBytes, hostRoute } from "./app-id.ts";
 import { BODY_RETRY_MS, BodyBudget, declaredLength } from "./body-budget.ts";
 import { HostCore, type Reservation, type Reserved } from "./host-core.ts";
@@ -71,11 +73,18 @@ export interface AppsHostOptions {
   readonly onLog?: (line: string) => void;
   /** Read `X-Forwarded-For` from a loopback peer (required behind Caddy). */
   readonly trustProxy?: boolean;
+  /**
+   * The loopback-only status listener's port (`0` = ephemeral). Off when absent;
+   * a port that cannot be bound is one `status-off` line, never a failed start.
+   */
+  readonly statusPort?: number;
 }
 
 export interface RunningAppsHost {
   readonly url: string;
   readonly port: number;
+  /** The status listener's port, `undefined` when it is off or could not bind. */
+  readonly statusPort: number | undefined;
   /** Run one sweep now (a test drives time instead of waiting for a tick). */
   sweep(): Promise<void>;
   /** The core, for a test's assertions about state. */
@@ -205,6 +214,15 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     maxPerIp: limits.maxUploadsPerIp,
   });
 
+  const stats = createMinuteStats({ now, counters: ["requests", "reports"] as const });
+  /** The live gauges: recorded into the current minute, and returned for the body. */
+  const sample = () => {
+    const { apps, bytes } = core.liveStats();
+    stats.set("liveApps", apps);
+    stats.set("storeBytes", bytes);
+    return { liveApps: apps, storeBytes: bytes };
+  };
+
   // ── the store, one writer per id ──────────────────────────────────────────
 
   /** The tail of each id's writes: they reach the disk in the order decided. */
@@ -274,6 +292,7 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
       log(`takedown ${id} ${reason}`);
     }
     await apply(swept.effects);
+    sample();
     nonces.prune(now());
     try {
       await store.pruneReports(now() - limits.reportRetentionMs);
@@ -548,6 +567,7 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
       log(`store-error report ${errno(error)}`);
       return pageResponse(pages.reportRefused(), 503);
     }
+    stats.add("reports");
     log(`report ${app} ${reason} ip ${ip}`);
     return new Response(null, {
       status: 303,
@@ -646,6 +666,7 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     maxRequestBodySize: limits.maxAppBytes,
     development: false,
     async fetch(req, srv) {
+      stats.add("requests");
       const url = new URL(req.url);
       const route = hostRoute(req.headers.get("host"), domain);
       if (route.kind === "unknown") {
@@ -675,15 +696,38 @@ export async function startAppsHost(options: AppsHostOptions): Promise<RunningAp
     }
   }, limits.sweepMs);
 
+  /** `/__status`: aggregate numbers only — no app id, key, address or name. */
+  const statusBody = () => {
+    // Sampled first, so the history carries what `now` says.
+    const gauges = sample();
+    const { uptimeSeconds, totals, lastMinute, history } = stats.snapshot();
+    const { rss, heapUsed } = process.memoryUsage();
+    return {
+      service: "apps-host",
+      uptimeSeconds,
+      memory: { rssBytes: rss, heapUsedBytes: heapUsed },
+      now: { ...gauges, killSwitch: operator.current().kill },
+      totals,
+      lastMinute,
+      history,
+    };
+  };
+  const status =
+    options.statusPort === undefined
+      ? undefined
+      : startStatusListener({ port: options.statusPort, body: statusBody, log });
+
   let stopped: Promise<void> | undefined;
   return {
     url: `http://${options.host ?? DEFAULT_APPS_HOST}:${server.port}`,
     port: server.port ?? 0,
+    statusPort: status?.port,
     core,
     sweep,
     stop() {
       stopped ??= (async () => {
         clearInterval(timer);
+        status?.stop();
         server.stop(true);
         await sweeping;
         await Promise.all([...queues.values()]);

@@ -3,12 +3,15 @@
  * `docs/ops/apps-host-deploy.md`). Argument parsing is pure; an invalid value
  * is a refusal to start.
  */
+import { parseStatusPort } from "@tentacle/relay/status";
 import { APPS_LIMITS, APPS_LIMIT_NAMES, type AppsLimits, limitEnv, limitFlag } from "./limits.ts";
 import { DEFAULT_APPS_HOST, DEFAULT_APPS_PORT, fileReader, startAppsHost } from "./server.ts";
 import { createFsStore } from "./store.ts";
 
 export const DEFAULT_DATA_DIR = "/var/lib/tentacle-apps";
 export const DEFAULT_OPERATOR_DIR = "/etc/tentacle-apps";
+/** The loopback status listener's port in the deployed binary (never proxied). */
+export const DEFAULT_APPS_STATUS_PORT = 4201;
 
 export interface AppsHostArgs {
   readonly host: string;
@@ -20,6 +23,8 @@ export interface AppsHostArgs {
   readonly operatorDir: string;
   readonly trustProxy: boolean;
   readonly limits: Partial<AppsLimits>;
+  /** The loopback status listener's port; `undefined` = `off`. */
+  readonly statusPort: number | undefined;
   readonly help: boolean;
 }
 
@@ -31,6 +36,7 @@ const VALUE_FLAGS = {
   "--terms-url": "TENTACLE_APPS_TERMS_URL",
   "--data-dir": "TENTACLE_APPS_DATA_DIR",
   "--operator-dir": "TENTACLE_APPS_OPERATOR_DIR",
+  "--status-port": "TENTACLE_APPS_STATUS_PORT",
 } as const;
 
 type ValueFlag = keyof typeof VALUE_FLAGS;
@@ -50,6 +56,9 @@ Options:
                               read ONLY from a loopback peer. Required behind Caddy
   --data-dir <path>           Records, content, reports (default ${DEFAULT_DATA_DIR})
   --operator-dir <path>       kill-switch and takedowns (default ${DEFAULT_OPERATOR_DIR})
+  --status-port <port|off>    GET /__status (aggregate counters, no ids) on 127.0.0.1
+                              only, whatever --host says (default ${DEFAULT_APPS_STATUS_PORT}). Never
+                              proxy it. Must differ from --port
   -h, --help                  This text
 
 Limits (each a positive integer):
@@ -163,6 +172,14 @@ export function parseAppsHostArgs(
   if (port === undefined || port > 65_535) {
     return refuse(`${values.get("--port")?.from} must be a port number`);
   }
+  const parsedStatus = parseStatusPort(take("--status-port", String(DEFAULT_APPS_STATUS_PORT)));
+  if (parsedStatus === undefined) {
+    return refuse(`${values.get("--status-port")?.from} must be a port number or off`);
+  }
+  const statusPort = parsedStatus === "off" ? undefined : parsedStatus;
+  if (statusPort === port) {
+    return refuse("--status-port must differ from --port");
+  }
   for (const { value, from } of values.values()) {
     if (value.trim() === "") {
       return refuse(`${from} needs a value`);
@@ -196,6 +213,7 @@ export function parseAppsHostArgs(
       operatorDir,
       trustProxy,
       limits,
+      statusPort,
       help,
     },
   };
@@ -226,8 +244,12 @@ if (import.meta.main) {
     store: createFsStore(args.dataDir),
     readOperatorFile: fileReader(args.operatorDir),
     onLog: log,
+    ...(args.statusPort === undefined ? {} : { statusPort: args.statusPort }),
   });
   log(`start http://${args.host}:${server.port} domain ${args.domain} (apps API v1)`);
+  if (server.statusPort !== undefined) {
+    log(`status on http://127.0.0.1:${server.statusPort}/__status`);
+  }
   const shutdown = (): void => {
     void server.stop().then(() => process.exit(0));
   };

@@ -31,6 +31,10 @@ import {
   limitsFromFlags,
   startRelay,
 } from "./server.ts";
+import { parseStatusPort } from "./status.ts";
+
+/** The loopback status listener's port in the deployed binary (never proxied). */
+export const DEFAULT_RELAY_STATUS_PORT = 4101;
 
 export interface RelayArgs {
   readonly host: string;
@@ -48,6 +52,8 @@ export interface RelayArgs {
     readonly teamId?: string;
     readonly topic?: string;
   };
+  /** The loopback status listener's port; `undefined` = `off`. */
+  readonly statusPort: number | undefined;
   readonly help: boolean;
 }
 
@@ -79,10 +85,13 @@ Usage: tentacle-relay [options]
   --apns-key-id <id>            The .p8 key's 10-character id (Apple's console)
   --apns-team-id <id>           The Apple team id
   --apns-topic <bundle-id>      The app's bundle id push goes to (never daemon-supplied)
+  --status-port <port|off>      GET /__status (aggregate counters, no ids) on
+                                127.0.0.1 only, whatever --host says (default
+                                ${DEFAULT_RELAY_STATUS_PORT}). Never proxy it. Must differ from --port
   -h, --help                    This text
 
 Environment: TENTACLE_RELAY_HOST, TENTACLE_RELAY_PORT,
-TENTACLE_RELAY_TRUST_PROXY (1/true/0/false),
+TENTACLE_RELAY_TRUST_PROXY (1/true/0/false), TENTACLE_RELAY_STATUS_PORT,
 TENTACLE_RELAY_MAX_DIALS_PER_MINUTE / _MAX_STREAMS_PER_IP / _MAX_STREAMS_PER_ID /
 _MAX_IDS / _MAX_IDS_PER_IP / _MAX_HELLOS_PER_MINUTE / _MAX_PUSHES_PER_MINUTE /
 _MAX_PUSHES_PER_TOKEN_PER_MINUTE, and TENTACLE_RELAY_APNS_KEY_FILE /
@@ -143,6 +152,14 @@ export function parseRelayArgs(
       return { ok: false, error: "TENTACLE_RELAY_PORT must be a port number" };
     }
     port = parsed;
+  }
+  let statusPort: number | undefined = DEFAULT_RELAY_STATUS_PORT;
+  if (env.TENTACLE_RELAY_STATUS_PORT !== undefined) {
+    const parsed = parseStatusPort(env.TENTACLE_RELAY_STATUS_PORT);
+    if (parsed === undefined) {
+      return { ok: false, error: "TENTACLE_RELAY_STATUS_PORT must be a port number or off" };
+    }
+    statusPort = parsed === "off" ? undefined : parsed;
   }
   let help = false;
   let trustProxy = false;
@@ -234,6 +251,19 @@ export function parseRelayArgs(
       i = taken.next;
       continue;
     }
+    if (arg === "--status-port") {
+      const taken = take(i, arg);
+      if (typeof taken === "string") {
+        return { ok: false, error: taken };
+      }
+      const parsed = parseStatusPort(taken.value);
+      if (parsed === undefined) {
+        return { ok: false, error: "--status-port must be a port number or off" };
+      }
+      statusPort = parsed === "off" ? undefined : parsed;
+      i = taken.next;
+      continue;
+    }
     const limit = RELAY_LIMIT_FLAGS.find((flag) => arg === `--${flag}`);
     if (limit !== undefined) {
       const taken = take(i, arg);
@@ -278,7 +308,12 @@ export function parseRelayArgs(
     return { ok: false, error: `unknown argument: ${arg}` };
   }
 
-  return { ok: true, args: { host, port, limits, trustProxy, apns, help } };
+  // After the loop: either of the two may come from a flag or the environment.
+  if (statusPort === port) {
+    return { ok: false, error: "--status-port must differ from --port" };
+  }
+
+  return { ok: true, args: { host, port, limits, trustProxy, apns, statusPort, help } };
 }
 
 /** The `--help` text (exported so the test pins it without capturing stdout). */
@@ -369,10 +404,14 @@ if (import.meta.main) {
     limits: limitsFromFlags(parsed.args.limits),
     onLog: log,
     ...(apns === undefined ? {} : { apns }),
+    ...(parsed.args.statusPort === undefined ? {} : { statusPort: parsed.args.statusPort }),
   });
   process.stdout.write(
     `relay listening on ws://${parsed.args.host}:${server.port} (relay protocol v1)\n`,
   );
+  if (server.statusPort !== undefined) {
+    log(`status on http://127.0.0.1:${server.statusPort}/__status`);
+  }
   const shutdown = (): void => {
     server.stop();
     process.exit(0);

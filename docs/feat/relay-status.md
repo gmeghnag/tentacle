@@ -242,4 +242,80 @@ Gate: the four test directories' files above, then `bun run check`.
 
 ## Execution
 
+*— claude-sonnet-5-5, 2026-11-26* · uncommitted (the orchestrator's script gates it)
+
+### Load-bearing check (re-run before any edit): holds
+
+```
+relay /__status today: 404 not found
+proxied-shaped: {"peer":"127.0.0.1","xff":"203.0.113.7","host":"127.0.0.1:52716"}
+LAN dial: refused ECONNREFUSED
+second bind: threw EADDRINUSE
+```
+
+Caddy proxies only to 4100 / 4200 (`Caddyfile.relay:37`, `Caddyfile.apps:31`).
+
+### As built, in order
+
+| Slice | State | What |
+|---|---|---|
+| 1 shared | DONE | `apps/relay/src/status.ts`, `status-listener.ts`, two `package.json` exports |
+| 2 relay | DONE | `relay-counters.ts`, `server.ts`, `main.ts` (4101) |
+| 3 apps host | DONE | `host-core.ts` `liveStats()`, `server.ts`, `main.ts` (4201) |
+| 4 runbooks | DONE | `relay-deploy.md` §9, `apps-host-deploy.md` §3 |
+| 5 changelog | DONE | `changelog.d/relay-status.added.md` |
+
+No protocol change, no schema regeneration, no unit or Caddyfile change.
+
+### Red first
+
+- Relay pure + socket tests before the modules: `2 pass, 11 fail, 2 errors` (the
+  two errors are the missing pure modules; the socket tests failed on "the status
+  listener is not up").
+- Relay `main` / `deploy` (constant exported, parser untouched): `56 pass, 8 fail`.
+- Apps host `status` / `main` / `deploy` (constant only): `21 pass, 14 fail`.
+- Green on old code, as planned: the public-404 and Caddy pins.
+
+### Mutations (each applied, run, reverted)
+
+| Mutation | Failed |
+|---|---|
+| `isLoopback` check dropped | `a non-loopback peer is a 404 and the body is never built` |
+| proxy-header check dropped | `each proxy header ALONE…`; both `a proxied-shaped request on the status port…` |
+| `Host` check dropped | `a public (or missing) Host is a 404`; both proxied-shaped tests |
+| join flush not counted | exact bytes: expected 27, got 21 |
+| count after the log limiter | `refusedRate` stuck at 20, expected 30 |
+| future-slot filter dropped | `after a clock step back…` |
+| listener bound to `0.0.0.0` | ``answers 200 on its own port, whatever `--host` binds``; the busy-port test |
+
+### Checks
+
+- `bun test apps/relay/test apps/apps-host/test`: **467 pass, 0 fail** (24 files).
+- `scripts/test/changelog{,-guard}.test.ts`: 21 pass.
+- `tsc -p apps/relay`, `tsc -p apps/apps-host`, `biome check apps/relay
+  apps/apps-host`: clean. Full `bun run check` **not run here** (orchestrator).
+- Both real entry points (`.tentacle/tmp/relay-status/smoke.ts`: spawn `main.ts`
+  with `--port 24100/24200 --status-port 24101/24201`, fetch, SIGTERM) printed
+  `relay status on …` / `apps-host status on …`, answered 200 with zeroed
+  counters, and exited 0.
+
+### Drift from Implementation
+
+- `parseStatusPort` lives in `status.ts`, so both mains share it.
+- `StatusRequest.headers` is typed as `{ has, get }`: a Bun server's `Headers`
+  and the DOM one do not type-check against each other.
+- `apps/apps-host/tsconfig.json` gained the two `@tentacle/relay/status*` paths
+  (not in Files; needed to type-check).
+- The relay's tick and `sweep()` are now one function (same steps, plus the
+  gauge sample).
+- The `--host` test also dials the LAN address (when there is one): answering on
+  loopback alone did not prove the bind.
+
+### Worth knowing
+
+- By D4 + D2, `--port 4101` (relay) or `--port 4201` (apps host) with no
+  `--status-port` is now refused at start. The shipped units use 4100 / 4200.
+- Unverified: nothing deployed; 4101 / 4201 not checked on the box, and the busy
+  port path not run on Linux (the start log shows `status on` or `status-off`).
+
 ## Review

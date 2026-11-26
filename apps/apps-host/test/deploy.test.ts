@@ -14,7 +14,7 @@ import {
   appsHostOutfile,
 } from "../deploy/build.ts";
 import { APPS_LIMITS, APPS_LIMIT_NAMES, limitFlag } from "../src/limits.ts";
-import { parseAppsHostArgs } from "../src/main.ts";
+import { DEFAULT_APPS_STATUS_PORT, parseAppsHostArgs } from "../src/main.ts";
 import { parseKillSwitch, parseTakedowns } from "../src/operator-files.ts";
 import { DEFAULT_APPS_HOST, DEFAULT_APPS_PORT } from "../src/server.ts";
 
@@ -136,6 +136,11 @@ describe("Caddyfile.apps", () => {
 
   test("one site block for the wildcard and the apex of the unit's domain", () => {
     expect(live).toMatch(/^\*\.apps\.tentacle\.so, apps\.tentacle\.so \{$/m);
+  });
+
+  test("no directive names the status port: Caddy must never publish /__status", () => {
+    expect(live).not.toContain(String(DEFAULT_APPS_STATUS_PORT));
+    expect(live).not.toContain("__status");
   });
 
   test("DNS-01 for the wildcard, with the token from the environment", () => {

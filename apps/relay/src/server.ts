@@ -12,6 +12,9 @@
  *   `/healthz`       200 + the version, and no counters (deploy smoke test)
  *   anything else    404
  *
+ * Counters are never on those routes: `statusPort` opens a SECOND listener, on
+ * loopback only, answering `/__status` (docs/feat/relay-status.md).
+ *
  * **The relay is not trusted** (AGENTS §7): it holds no key, verifies no peer and
  * authorises nothing. The daemon's Noise responder authenticates every stream, so
  * all this service can ever hand anyone is a socket.
@@ -42,6 +45,9 @@ import {
   type RelayEffect,
   type RelayLimits,
 } from "./relay-core.ts";
+import { RELAY_COUNTERS, counterOfLogLine } from "./relay-counters.ts";
+import { startStatusListener } from "./status-listener.ts";
+import { createMinuteStats } from "./status.ts";
 
 /** The relay's default bind: loopback, because Caddy terminates TLS in front of it (R7). */
 export const DEFAULT_RELAY_HOST = "127.0.0.1";
@@ -91,11 +97,18 @@ export interface RelayServerOptions {
    * = announce every feature the APNs path enables (the usual case).
    */
   readonly features?: readonly RelayFeature[];
+  /**
+   * The loopback-only status listener's port (`0` = ephemeral). Off when absent;
+   * a port that cannot be bound is one `status-off` line, never a failed start.
+   */
+  readonly statusPort?: number;
 }
 
 export interface RunningRelay {
   readonly url: string;
   readonly port: number;
+  /** The status listener's port, `undefined` when it is off or could not bind. */
+  readonly statusPort: number | undefined;
   /** Run one sweep now (a test drives time instead of waiting for a tick). */
   sweep(): void;
   /** The core, for a test's assertions about state (never for the wire). */
@@ -245,7 +258,16 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
   // sweep tick. Without it a refusal flood fills the journal, and journald's own
   // rate limit then drops lines without choosing — `ready` ones included.
   const onLog = options.onLog ?? (() => {});
+  const stats = createMinuteStats({
+    now: options.now ?? (() => Date.now()),
+    counters: RELAY_COUNTERS,
+  });
   const log = (line: string): void => {
+    // Counted BEFORE the limiter: what the journal drops is still counted.
+    const counter = counterOfLogLine(line);
+    if (counter !== undefined) {
+      stats.add(counter);
+    }
     if (logLimiter.admit(line)) {
       onLog(line);
     }
@@ -313,13 +335,33 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
     peers.set(b, a);
   };
 
+  /** Hand one frame to the other leg, counting its payload bytes. */
+  const relayFrame = (socket: RelaySocket, frame: DataFrame): void => {
+    socket.send(frame);
+    stats.add("bytesRelayed", Buffer.byteLength(frame));
+  };
+
+  /** The live gauges: recorded into the current minute, and returned for the body. */
+  const sample = () => {
+    const gauges = {
+      registeredDaemons: core.registeredCount,
+      deviceLegs: core.heldCount + core.streamCount,
+      // `peers` is symmetric: two entries per spliced stream.
+      splicedPairs: peers.size / 2,
+    };
+    for (const [name, value] of Object.entries(gauges)) {
+      stats.set(name, value);
+    }
+    return gauges;
+  };
+
   /** Forward one frame to the other leg, or buffer it (a phone whose daemon has not accepted yet). */
   const forward = (from: string, frame: DataFrame): void => {
     const peer = peers.get(from);
     if (peer !== undefined) {
       const socket = sockets.get(peer);
       if (socket !== undefined && !socket.data.done) {
-        socket.send(frame);
+        relayFrame(socket, frame);
       }
       return;
     }
@@ -350,7 +392,7 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
       return;
     }
     for (const frame of held.frames) {
-      accept.send(frame);
+      relayFrame(accept, frame);
     }
   };
 
@@ -518,7 +560,11 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
         closeSocket(key, 1008);
         return;
       }
-      apply(core.ping({ socket: key }));
+      const effects = core.ping({ socket: key });
+      if (effects.some((effect) => effect.kind === "close")) {
+        stats.add("refusedPing");
+      }
+      apply(effects);
       return;
     }
     if (parsed.t === "push") {
@@ -710,30 +756,51 @@ export function startRelay(options: RelayServerOptions = {}): RunningRelay {
     join(key, decision.phone);
   }
 
-  const timer = setInterval(() => {
+  const sweep = (): void => {
     apply(core.sweep());
     // What the log limiter hid is never silent: one line per kind, per window.
     for (const line of logLimiter.flush()) {
       log(line);
     }
-  }, options.sweepMs ?? DEFAULT_SWEEP_MS);
+    sample();
+  };
+
+  const timer = setInterval(sweep, options.sweepMs ?? DEFAULT_SWEEP_MS);
   // Never hold the process open for the tick alone.
   if (typeof timer === "object" && timer !== null && "unref" in timer) {
     (timer as { unref(): void }).unref();
   }
 
+  /** `/__status`: aggregate numbers only — no id, address, token or name. */
+  const statusBody = () => {
+    // Sampled first, so the history carries what `now` says.
+    const gauges = sample();
+    const { uptimeSeconds, totals, lastMinute, history } = stats.snapshot();
+    const { rss, heapUsed } = process.memoryUsage();
+    return {
+      service: "relay",
+      uptimeSeconds,
+      memory: { rssBytes: rss, heapUsedBytes: heapUsed },
+      now: gauges,
+      totals,
+      lastMinute,
+      history,
+    };
+  };
+  const status =
+    options.statusPort === undefined
+      ? undefined
+      : startStatusListener({ port: options.statusPort, body: statusBody, log });
+
   return {
     url: `ws://${options.host ?? DEFAULT_RELAY_HOST}:${server.port}`,
     port: server.port,
+    statusPort: status?.port,
     core,
-    sweep() {
-      apply(core.sweep());
-      for (const line of logLimiter.flush()) {
-        log(line);
-      }
-    },
+    sweep,
     stop() {
       clearInterval(timer);
+      status?.stop();
       options.apns?.client.close();
       server.stop(true);
     },

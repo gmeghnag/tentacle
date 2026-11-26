@@ -6,7 +6,9 @@
     "paths": {
       "@tentacle/protocol": ["../../packages/protocol/src/index.ts"],
       "@tentacle/relay/client-ip": ["../relay/src/client-ip.ts"],
-      "@tentacle/relay/log-limit": ["../relay/src/log-limit.ts"]
+      "@tentacle/relay/log-limit": ["../relay/src/log-limit.ts"],
+      "@tentacle/relay/status": ["../relay/src/status.ts"],
+      "@tentacle/relay/status-listener": ["../relay/src/status-listener.ts"]
     }
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "deploy/**/*.ts"]

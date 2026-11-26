@@ -7,7 +7,7 @@ import {
   relayEntrypoint,
   relayOutfile,
 } from "../deploy/build.ts";
-import { parseRelayArgs } from "../src/main.ts";
+import { DEFAULT_RELAY_STATUS_PORT, parseRelayArgs } from "../src/main.ts";
 import { RELAY_LIMITS } from "../src/relay-core.ts";
 import { DEFAULT_RELAY_HOST, DEFAULT_RELAY_PORT, relayRoute } from "../src/server.ts";
 
@@ -308,6 +308,12 @@ describe("R7 Caddyfile.relay — TLS in front, the port the unit binds behind", 
     const caddy = read(join(DEPLOY_DIR, "Caddyfile.relay"));
     expect(caddy).toContain("relay.tentacle.so {");
     expect(caddy).toContain(`reverse_proxy ${DEFAULT_RELAY_HOST}:${DEFAULT_RELAY_PORT}`);
+  });
+
+  test("no directive names the status port: Caddy must never publish /__status", () => {
+    const directives = caddyDirectives(read(join(DEPLOY_DIR, "Caddyfile.relay")));
+    expect(directives).not.toContain(String(DEFAULT_RELAY_STATUS_PORT));
+    expect(directives).not.toContain("__status");
   });
 
   test("metadata hygiene: HSTS, no Server banner, and XFF replaced (L1, L2, H3)", () => {

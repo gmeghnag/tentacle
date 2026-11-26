@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { apnsSetupOf, parseRelayArgs, relayUsage } from "../src/main.ts";
+import { DEFAULT_RELAY_STATUS_PORT, apnsSetupOf, parseRelayArgs, relayUsage } from "../src/main.ts";
 import { RELAY_LIMITS } from "../src/relay-core.ts";
 import { DEFAULT_RELAY_HOST, DEFAULT_RELAY_PORT, limitsFromFlags } from "../src/server.ts";
 
@@ -14,6 +14,7 @@ describe("parseRelayArgs — flags", () => {
         limits: {},
         trustProxy: false,
         apns: {},
+        statusPort: DEFAULT_RELAY_STATUS_PORT,
         help: false,
       },
     });
@@ -52,6 +53,7 @@ describe("parseRelayArgs — flags", () => {
         },
         trustProxy: false,
         apns: {},
+        statusPort: DEFAULT_RELAY_STATUS_PORT,
         help: false,
       },
     });
@@ -168,6 +170,7 @@ describe("parseRelayArgs — env (a flag wins)", () => {
         limits: { "max-streams-per-id": 3 },
         trustProxy: false,
         apns: {},
+        statusPort: DEFAULT_RELAY_STATUS_PORT,
         help: false,
       },
     });
@@ -194,6 +197,67 @@ describe("parseRelayArgs — env (a flag wins)", () => {
       ok: false,
       error: "TENTACLE_RELAY_MAX_IDS must be a positive integer",
     });
+  });
+});
+
+describe("parseRelayArgs — the status port (docs/feat/relay-status.md)", () => {
+  const statusPortOf = (argv: string[], env: Record<string, string> = {}) => {
+    const parsed = parseRelayArgs(argv, env);
+    if (!parsed.ok) {
+      throw new Error(parsed.error);
+    }
+    return parsed.args.statusPort;
+  };
+
+  test("on by default; a flag or the environment moves it, and the flag wins", () => {
+    expect(DEFAULT_RELAY_STATUS_PORT).toBe(4101);
+    expect(statusPortOf([])).toBe(4101);
+    expect(statusPortOf(["--status-port", "5001"])).toBe(5001);
+    const env = { TENTACLE_RELAY_STATUS_PORT: "5002" };
+    expect(statusPortOf([], env)).toBe(5002);
+    expect(statusPortOf(["--status-port", "5001"], env)).toBe(5001);
+  });
+
+  test("`off` turns it off, from either source", () => {
+    expect(statusPortOf(["--status-port", "off"])).toBeUndefined();
+    expect(statusPortOf([], { TENTACLE_RELAY_STATUS_PORT: "off" })).toBeUndefined();
+    expect(statusPortOf(["--status-port", "5001"], { TENTACLE_RELAY_STATUS_PORT: "off" })).toBe(
+      5001,
+    );
+  });
+
+  test("an invalid value is a refusal, naming the source", () => {
+    for (const value of ["0", "70000", "1.5", "on", ""]) {
+      expect(parseRelayArgs(["--status-port", value])).toEqual({
+        ok: false,
+        error: "--status-port must be a port number or off",
+      });
+      expect(parseRelayArgs([], { TENTACLE_RELAY_STATUS_PORT: value })).toEqual({
+        ok: false,
+        error: "TENTACLE_RELAY_STATUS_PORT must be a port number or off",
+      });
+    }
+    expect(parseRelayArgs(["--status-port"])).toEqual({
+      ok: false,
+      error: "--status-port needs a value",
+    });
+  });
+
+  test("equal to the main port is refused, whichever way the two were set", () => {
+    const refused = { ok: false, error: "--status-port must differ from --port" } as const;
+    expect(parseRelayArgs(["--status-port", "4100"])).toEqual(refused);
+    expect(parseRelayArgs(["--port", "4101"])).toEqual(refused);
+    expect(parseRelayArgs(["--status-port", "9000", "--port", "9000"])).toEqual(refused);
+    expect(
+      parseRelayArgs([], { TENTACLE_RELAY_PORT: "9000", TENTACLE_RELAY_STATUS_PORT: "9000" }),
+    ).toEqual(refused);
+    expect(parseRelayArgs(["--port", "4101", "--status-port", "off"]).ok).toBe(true);
+  });
+
+  test("--help names the flag, its default and the variable", () => {
+    for (const text of ["--status-port", "4101", "TENTACLE_RELAY_STATUS_PORT", "/__status"]) {
+      expect(relayUsage()).toContain(text);
+    }
   });
 });
 
