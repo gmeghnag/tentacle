@@ -27,7 +27,7 @@ export interface BrowserInstallEnv {
    * in this build (`EXTENSION_ASSETS`), so install works from the compiled
    * binary too (B5).
    */
-  readonly extensionAssets?: Readonly<Record<string, string>>;
+  readonly extensionAssets?: Readonly<Record<string, string | Uint8Array>>;
   /** The org-managed-Chrome policy file (tests inject). */
   readonly managedPolicyPath?: string;
 }

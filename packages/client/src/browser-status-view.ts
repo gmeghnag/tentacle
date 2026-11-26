@@ -42,9 +42,15 @@ export function linkLabel(status: BrowserStatusResult | null | undefined): strin
   return link.managed ? `${word} · managed by your organization` : word;
 }
 
-/** Who opened a tab of the session. */
-export function tabSubtitle(tab: { readonly handedOver: boolean }): string {
-  return tab.handedOver ? "Handed over by you · acting asks first" : "Opened by the agent";
+/**
+ * Who opened a tab of the session. While the browser acts alone (`auto`) a
+ * handed-over tab no longer says that acting asks first: auto answers it (B5b).
+ */
+export function tabSubtitle(tab: { readonly handedOver: boolean }, auto = false): string {
+  if (!tab.handedOver) {
+    return "Opened by the agent";
+  }
+  return auto ? "Handed over by you" : "Handed over by you · acting asks first";
 }
 
 /** What may have changed the status: an open/attach, the switches, a tool's end. */

@@ -260,6 +260,7 @@ describe("a row's trailing element decides whether the row is ONE element", () =
           onExpand: () => {},
           onDeleteSchedule: () => {},
           onOpenArtifacts: () => {},
+          onOpenBrowser: () => {},
         }),
       );
 

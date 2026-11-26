@@ -741,6 +741,14 @@ STATUS B5b+B6: APPROVED (owner decision 2026-11-25)
 - **Locked switches in the shortcuts:** with the tools off, `/browser auto|clear` is refused with a notice; `ask|masked` (the safe direction) is sent.
 - **`heldElsewhere`** gets its own panel row, and the sign shows no tab count (never «0 tabs» for a list that was not read).
 
+#### B6b amendments (the executor, where the plan contradicted the code)
+
+- **The sheet's controller is `session-info-controller.ts`**, not `session-controller.ts`: it owns the pulls, the generation counter and the switches' follow, so the `browser/status` read lives there. Files the list misses: `session-screen-controller.ts` (the strip must follow the switches with the sheet CLOSED, and it sees a browser tool finish), `App.tsx` (the port forwards `browserStatus`), `ui/RiskStrip.tsx`.
+- **No navigation entry.** The Browser page is a page of the Session info sheet: the screen publishes it on the same `info` route (`sheet-plan.ts` unchanged), with `‹ Session info` back.
+- **`SessionInfoSheet.onSwitch` stays `mcp | skill`** (its rows switch nothing else); the kinds `tool | browser` are on the controller's `setCapability` and the Browser page's `onSwitch`.
+- **The phone has no `⊘ N tools off` marker** (`toolsSummary` counts servers and skills only): nothing to change.
+- **`tabSubtitle(tab, auto)`**: under auto a handed-over tab reads «Handed over by you» (B6a's recorded debt: the mockup's «acting asks first» is false then).
+
 ## Execution
 
 ### B1 — `@tentacle/browser` pure core (as built)
@@ -1362,3 +1370,89 @@ Mockups `.tentacle/mockups/browser-b6/index.html`. Owner, verbatim: «per browse
 Owner: «il plugin chrome è pronto? se non hai finito completa anche quello, con tanto di logo piccolo stesso colore dell'app» → «intendevo polipetto». Done by the orchestrator in this branch: `apps/browser-extension/icons/icon-{16,32,48,128}.png` = Polpetto in COLOUR as the app icon shows him (owner screenshot «questo intendevo»): `apps/mobile/src/mascot-scenes.ts` `MASCOT_BITMAP` with the `cyan` palette (`MASCOT_PALETTES.cyan`: K #0E8AA8, E #083A47, F #5FE0F2, S #3FCFE6, B #B7F3FB), transparent background, integer-scaled pixels (16 px is a downscale); `manifest.json` `icons` + `action.default_icon`. **Open for the executor (with B6):** `packages/cli/src/browser-extension-assets.ts` embeds TEXT files only, so `tentacle browser install` would write a manifest pointing at icons it never writes — Chrome then refuses to load the extension. Embed the PNGs as binary (e.g. Bun `with { type: "file" }` read as bytes, or base64 constants generated from the files) and make `browser-install.ts` write them byte-exact; `browser-install.test.ts` must fail while an icon is missing or stale (red first). Do not merge before this holds.
 
 *— claude-opus-5-5 (orchestrator), 2026-11-26*
+
+## Execution
+
+### B6b — iPhone, and the extension icon (as built) — both DONE in code; simulator sweep NOT run
+
+**Load-bearing check, re-run first** (at `6b058b8a`): HOLDS. `capabilities.browser` is on the wire and
+`RemoteSession.setCapability` takes `browser` / `browserStatus()` exists
+(`client/src/remote-session.ts`); every state below is built from those two reads and sent as
+`session/set_capability`. `git diff --stat -- packages/protocol packages/daemon packages/agent
+packages/tui apps/browser-extension` is empty: no wire or daemon change, `protocol.json` untouched.
+The plan's file set was wrong («B6b amendments»).
+
+**Red first** (empty stubs of `browser-view.ts`, `BrowserPage.tsx`, `RiskStrip.tsx`):
+`browser-view.test.ts` 3 pass / 20 fail (the passes are negatives); `session-info-browser.test.ts`
+3 / 10 (a few fail on the missing `refreshBrowser`, not on an assertion; M4–M12 prove them);
+`browser-page.test.ts` 0 / 7; the client subtitle test 1 fail; `browser-install.test.ts` 7 / 2.
+The `browserPageOf` test came after its function (M16 proves it).
+
+Built:
+1. **Client** — `browser-status-view.ts`: `tabSubtitle` takes `auto`.
+2. **Mobile, pure** — `browser-view.ts` (NEW): row value, Browser page bands, strip words, locks,
+   finished-browser-tool count. `session-info.ts`: the Session band's `Browser` row (also for a
+   session off the first `session/list` page); `CapabilityKind` gains `tool | browser`.
+3. **Controllers** — the info controller reads `browser/status` only while the sheet is open (open,
+   refresh, link up, every `capabilities` report, a finished browser tool); last read wins; a failure,
+   link down or close clears it. The screen controller follows the switches for the whole attach
+   (`riskStrip`).
+4. **Render / wiring** — `screens/BrowserPage.tsx` (NEW), `ui/RiskStrip.tsx` (NEW), the row in
+   `SessionInfoSheet.tsx`, the strip above the composer and the page swap in `SessionScreen.tsx`, a
+   locked row's light haptic, `App.tsx`'s port.
+5. **Icons** — `cli/src/browser-extension-icons.ts` (NEW, base64 of the four PNGs),
+   `browser-extension-assets.ts` embeds them as bytes, `install` writes them byte-exact. The test
+   fails on a missing, stale or text-mangled icon, and on any new file under `icons/`.
+6. Changelog: the plan's B6 fragment `changelog.d/browser-inspect-ui.added.md`, rewritten as ONE
+   bullet for TUI + iPhone + icon (`browser-inspect.added.md` already holds B1's bullet).
+
+**Words chosen here** (the mockup HTML is outside this worktree and was not read; the rest is the
+plan's «Mockup facts»): risky row value `◉ On · ▲ AUTO · ▲ CLEAR`, `○ Off`; lock label «Browser
+tools off»; the tabs/notes rows («Tabs unknown», «No tabs», «Another tentacle process holds the
+browser»). A tab row shows its title and who opened it, not its address (address only when the title
+is empty).
+
+**Mutations** (`.tentacle/tmp/browser-inspect/mutate-b6b.ts`: one at a time, file restored; all RED):
+
+| # | Mutation | Red |
+|---|---|---|
+| M1 | render from local intent (a set flips the state before the echo) | 1 |
+| M2 | strip ignores the tools being off | 1 |
+| M3 | lock follows the wire's `enabled` | 1 |
+| M4 | no sequence guard on the status read | 2 |
+| M5 | a failed read keeps the old answer | 1 |
+| M6 | the screen does not follow the switches | 2 |
+| M7 | a finished browser tool not followed | 1 |
+| M8 | close keeps reading | 1 |
+| M9 | leave keeps the follow | 1 |
+| M10 | a `capabilities` report does not re-read | 1 |
+| M11 | link down keeps the status | 1 |
+| M12 | read without `caps.browser` | 1 |
+| M13 | `Change ›` opens the sheet, not the page | 1 |
+| M14 | locked row has no tap | 1 |
+| M15 | no Browser row off the first page | 1 |
+| M16 | the page shows a server's refusal | 1 |
+| M17 | subtitle ignores auto | 2 |
+| M18 | an unread tab list says «No tabs» | 1 |
+| M19 | an icon missing from the embedded table | 2 |
+| M20 | a stale icon | 2 |
+| M21 | icons written as text | 1 |
+
+**Verification run here** (narrow): mobile session / sheet / hub / artifact / schedule / band / a11y
+files, the browser files of client, tui, cli and the extension, the changelog tests → `1496 pass, 0
+fail` (94 files). `bunx biome check` on `apps/mobile/{App.tsx,src,test}` and
+`packages/{client,cli}/{src,test}` → clean. Scoped `tsc` (scratch `tsconfig.b6b.json`: touched mobile
+files) → clean; `tsconfig.b6b-root.json` (cli + client) → only `agent/src/harness/a2a-map.ts(520,5)`,
+a file not touched here (same as B6a). The full gate is the orchestrator's script, not run here.
+
+**Unverified / debt:**
+- **No simulator sweep** of the states (both themes): owed before the next iOS build. The screen's
+  join (strip above composer, page swap) is asserted on `SessionScreen.tsx`'s SOURCE, not rendered.
+- The extension with its icons was not loaded in a real Chrome (`chrome://extensions`).
+- The TUI still says «acting asks first» under auto (it calls `tabSubtitle` without `auto`; B6a code,
+  out of this slice).
+- While `session/list` is loading or failed, Session info has no Browser row (the strip still reaches
+  the page when auto/clear are on).
+- A tab closed in Chrome shows until the next refresh trigger (the plan's debt).
+
+*— claude-sonnet-5-5, 2026-11-26*

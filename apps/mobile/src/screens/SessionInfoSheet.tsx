@@ -61,6 +61,8 @@ export interface SessionInfoSheetProps {
    * closes the sheet.
    */
   readonly onOpenArtifacts: () => void;
+  /** The Browser row (browser-inspect B6b): the sheet's own Browser page. */
+  readonly onOpenBrowser: () => void;
   readonly onClose: () => void;
   /** An expanded row (tool names, a full error): its id, or null. */
   readonly expanded: string | null;
@@ -106,6 +108,7 @@ function SectionBody({
   onSwitch,
   onDeleteSchedule,
   onOpenArtifacts,
+  onOpenBrowser,
 }: {
   readonly palette: Palette;
   readonly section: InfoSection;
@@ -115,6 +118,7 @@ function SectionBody({
   readonly onSwitch: SessionInfoSheetProps["onSwitch"];
   readonly onDeleteSchedule: SessionInfoSheetProps["onDeleteSchedule"];
   readonly onOpenArtifacts: SessionInfoSheetProps["onOpenArtifacts"];
+  readonly onOpenBrowser: SessionInfoSheetProps["onOpenBrowser"];
 }): JSX.Element {
   if (section.phase === "loading") {
     return <LoadingRow palette={palette} first />;
@@ -150,6 +154,7 @@ function SectionBody({
           onSwitch={onSwitch}
           onDeleteSchedule={onDeleteSchedule}
           onOpenArtifacts={onOpenArtifacts}
+          onOpenBrowser={onOpenBrowser}
           expanded={expanded === `${section.id}:${rowIdentity(row)}`}
           onExpand={() => {
             if (row.expand === undefined) {
@@ -178,6 +183,7 @@ function InfoRowView({
   onSwitch,
   onDeleteSchedule,
   onOpenArtifacts,
+  onOpenBrowser,
 }: {
   readonly palette: Palette;
   readonly row: InfoRow;
@@ -188,6 +194,7 @@ function InfoRowView({
   readonly onSwitch: SessionInfoSheetProps["onSwitch"];
   readonly onDeleteSchedule: SessionInfoSheetProps["onDeleteSchedule"];
   readonly onOpenArtifacts: SessionInfoSheetProps["onOpenArtifacts"];
+  readonly onOpenBrowser: SessionInfoSheetProps["onOpenBrowser"];
 }): JSX.Element {
   const toggle = row.switch;
   const remove = row.delete;
@@ -265,6 +272,7 @@ function InfoRowView({
           : { accessibilityLabel: row.accessibilityLabel })}
         {...(row.expand === undefined ? {} : { onPress: onExpand, chevron: !expanded })}
         {...(row.opens === "artifacts" ? { onPress: onOpenArtifacts, chevron: true as const } : {})}
+        {...(row.opens === "browser" ? { onPress: onOpenBrowser, chevron: true as const } : {})}
         trailing={trailing}
         trailingKind={trailingKind}
         testID={`session-info-${sectionId}-${rowIdentity(row)}`}
@@ -298,6 +306,7 @@ function Section({
   onSwitch,
   onDeleteSchedule,
   onOpenArtifacts,
+  onOpenBrowser,
   lastRow,
 }: {
   readonly palette: Palette;
@@ -308,6 +317,7 @@ function Section({
   readonly onSwitch: SessionInfoSheetProps["onSwitch"];
   readonly onDeleteSchedule: SessionInfoSheetProps["onDeleteSchedule"];
   readonly onOpenArtifacts: SessionInfoSheetProps["onOpenArtifacts"];
+  readonly onOpenBrowser: SessionInfoSheetProps["onOpenBrowser"];
   /** A row that belongs to THIS section but is not the view-model's (Auto-accept). */
   readonly lastRow?: ReactNode;
 }): JSX.Element {
@@ -342,6 +352,7 @@ function Section({
           onSwitch={onSwitch}
           onDeleteSchedule={onDeleteSchedule}
           onOpenArtifacts={onOpenArtifacts}
+          onOpenBrowser={onOpenBrowser}
         />
         {lastRow}
       </BandSection>
@@ -360,6 +371,7 @@ export function SessionInfoSheet({
   onRefresh,
   onRetry,
   onOpenArtifacts,
+  onOpenBrowser,
   onClose,
   expanded,
   onExpand,
@@ -412,6 +424,7 @@ export function SessionInfoSheet({
             onSwitch={onSwitch}
             onDeleteSchedule={onDeleteSchedule}
             onOpenArtifacts={onOpenArtifacts}
+            onOpenBrowser={onOpenBrowser}
             {...(section.id === "session" && view.autoAccept === true
               ? {
                   // Design 4 / the mockup's `infoE2` (`index.html:394-397`):

@@ -59,6 +59,14 @@ describe("tabSubtitle", () => {
   });
 });
 
+describe("tabSubtitle while the browser acts alone (B6b)", () => {
+  test("a handed-over tab no longer claims that acting asks first", () => {
+    expect(tabSubtitle({ handedOver: true }, true)).toBe("Handed over by you");
+    expect(tabSubtitle({ handedOver: false }, true)).toBe("Opened by the agent");
+    expect(tabSubtitle({ handedOver: true }, false)).toBe("Handed over by you · acting asks first");
+  });
+});
+
 describe("browserOffered", () => {
   test("needs the host's browser and at least one browser tool on", () => {
     expect(browserOffered(undefined)).toBe(false);
