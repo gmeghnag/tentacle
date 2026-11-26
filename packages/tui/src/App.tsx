@@ -69,6 +69,7 @@ import { PURE_LAYERS } from "./keys/layers.ts";
 import { resolveLineEffects } from "./keys/line-layer.ts";
 import { routeKey } from "./keys/route.ts";
 import { stoppedNotice } from "./link-status.ts";
+import { linkOpenError, linkOpenStep } from "./links.ts";
 import { localSession } from "./local-session.ts";
 import { pickPalette } from "./mascot.ts";
 import { type OpenPanel, panelClick, panelNoSwitchNotice, panelSwitchOp } from "./panel.ts";
@@ -240,6 +241,7 @@ export function App({
   localCwd = defaultLocalCwd(),
   saveFile = (path, content) => Bun.write(path, content).then(() => undefined),
   artifactOpener,
+  linkOpener,
   initialItems,
   initialPrompt,
   daemonInPod = false,
@@ -2016,6 +2018,21 @@ export function App({
     (artifact: ArtifactMeta) => openArtifactRef.current(artifact),
     [],
   );
+  // A click on a URL (docs/feat/tui-clickable-links.md): success is silent (a
+  // notice would pull the view to the tail), everything else says why inline.
+  const openLink = useCallback(
+    (url: string): void => {
+      const step = linkOpenStep(url, linkOpener);
+      if (step.kind === "notice") {
+        pushNotice(step.text);
+        return;
+      }
+      void linkOpener
+        ?.open(step.url)
+        .catch((error: unknown) => pushNotice(linkOpenError(step.url, error)));
+    },
+    [linkOpener, pushNotice],
+  );
   const mouse = useMouse({
     panelRef,
     dockRef,
@@ -2034,6 +2051,7 @@ export function App({
     clampOffset,
     submit,
     openArtifact: openClickedArtifact,
+    openLink,
   });
   // The hold's unmount cleanup keeps its place in App's ordered effect list
   // (Fable H1); the hook itself declares no effect.

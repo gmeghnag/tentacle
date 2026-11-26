@@ -28,6 +28,7 @@ import { diagramToolBody } from "./diagram-lines.ts";
 import { formatDurationMs } from "./format.ts";
 import { harnessLevel, isHarness, joinsPrevious, showsGlyph } from "./harness-group.ts";
 import { expandTabs } from "./input-view.ts";
+import { type LinkSpan, carriesCodes, linkRows, linkableUrls, underlineRow } from "./links.ts";
 import { renderMarkdown } from "./markdown.ts";
 import { GUTTER, type MascotCell, headerView } from "./mascot.ts";
 import { messageRows } from "./message-row.ts";
@@ -1016,7 +1017,12 @@ function toolLines(tool: ToolItem, opts: RenderOptions): string[] {
   const expanded = opts.expandAll === true || isExpanded(opts.expandedIds ?? [], tool.id);
   const budget = cols - (stringWidth(BULLET) + 1 + stringWidth(label)) - stringWidth(elapsed) - 1;
   const fitted = expanded || subtitle === "" ? "" : fitSubtitle(subtitle, budget);
-  const header = `${head}${fitted === "" ? "" : ` ${theme.subtle(fitted)}`}${theme.subtle(elapsed)}`;
+  // A presented artifact's title is a control (a click on the header opens it),
+  // so it is underlined — exactly when there is a card to open
+  // (docs/feat/tui-clickable-links.md).
+  const opens = tool.name === PRESENT_TOOL && tool.detail?.kind === "artifact";
+  const target = opens ? chalk.underline(fitted) : fitted;
+  const header = `${head}${fitted === "" ? "" : ` ${theme.subtle(target)}`}${theme.subtle(elapsed)}`;
   if (expanded && subtitle !== "") {
     // One shape for every expanded tool row (owner 2026-11-24), like a shell
     // row's `⎿ $ cmd`: the whole target (path, pattern, description…) opens the
@@ -1538,6 +1544,61 @@ interface RowCacheEntry {
   command?: readonly string[];
 }
 const rowCache = new WeakMap<DisplayItem, RowCacheEntry>();
+
+// --- links (docs/feat/tui-clickable-links.md) -------------------------------
+
+/**
+ * The link spans of a wrapped row array, keyed by that array — so they live and
+ * die with the cached rows (a resize or Ctrl+O is a new array, new spans). An
+ * array with no entry has no link.
+ */
+const linkCache = new WeakMap<readonly string[], readonly LinkSpan[]>();
+const NO_LINKS: readonly LinkSpan[] = [];
+
+/** A derived array of equal cell geometry (blink, hang) has its source's links. */
+function inheritLinks(from: readonly string[], to: readonly string[]): void {
+  const links = linkCache.get(from);
+  if (links) {
+    linkCache.set(to, links);
+  }
+}
+
+/**
+ * `wrapLines(lines, width)` (which is per line already), plus each line's links:
+ * recorded in `linkCache` and underlined on the finished rows, after the wrap,
+ * so no wrap point can move. Rows below `skipRows` are controls: no link.
+ */
+function wrapLinkedLines(
+  lines: readonly string[],
+  width: number,
+  allowed: ReadonlySet<string>,
+  skipRows: number,
+  ownCodes: boolean,
+): readonly string[] {
+  const out: string[] = [];
+  const spans: LinkSpan[] = [];
+  for (const line of lines) {
+    const rows = wrapLines([line], width);
+    const first = out.length;
+    const found = linkRows(line, rows, allowed, first, skipRows, ownCodes);
+    spans.push(...found);
+    out.push(
+      ...(found.length === 0
+        ? rows
+        : rows.map((row, i) =>
+            underlineRow(
+              row,
+              found.filter((s) => s.row === first + i),
+            ),
+          )),
+    );
+  }
+  if (spans.length > 0) {
+    linkCache.set(out, spans);
+  }
+  return out;
+}
+
 /**
  * The OFF-phase variant of an already-wrapped row array, memoised on that array
  * (which is itself cached per item + width + slot). A tick therefore allocates
@@ -1558,6 +1619,7 @@ function offPhaseRows(rows: readonly string[]): readonly string[] {
   // row (label, subtitle, duration) byte-identical — the conceal closes at
   // `ESC[28m` immediately after the glyph, so nothing else on the row is hidden.
   const swapped = [first.replace(BULLET, hiddenBullet()), ...rest];
+  inheritLinks(rows, swapped);
   offPhaseCache.set(rows, swapped);
   return swapped;
 }
@@ -1585,6 +1647,7 @@ function hangRows(rows: readonly string[], level: "info" | "warn"): readonly str
   // `▲` measure 1), so this cannot re-flow a row: only the first cell's bytes
   // change, and the swap is made after the wrap.
   const swapped = [first.replace(`${headGlyph(level)} `, "  "), ...rest];
+  inheritLinks(rows, swapped);
   hangCache.set(rows, swapped);
   return swapped;
 }
@@ -1626,7 +1689,15 @@ function itemRows(item: DisplayItem, opts: RenderOptions): readonly string[] {
     entry = { width, threshold, preview };
     rowCache.set(item, entry);
   }
-  const rows = wrapLines(itemLines(item, opts), width);
+  const lines = itemLines(item, opts);
+  const allowed = linkableUrls(item, lines);
+  const rows = wrapLinkedLines(
+    lines,
+    width,
+    allowed,
+    item.kind === "tool" ? toggleRowsOf(item, opts) : 0,
+    allowed.size > 0 && carriesCodes(item),
+  );
   entry[slot] = rows;
   return withPhase(item, rows, opts);
 }
@@ -1670,6 +1741,8 @@ export interface LaidItem {
    * every tool but a `shell`, whose `$` rows count too (`tool-hit.ts`).
    */
   readonly toggleRows: number;
+  /** The clickable URL cells of `rows` (`tool-hit.ts: linkAtViewport`). */
+  readonly links: readonly LinkSpan[];
 }
 
 /**
@@ -1716,6 +1789,7 @@ export function layoutTranscript(
       id: item.kind === "tool" ? item.id : "",
       gap,
       toggleRows: item.kind === "tool" ? toggleRowsOf(item, opts) : 1,
+      links: linkCache.get(rows) ?? NO_LINKS,
     });
     cursor += rows.length;
     prev = item;

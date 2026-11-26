@@ -16,7 +16,7 @@ import type { ChartGlyphs } from "./chart-lines.ts";
 import { lineDiffEnabled, lineDiffStdout } from "./line-diff.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
-import { createArtifactOpener } from "./os-open.ts";
+import { createArtifactOpener, createLinkOpener } from "./os-open.ts";
 import { messagesToItems } from "./resume.ts";
 import { synchronizedStdout } from "./sync-output.ts";
 import type { TargetBadge } from "./target-view.ts";
@@ -218,6 +218,7 @@ export async function startTui(agent: Agent | null, options: TuiOptions): Promis
         chartGlyphs={options.chartGlyphs ?? "braille"}
         {...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {})}
         artifactOpener={createArtifactOpener()}
+        linkOpener={createLinkOpener()}
       />,
       {
         stdin,

@@ -32,7 +32,7 @@ import type { LaidItem } from "./render-lines.ts";
 import type { ScrollWindow } from "./scroll.ts";
 import type { Selection } from "./selection.ts";
 import { type ClickState, nextClick } from "./tool-expand.ts";
-import { toolCallAtViewport } from "./tool-hit.ts";
+import { linkAtViewport, toolCallAtViewport } from "./tool-hit.ts";
 import type { PanelView } from "./tree-panel.ts";
 
 /** Lines scrolled per mouse-wheel notch. */
@@ -241,6 +241,8 @@ export type MouseEffect =
    * what `^X^O` and `/artifacts`' Enter do.
    */
   | { readonly kind: "openArtifact"; readonly artifact: ArtifactMeta }
+  /** A completed click on a URL in the transcript (`links.ts` spans). */
+  | { readonly kind: "openLink"; readonly url: string }
   /** Copy the current selection (the App assembles the whole buffer) and clear it. */
   | { readonly kind: "copySelection" };
 
@@ -255,9 +257,9 @@ const NONE: readonly MouseEffect[] = [];
  * Dispatch ONE SGR mouse report: the new state, plus the effects to apply.
  *
  * Order is the whole priority list and must not be rearranged: the wheel; the
- * list panel's body; the dock's pill and rows; the click recogniser and a tool
- * call's header; then the selection (a release copies it, a press starts or
- * extends it).
+ * list panel's body; the dock's pill and rows; the click recogniser, a tool
+ * call's header and a link; then the selection (a release copies it, a press
+ * starts or extends it).
  */
 export function dispatchMouse(
   state: MouseState,
@@ -328,6 +330,11 @@ export function dispatchMouse(
     // what it is today (a zero-length selection, i.e. nothing).
     if (id !== null && !snapshot.expandAll) {
       return { state: { click, selection: null }, effects: [{ kind: "toggleTool", id }] };
+    }
+    // A URL opens, Ctrl+O or not (a control row has no link: `linkAtViewport`).
+    const url = linkAtViewport(snapshot.laid, snapshot.win, step.click.x, step.click.y);
+    if (url !== null) {
+      return { state: { click, selection: null }, effects: [{ kind: "openLink", url }] };
     }
   }
   // Left button, part 2: release copies the selection, press/drag starts or

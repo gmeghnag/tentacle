@@ -18,7 +18,7 @@ import chalk from "chalk";
 import { Marked } from "marked";
 import { markedTerminal } from "marked-terminal";
 import { highlightTheme } from "./read-highlight.ts";
-import { type ThemeMode, themeMode, tokens } from "./theme.ts";
+import { type ThemeMode, colorStyler, themeMode, tokens } from "./theme.ts";
 
 type Styler = (s: string) => string;
 
@@ -69,18 +69,65 @@ function lightOptions(): Record<string, unknown> {
   };
 }
 
+/** The five entities `marked` escapes link text and autolink hrefs with. */
+const ENTITIES: Record<string, string> = {
+  "&amp;": "&",
+  "&lt;": "<",
+  "&gt;": ">",
+  "&quot;": '"',
+  "&#39;": "'",
+};
+const unescapeHtml = (s: string): string =>
+  s.replace(/&(?:amp|lt|gt|quot|#39);/g, (e) => ENTITIES[e] ?? e);
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching ANSI SGR codes
+const SGR = /\x1b\[[0-9;]*m/g;
+
+/**
+ * THE link renderer of both modes (docs/feat/tui-clickable-links.md §3), laid
+ * over `marked-terminal`'s: `text (href)`, or `href` alone when the text is the
+ * address. Never an OSC 8 hyperlink — the library emits one wherever its
+ * environment probe says so, which hides the target behind the text, lets any
+ * scheme reach the terminal, and survives `stripAnsi` into a copied selection.
+ * The visible address is what the TUI's own click opens (`links.ts`).
+ */
+function linkRenderer(link: Styler, href: Styler) {
+  return {
+    renderer: {
+      link(target: string, _title: string | null | undefined, text: string): string {
+        const shown = unescapeHtml(text.replace(SGR, ""));
+        return link(
+          shown !== "" && shown !== unescapeHtml(target)
+            ? `${text} (${href(target)})`
+            : href(target),
+        );
+      },
+    },
+  };
+}
+
 /** One `Marked` per mode, built on first use (`Marked` is exported, marked.d.ts:579). */
 const renderers = new Map<ThemeMode, Marked>();
 
 function rendererFor(mode: ThemeMode): Marked {
   let marked = renderers.get(mode);
   if (!marked) {
-    marked =
-      mode === "dark"
-        ? // Exactly today's `marked.use(markedTerminal())`: no options, so the
-          // defaults (named ANSI colours) are what dark mode paints.
-          new Marked(markedTerminal())
-        : new Marked(markedTerminal(lightOptions(), { theme: highlightTheme("light") }));
+    if (mode === "dark") {
+      // No options, so `marked-terminal`'s defaults (named ANSI colours) are what
+      // dark mode paints; the link styles repeat those defaults (the dark
+      // `md.link` token is the library's own blue).
+      const link = colorStyler(tokens.dark.md.link);
+      marked = new Marked(
+        markedTerminal(),
+        linkRenderer(link, (s) => link(chalk.underline(s))),
+      );
+    } else {
+      const options = lightOptions();
+      marked = new Marked(
+        markedTerminal(options, { theme: highlightTheme("light") }),
+        linkRenderer(options.link as Styler, options.href as Styler),
+      );
+    }
     renderers.set(mode, marked);
   }
   return marked;

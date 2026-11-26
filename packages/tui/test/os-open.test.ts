@@ -7,7 +7,12 @@
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { artifactCsp } from "@tentacle/core";
-import { type OsOpenDeps, createArtifactOpener } from "../src/os-open.ts";
+import {
+  type OsOpenDeps,
+  QUIET_STDIO,
+  createArtifactOpener,
+  createLinkOpener,
+} from "../src/os-open.ts";
 
 interface Fake {
   readonly deps: OsOpenDeps;
@@ -183,5 +188,61 @@ describe("save to ~/Downloads", () => {
       await expect(opener.save({ name, wrap: null }, body)).rejects.toThrow();
     }
     expect(f.files.size).toBe(0);
+  });
+});
+
+describe("createLinkOpener (docs/feat/tui-clickable-links.md §6)", () => {
+  const url = "https://e.com/x?a=1&b=%22;rm%20-rf";
+
+  for (const [platform, command] of [
+    ["darwin", "open"],
+    ["linux", "xdg-open"],
+  ] as const) {
+    test(`one argv spawn of ${command} on ${platform}, with quiet stdio`, async () => {
+      const f = fake({ platform });
+      await createLinkOpener({ ...f.deps, env: {} }).open(url);
+      expect(f.spawns).toEqual([{ argv: [command, url], opts: QUIET_STDIO }]);
+      expect(f.files.size).toBe(0);
+    });
+  }
+
+  test("anything but a normalised http(s) URL is refused without a spawn", async () => {
+    const f = fake();
+    const opener = createLinkOpener({ ...f.deps, env: {} });
+    for (const bad of [
+      "file:///etc/passwd",
+      "javascript:alert(1)",
+      "-a Calculator",
+      "https://e.com",
+      "https://e.com/a b",
+    ]) {
+      await expect(opener.open(bad)).rejects.toThrow("not an http(s) link");
+    }
+    expect(f.spawns).toEqual([]);
+  });
+
+  test("a non-zero exit rejects", async () => {
+    const f = fake({}, 3);
+    await expect(createLinkOpener({ ...f.deps, env: {} }).open(url)).rejects.toThrow(
+      "open exited with code 3",
+    );
+  });
+
+  test("a missing opener rejects, naming it", async () => {
+    const f = fake({
+      platform: "linux",
+      spawn: () => {
+        throw Object.assign(new Error("Executable not found in $PATH"), { code: "ENOENT" });
+      },
+    });
+    const failure = createLinkOpener({ ...f.deps, env: {} }).open(url);
+    await expect(failure).rejects.toMatchObject({ code: "ENOENT", path: "xdg-open" });
+  });
+
+  test("ssh follows the environment", () => {
+    expect(createLinkOpener({ env: { SSH_CONNECTION: "x" } }).ssh).toBe(true);
+    expect(createLinkOpener({ env: { SSH_TTY: "/dev/ttys001" } }).ssh).toBe(true);
+    expect(createLinkOpener({ env: { SSH_CONNECTION: "" } }).ssh).toBe(false);
+    expect(createLinkOpener({ env: {} }).ssh).toBe(false);
   });
 });

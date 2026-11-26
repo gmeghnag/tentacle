@@ -40,7 +40,19 @@ import type { ScrollWindow } from "./scroll.ts";
  * "click while scrolled up" correct by construction.
  */
 export function toolCallAt(laid: readonly LaidItem[], absRow: number): string | null {
-  // Binary search for the last item starting at or before `absRow`.
+  const item = laidItemAt(laid, absRow);
+  if (!item || item.id === "") {
+    return null;
+  }
+  // The header is row 0 of the item (`toolLines` opens with it); a shell call's
+  // `$` rows follow it and toggle too (`toggleRows`). Every other row — output,
+  // body, blank — is text.
+  return absRow >= item.start && absRow < item.start + item.toggleRows ? item.id : null;
+}
+
+/** The last item starting at or before `absRow` (it may end before that row). */
+function laidItemAt(laid: readonly LaidItem[], absRow: number): LaidItem | undefined {
+  // Binary search.
   let lo = 0;
   let hi = laid.length - 1;
   let found = -1;
@@ -54,14 +66,37 @@ export function toolCallAt(laid: readonly LaidItem[], absRow: number): string | 
       hi = mid - 1;
     }
   }
-  const item = found >= 0 ? laid[found] : undefined;
-  if (!item || item.id === "") {
+  return found >= 0 ? laid[found] : undefined;
+}
+
+/**
+ * The URL under SCREEN cell `x`,`y` (both 1-based, as SGR reports them), or null.
+ * Bounded to the transcript viewport like `toolCallAtViewport`. A transcript row
+ * starts at screen column 1, so `x - 1` is the row's cell. A call's control rows
+ * never open a link; a gap row is past its item's rows and has none.
+ */
+export function linkAtViewport(
+  laid: readonly LaidItem[],
+  visible: ScrollWindow,
+  x: number,
+  y: number,
+): string | null {
+  const screenRow = y - 1;
+  if (screenRow < 0 || screenRow >= visible.end - visible.start) {
     return null;
   }
-  // The header is row 0 of the item (`toolLines` opens with it); a shell call's
-  // `$` rows follow it and toggle too (`toggleRows`). Every other row — output,
-  // body, blank — is text.
-  return absRow >= item.start && absRow < item.start + item.toggleRows ? item.id : null;
+  const absRow = visible.start + screenRow;
+  const item = laidItemAt(laid, absRow);
+  if (!item) {
+    return null;
+  }
+  const row = absRow - item.start;
+  if (item.id !== "" && row < item.toggleRows) {
+    return null;
+  }
+  const cell = x - 1;
+  const hit = item.links.find((s) => s.row === row && cell >= s.col && cell < s.col + s.width);
+  return hit?.url ?? null;
 }
 
 /**

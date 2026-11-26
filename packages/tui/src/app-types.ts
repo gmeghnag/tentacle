@@ -31,7 +31,7 @@ import type { ChartGlyphs } from "./chart-lines.ts";
 import type { HopNamespace, HopSpec } from "./hop-command.ts";
 import type { LinkFeed } from "./link-status.ts";
 import type { McpServerView } from "./mcp-panel.ts";
-import type { ArtifactOpener } from "./os-open.ts";
+import type { ArtifactOpener, LinkOpener } from "./os-open.ts";
 import type { DocumentMode } from "./pdf-attach.ts";
 import type { AutoAcceptFeed, AutoAcceptSharedFeed } from "./permission-ui.ts";
 import type { DaemonQueue, QueuedMessage, ReturnedCause, UnqueueAnswer } from "./queued.ts";
@@ -779,6 +779,11 @@ export interface AppProps {
    * App says opening is not available here, and nothing is read or opened.
    */
   readonly artifactOpener?: ArtifactOpener;
+  /**
+   * A click on an http(s) URL in the transcript (docs/feat/tui-clickable-links.md):
+   * `startTui` passes `createLinkOpener()`. Absent → the App says there is none.
+   */
+  readonly linkOpener?: LinkOpener;
   /** Transcript to seed on start (a resumed session); replaces the welcome line. */
   readonly initialItems?: readonly DisplayItem[];
   /**
