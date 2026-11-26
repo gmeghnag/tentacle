@@ -299,15 +299,29 @@ makes every remaining ordering correct (never a silent empty).
   X's hub), or a push when X is not in the stack (trigger 2). The Sessions list's
   `navigate` (`App.tsx:3678`, `3691`) is unchanged in code; with `getId` it can no
   longer push a duplicate either.
+- N3 *(added in Execution)*. `navigate` REPLACES a matched route's params unless
+  `merge` (`StackRouter.tsx:406-420`), and the screen controller is rebuilt when
+  `title`/`cwd`/`archived` change (`App.tsx`, the Session screen's effect deps).
+  So going back must pass the params the open screen already has: a pure
+  `sessionReturnParams(routes, target)` beside `sessionRouteId` (the stack's
+  `Session` route of that id → its params; none → `target`).
+- N4 *(added in Execution)*. The push tap (`App.tsx`, `createRouteQueue`) is a
+  third `navigate("Session")`. With `getId` and no `pop` it would REORDER a lower
+  Session screen to the top (`StackRouter.tsx:444-455`); it uses the same
+  `pop: true` + `sessionReturnParams` as N2.
 
 **C — the controller serves every ordering** (`apps/mobile/src/session-controller.ts`).
-Entry = `{ session, watcher: Watch | null, unwatch, held: boolean }`, where
-`held` = the entry was CREATED by an open without a watch (a non-borrowed
-workflow screen, which will `leave`). Pending opens record their `watch`.
-- C1. `open(id, { watch })` on a live entry with `watcher === null` → subscribe
-  now (`session.watch(watch)` delivers the still-buffered history), set
-  `watcher`. Fixes trigger 2.
-- C2. `open(id, { watch: w2 })` on a live entry watched by `w1 !== w2` →
+Entry = `{ session, watcher: Watch | null, unwatch, consumed: boolean, held:
+boolean }`, where `held` = the entry was CREATED by an open without a watch (a
+non-borrowed workflow screen, which will `leave`) and `consumed` = it has had a
+watcher, so its attach history is gone. Pending opens record their `watch`, their
+`held` and whether a leave cancelled them.
+- C1. `open(id, { watch })` on a live entry that NEVER had a watcher
+  (`consumed === false`) → subscribe now (`session.watch(watch)` delivers the
+  still-buffered history), set `watcher`. Fixes trigger 2.
+- C2. `open(id, { watch: w2 })` on a live entry that is `consumed` and whose
+  watcher is not w2 (watched by `w1`, or `null` after a watched leave of a `held`
+  entry, including w2's own earlier one: a `resync`) →
   **takeover by re-attach**: unwatch w1, drop the entry, then (serialised)
   detach the old handle and open a fresh one subscribed with w2 — exactly
   `resync`'s leave-then-attach. The newest screen is the visible one. Fixes
@@ -321,7 +335,10 @@ workflow screen, which will `leave`). Pending opens record their `watch`.
     the entry for the workflow screen that created it.
   - without `watch`: if the entry has a watcher → only `held = false` (the
     Session screen keeps it); else today's delete + detach.
-  - a pending open: the `left` mark applies only when the identity matches.
+  - a pending open: the `left` mark applies only when the identity matches. An
+    anonymous leave while a WATCHED open is pending (the holder going away during
+    a takeover) only clears that open's `held`.
+  - the re-attached entry inherits the old entry's `held`.
 - C5. The same rules apply at the queued `reused` check
   (`session-controller.ts:177-180`): one `adopt(entry, options)` helper used by
   both the fast path and the serialised path.
@@ -430,7 +447,76 @@ Mutation for each: revert the named rule → red.
 
 ## Execution
 
-*— pending*
+*— claude-sonnet-5-5, 2026-11-26*
+
+**Before any edit.** Load-bearing check holds (`remote-session.ts:747-751`,
+`1041-1050`; probe: one `activity history 2`). `repro.ts` on `c70372e8`:
+`A 0/20 · B 5/5 · C 5/5 · D 5/5` empty.
+
+| Slice | State |
+|---|---|
+| C — controller (C1–C5, `leave(id, watch?)`) | DONE |
+| S — one `watcher` per screen | DONE |
+| N — `getId`, `pop: true`, N3, N4 | DONE in code; **not seen on a simulator** |
+| T1–T6, changelog fragment | DONE |
+| Step 0 simulator rate (before/after) | **NOT DONE** |
+| E2E flow `48-workflow-open-session` + `--only 06,45,48` | **NOT DONE** |
+
+**Drift from the Implementation (plan edited above).**
+1. C1/C2: as written ("`watcher === null` → subscribe") a `held` entry whose
+   screen had left would subscribe after the history was delivered: empty again,
+   and that screen's `resync` would re-read nothing. Added `consumed`; only a
+   never-watched entry is subscribed, otherwise re-attach. Mutating back to the
+   planned condition fails 2 tests.
+2. Pending opens: an anonymous leave during a takeover releases the hold; the
+   new entry inherits `held` (else a hold nobody releases).
+3. N3: `navigate` replaces the matched route's params, so `pop: true` alone would
+   retitle Session X with the run's name, drop `cwd` and rebuild its controller.
+   Added `sessionReturnParams`.
+4. N4: the push tap is a third `navigate("Session")` the plan missed; with
+   `getId` it would reorder a lower screen. Same `pop` + helper. Consequence: a
+   push for session Y while X is on top now PUSHES Y (before: X's route took Y's
+   params).
+5. Three existing controller tests left a watched open anonymously; they now pass
+   the watcher, which is what the screen does.
+
+**Red first.** Controller: 11 of the 12 new tests failed on assertions (the 12th
+pins unchanged behaviour). T5, against `HEAD` copies of both controllers: 3/3
+fail, `Expected: > 0, Received: 0` rows. Wiring: 3/3 fail. The two
+`drawer-nav` unit tests cover new functions: shown by mutation only.
+
+**Mutations** (each applied, run, reverted; failing tests):
+
+| Mutation | Fails |
+|---|---|
+| live never-watched entry reused without subscribe (C1) | 5 |
+| take over only when `watcher !== null` (planned rule) | 2 |
+| `held` ignored on a watched leave | 3 |
+| watched leave ignores identity | 3 |
+| any watched leave cancels pending opens (T4) | 2 |
+| queued reuse skips `adopt` (C5) | 1 |
+| takeover drops `held` | 1 |
+| anonymous leave does not release a pending hold | 1 |
+| screen passes a new watcher per attach (S) | 3 |
+| no `getId` · run route no `pop` · push tap no `pop` · helper returns target · id ignores computer (applied together, one distinct test each) | 5 |
+
+**Gate (narrow).** `tsc -p apps/mobile` clean; `biome check apps/mobile
+changelog.d` clean; `bun test apps/mobile/test` 5779 pass, 0 fail. Full gate: the
+orchestrator's script.
+
+**Why no simulator work.** No simulator was booted and no app build was
+attempted. Also, flow 48 needs a seed the harness lacks: "Open the session" is
+drawn only for a `foreign` ask, or a waiting step with no sheet
+(`workflow-run-controller.ts` `askBarFor`); with Session X underneath only
+`foreign` applies, so an ended run (flow 45's seed) never shows it. To verify:
+seed a session holding an ended run AND a pending main-turn ask, tap "Open the
+session", assert a transcript row, then back/forward and a laptop turn; also tap
+a push for a session lower in the stack (N4).
+
+**Known limit, for Review.** A re-attach (second "Open the session" after one
+reached with no Session beneath, or that screen's resync) detaches the handle the
+run screen still holds, so that run view stops updating until reopened. Before
+this fix the first leave already detached it.
 
 ## Review
 

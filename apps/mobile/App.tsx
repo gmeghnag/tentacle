@@ -112,6 +112,8 @@ import {
   drawerSearchTarget,
   drawerTarget,
   initialDrawer,
+  sessionReturnParams,
+  sessionRouteId,
 } from "./src/drawer-nav.ts";
 import {
   NEW_SESSION_TITLE,
@@ -2930,10 +2932,16 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
           navigationRef.navigate("Computers");
           return;
         }
-        navigationRef.navigate(
-          "Session",
-          route as { computerId: string; sessionId: string; title: string; archived: boolean },
-        );
+        // Back to that session's screen when it is already in the stack, never
+        // moved above what covers it (docs/fix/mobile-session-open-empty.md N4).
+        navigationRef.navigate({
+          name: "Session",
+          params: sessionReturnParams(
+            navigationRef.getRootState()?.routes ?? [],
+            route as SessionRouteParams,
+          ),
+          pop: true,
+        });
       }),
     [navigationRef],
   );
@@ -3706,6 +3714,7 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
               frame IS the window frame (B1(b) removed structurally). */}
           <Stack.Screen
             name="Session"
+            getId={({ params }) => sessionRouteId(params)}
             options={({ route }) => ({ title: route.params.title, headerShown: false })}
           >
             {({ navigation, route }) => (
@@ -3822,12 +3831,18 @@ function AppShell({ theme }: { readonly theme: AppTheme }): JSX.Element {
                 title={route.params.title}
                 onBack={() => navigation.goBack()}
                 onOpenSession={() =>
-                  navigation.navigate("Session", {
-                    computerId: route.params.computerId,
-                    sessionId: route.params.sessionId,
-                    title: route.params.title,
-                    // From a live run: never the archived path (Owner Q4).
-                    archived: false,
+                  // BACK to the session's screen when it is under the run (never
+                  // a second one: docs/fix/mobile-session-open-empty.md N2).
+                  navigation.navigate({
+                    name: "Session",
+                    params: sessionReturnParams(navigation.getState().routes, {
+                      computerId: route.params.computerId,
+                      sessionId: route.params.sessionId,
+                      title: route.params.title,
+                      // From a live run: never the archived path (Owner Q4).
+                      archived: false,
+                    }),
+                    pop: true,
                   })
                 }
               />
