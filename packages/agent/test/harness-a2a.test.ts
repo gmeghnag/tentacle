@@ -80,7 +80,7 @@ describe("A2A adapter — stream", () => {
     const run = await adapter.start(spec("work"), never);
     const evs = await take(run);
     expect(kinds(evs)).toEqual(["started", "progress", "output", "end"]);
-    expect(evs[2]).toEqual({ kind: "output", text: "done: 42" });
+    expect(evs[2]).toEqual({ kind: "output", text: "done: 42", fromArtifact: "r" });
     expect(evs.at(-1)).toEqual({ kind: "end", status: "completed" });
     // mutation: add the token on every request → the card GET carries it → red.
     const card = fake.requests.filter((r) => r.method === "GET");
@@ -119,7 +119,7 @@ describe("A2A adapter — stream", () => {
     await run.answer(ask.askId, { allow: true, input: "main" });
     const rest = await take(run);
     expect(kinds(rest)).toEqual(["output", "end"]);
-    expect(rest[0]).toEqual({ kind: "output", text: "got: main" });
+    expect(rest[0]).toEqual({ kind: "output", text: "got: main", fromArtifact: "r" });
     expect(fake.received[1]).toEqual({
       text: "main",
       taskId: started.handle.id,
@@ -199,7 +199,7 @@ describe("A2A adapter — cancel, drop, reattach", () => {
     fake.release();
     const tail = await take(again);
     expect(kinds(tail)).toEqual(["output", "end"]); // no second `started`
-    expect(tail[0]).toEqual({ kind: "output", text: "done: late" });
+    expect(tail[0]).toEqual({ kind: "output", text: "done: late", fromArtifact: "r" });
     const resub = a2aPosts(fake).filter((r) => /subscribe/i.test(r.rpc ?? ""));
     expect(resub.length).toBe(1);
     expect(resub[0]?.auth).toBe(`Bearer ${TOKEN}`);
@@ -215,7 +215,7 @@ describe("A2A adapter — cancel, drop, reattach", () => {
     const fresh = adapterFor(fake, { tokenCommand: undefined });
     const tail = await take(await fresh.reattach(started.handle, never));
     expect(tail).toEqual([
-      { kind: "output", text: "done: 42" },
+      { kind: "output", text: "done: 42", fromArtifact: "r" },
       { kind: "end", status: "completed" },
     ]);
     expect(fake.requests.some((r) => /gettask/i.test(r.rpc ?? ""))).toBe(true);

@@ -185,17 +185,14 @@ function takeText(state: MapState, text: string): string | undefined {
   return `${text.slice(0, Math.max(0, room))}\n${A2A_TRUNCATED_NOTE}`;
 }
 
-function partEvents(state: MapState, parts: readonly Part[], replace: boolean): HarnessEvent[] {
+function partEvents(state: MapState, parts: readonly Part[], fromArtifact: string): HarnessEvent[] {
   const evs: HarnessEvent[] = [];
   for (const p of parts) {
     const c = p.content;
     if (!c) continue;
     if (c.$case === "text") {
       const t = takeText(state, sanitizeRemote(c.value));
-      if (t !== undefined)
-        evs.push(
-          replace ? { kind: "output", text: t, replace: true } : { kind: "output", text: t },
-        );
+      if (t !== undefined) evs.push({ kind: "output", text: t, fromArtifact });
     } else if (c.$case === "data") {
       let json = "";
       try {
@@ -206,7 +203,7 @@ function partEvents(state: MapState, parts: readonly Part[], replace: boolean): 
       const t = takeText(state, json);
       if (t !== undefined) {
         // capped JSON text, never a live remote object
-        evs.push({ kind: "output", data: sanitizeRemote(t) });
+        evs.push({ kind: "output", data: sanitizeRemote(t), fromArtifact });
       }
     } else {
       // raw | url — listed, never written, a url never fetched.
@@ -218,6 +215,7 @@ function partEvents(state: MapState, parts: readonly Part[], replace: boolean): 
           ...(p.mediaType ? { mediaType: oneLine(p.mediaType, 80) } : {}),
           ...(bytes !== undefined ? { bytes } : {}),
         },
+        fromArtifact,
       });
     }
   }
@@ -266,7 +264,14 @@ export function mapStreamResponse(resp: StreamResponse, state: MapState): Harnes
       } else {
         const end = endFor(state, s, statusText(t.status));
         if (end) {
-          for (const a of t.artifacts ?? []) evs.push(...partEvents(state, a.parts, false));
+          for (const a of t.artifacts ?? []) {
+            // A snapshot IS the artifact's full content: one we already streamed
+            // REPLACES what was shown, never appends to it (D5).
+            const seen = state.artifacts.has(a.artifactId);
+            state.artifacts.set(a.artifactId, partsText(a.parts));
+            if (seen) evs.push({ kind: "output", replace: true, fromArtifact: a.artifactId });
+            evs.push(...partEvents(state, a.parts, a.artifactId));
+          }
           evs.push(end);
         }
       }
@@ -306,9 +311,11 @@ export function mapStreamResponse(resp: StreamResponse, state: MapState): Harnes
       const text = partsText(a.parts);
       const prev = state.artifacts.get(a.artifactId) ?? "";
       state.artifacts.set(a.artifactId, u.append ? prev + text : text);
-      // `append:false` over an artifact already seen replaces its text so far.
-      const replace = !u.append && state.artifacts.has(a.artifactId) && prev !== "";
-      return partEvents(state, a.parts, replace);
+      // A2A `append:false` REPLACES the artifact's text so far: say so, THEN send
+      // the content (nothing streamed for it yet ⇒ there is nothing to retract).
+      if (!u.append && prev !== "")
+        evs.push({ kind: "output", replace: true, fromArtifact: a.artifactId });
+      return [...evs, ...partEvents(state, a.parts, a.artifactId)];
     }
   }
 }

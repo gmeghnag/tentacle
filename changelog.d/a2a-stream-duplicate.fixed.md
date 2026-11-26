@@ -1,0 +1,1 @@
+- **A2A sub-agent answers are no longer duplicated.** A server that closes an artifact by re-sending its whole text (`append:false`, `lastChunk:true`) no longer makes the parent see the answer twice; the client now honours A2A `append:false` as a REPLACE of that artifact's text.

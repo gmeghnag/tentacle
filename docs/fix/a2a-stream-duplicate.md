@@ -1,6 +1,6 @@
 # fix/a2a-stream-duplicate — An A2A answer reaches the parent's report twice
 
-> **Status:** implementation (approved) · execution not started
+> **Status:** execution complete · review pending
 > **Branch:** `fix/a2a-stream-duplicate`
 > **Size:** S · **Blast:** cross-module · **Suited:** DeepSeek (executes; standard in-context Review — no §7 wire/persistence invariant changes, but the harness event type is shared by every adapter, so Review re-runs `packages/agent` + `packages/daemon` a2a tests)
 > **Changelog:** `changelog.d/a2a-stream-duplicate.fixed.md` — one bullet: `- **A2A sub-agent answers are no longer duplicated.** A server that closes an artifact by re-sending its whole text (\`append:false\`, \`lastChunk:true\`) no longer makes the parent see the answer twice; the client now honours A2A \`append:false\` as a REPLACE of that artifact's text.`
@@ -272,7 +272,113 @@ then `packages/agent/test/harness-a2a-map.test.ts`, then
 
 ## Execution
 
-*— pending: not written by the planner*
+*— deepseek-v4-pro (DeepSeek), 2026-11-26*
+
+**Branch/worktree:** worked in the existing worktree
+`.tentacle/worktrees/a2a-stream-duplicate` (branch `fix/a2a-stream-duplicate`,
+head = the plan commit). No checkout/commit was made, per the run's constraints.
+
+### 0. Load-bearing check (re-run first)
+
+`.tentacle/tmp/a2a-stream-duplicate/proof.test.ts` on the pre-change sources —
+reproduced, unchanged from Context:
+
+```
+mapped events: [{"kind":"output","text":"CIAO"},{"kind":"output","text":"CIAO","replace":true},{"kind":"end","status":"completed"}]
+REPORT >>> "CIAOCIAO\n\n— acme · default · cost: not reported"
+CIAO occurrences: 2
+error: expect(received).toBe(expected)  Expected: 1  Received: 2
+(fail) PROOF: chunk + whole-text lastChunk reaches the report twice
+```
+
+So the mapper is right and the duplication is the report's. Proceeded.
+
+### 1. Red before green (both sides)
+
+Tests written first, run on the unmodified source:
+
+- `harness-remote-fit.test.ts` (new describe `a2a: a replacing artifact stream
+  reaches the report once`, the repro's shape through the real
+  `mapStreamResponse` → `ScriptRun` → `result.report`): **2 fail** —
+  `count(report,"CIAO")` was `2` (expected 1) and the mid-stream replacement
+  test saw `report.startsWith("OTTARINA-42") === false`. The third case
+  (`append:true` deltas still concatenate) was **green**, as planned (the
+  anti-overreach pin).
+- `harness-a2a-map.test.ts`: **4 fail** — clear-then-parts (today one event with
+  a `replace` flag), no-parts clear (today `[]`), task-snapshot replace (today a
+  second append), data/file provenance (today no `fromArtifact`).
+
+New module `report.ts` has no pre-fix state; its non-vacuity is the mutation
+check below, as the plan said.
+
+### 2. As built (in the plan's order)
+
+1. `types.ts:95-107` — `output` gained `readonly fromArtifact?: string`; the
+   `replace` doc now says REPLACE + "`fromArtifact` says which".
+2. `report.ts` (**new**, 92 lines) — `createReport / applyOutput / appendReport /
+   setReport / reportText` over ordered `{id,text}` segments (`""` = plain tail);
+   `DATA_CAP`/`capped` and the data/`[file] …` line composition moved here from
+   `child.ts` (the buffer is now the one place report text is built). Append
+   merges into the last segment when it is the same id, else pushes — so with no
+   `replace` the join is byte-identical to the old `+=`.
+3. `a2a-map.ts` — `partEvents(state, parts, fromArtifact)` stamps provenance on
+   text/data/file and lost its `replace` parameter; `artifactUpdate` emits
+   `{kind:"output", replace:true, fromArtifact}` **before** the parts when
+   `!append && prev !== ""` (the dead `has()` conjunct is gone); the terminal
+   `task` branch replaces an artifact it already streamed and records the
+   snapshot's text in `state.artifacts`.
+4. `child.ts` — `report` is `createReport()`; `partialReport`, both resets, the
+   notices, the `end.text` dedupe and `trim()` read the buffer; the `output` case
+   is one `applyOutput(report, ev)`; `capped`/`DATA_CAP` deleted here. Framing,
+   footer, worktree note and the empty-report fallback are untouched.
+5. Tests: `harness-report.test.ts` (**new**, 6 cases), `harness-a2a-map.test.ts`
+   (updated + 3 new cases), `harness-remote-fit.test.ts` (3 new cases).
+6. `changelog.d/a2a-stream-duplicate.fixed.md` (**new**, the plan's bullet).
+   No `protocol.d/` note: `HarnessEvent` is harness-internal.
+
+### 3. Drift from the Implementation (and why)
+
+- **A 5th test file was needed: `harness-a2a.test.ts`.** It pins mapped events
+  with `toEqual` (lines 83, 122, 202, 218) against its fake's `artifactId: "r"`
+  (`test/support/fake-a2a.ts:120`), so the new optional field made it fail with
+  `+ "fromArtifact": "r"`. Mechanical field addition, no design change; the
+  Files list did not name it.
+- **`harness-a2a-map.test.ts:246`** (the "work → started/progress/output/end"
+  case) also used an exact `toEqual` on an `output` event and needed the field —
+  same class, same reason.
+- **`capped`/`DATA_CAP` moved rather than duplicated** (the plan put the data
+  line in the buffer, so the helper had to move with it; `child.ts` keeps no
+  copy).
+- **The standalone proof ran against the main checkout's sources**: the scratch
+  dir is `<repo root>/.tentacle/tmp/…` and the proof imports
+  `../../../packages/…` (AGENTS §6), i.e. `main` — which is the branch's base
+  (the only branch commit is the plan doc). Post-fix green is the same assertion
+  inside `harness-remote-fit.test.ts`, run in the worktree, so the fixed code is
+  what is proven. Nothing else drifted.
+
+### 4. Mutation checks (non-vacuity, each reverted)
+
+| Mutation | Result |
+|---|---|
+| `applyOutput` ignores `replace` (drop the clearing loop in `report.ts`) | **6 fail**: 4 buffer cases + both remote-fit replacement cases; `21 pass` |
+| `a2a-map.ts` drops both clear events (`artifactUpdate` and task snapshot) | **5 fail**: 3 map cases + both remote-fit replacement cases; `71 pass` |
+
+After each revert the same files were re-run green (`27 pass` / `55 pass`).
+
+### 5. Verification actually run
+
+- Narrow, per slice: `bun test packages/agent/test/harness-report.test.ts`,
+  `harness-a2a-map.test.ts`, `harness-remote-fit.test.ts`, `harness-a2a.test.ts`
+  → **105 pass, 0 fail**; `packages/agent/test/` whole dir → **1146 pass, 0 fail**;
+  `packages/daemon/test/a2a-executor.test.ts` → **15 pass** (the D6 pin, green as
+  planned — it is a pin, not proof).
+- `bunx biome check` on the 8 changed files → clean (4 auto-formatted first).
+- Full `bun run check` (root typecheck + whole suite) is the orchestrator's, per
+  this run's rules — **not run here**. Note for it: a standalone
+  `bunx tsc --noEmit -p packages/agent` reports 3 errors, all in lines this task
+  never touched (`a2a-map.ts:486` `URL` shape, two `RequestInfo` in
+  `harness-a2a-registry.test.ts`) — the package's own tsconfig lacks the DOM lib
+  the root config supplies; the root typecheck is the truth.
 
 ## Review
 

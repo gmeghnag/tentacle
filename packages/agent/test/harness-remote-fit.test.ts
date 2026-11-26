@@ -4,6 +4,7 @@
  * (docs/feat/subagent-harness-runners.md, slice shr-4).
  */
 import { describe, expect, test } from "bun:test";
+import { type StreamResponse, TaskState } from "@a2a-js/sdk";
 import {
   AgentInbox,
   DISMISSED,
@@ -16,6 +17,7 @@ import {
 } from "@tentacle/core";
 import type { ModelProvider } from "@tentacle/core";
 import { ToolRegistry } from "@tentacle/tools";
+import { mapStreamResponse, newMapState } from "../src/harness/a2a-map.ts";
 import { type HarnessDeps, harnessModeIssue } from "../src/harness/child.ts";
 import type {
   HarnessAdapter,
@@ -453,6 +455,104 @@ describe("remote fit: auth, cancel, rejected, outputs, mode", () => {
 
   test("readOnlyType: a remote harness type is read-only", () => {
     expect(runner(remoteAdapter([])).readOnlyType("acme")).toBe(true);
+  });
+});
+
+/**
+ * A2A `append:false` is a REPLACE of that artifact's text: the report must
+ * carry the answer ONCE (the owner's e2e: "…OTTARINA-42…OTTARINA-42").
+ * Driven through the REAL mapper into the REAL runner — the bug lived in the
+ * seam between them (`child.ts` reported `ev.text` with no `replace` reader).
+ */
+describe("a2a: a replacing artifact stream reaches the report once", () => {
+  const textPart = (text: string) => ({
+    content: { $case: "text" as const, value: text },
+    metadata: undefined,
+    filename: "",
+    mediaType: "",
+  });
+  /** One `artifactUpdate` frame; `append` absent = false, lastChunk as given. */
+  const artFrame = (text: string, append: boolean, lastChunk = false): StreamResponse =>
+    ({
+      payload: {
+        $case: "artifactUpdate",
+        value: {
+          taskId: "t1",
+          contextId: "c1",
+          artifact: {
+            artifactId: "response",
+            name: "response",
+            description: "",
+            parts: [textPart(text)],
+            metadata: undefined,
+            extensions: [],
+          },
+          append,
+          lastChunk,
+          metadata: undefined,
+        },
+      },
+    }) as StreamResponse;
+  const completed = (): StreamResponse =>
+    ({
+      payload: {
+        $case: "statusUpdate",
+        value: {
+          taskId: "t1",
+          contextId: "c1",
+          status: {
+            state: TaskState.TASK_STATE_COMPLETED,
+            message: undefined,
+            timestamp: undefined,
+          },
+          metadata: undefined,
+        },
+      },
+    }) as StreamResponse;
+
+  /** Map the wire frames, then feed the resulting events to the real runner. */
+  async function reportOf(frames: StreamResponse[]): Promise<string> {
+    const state = newMapState("a2a:acme", "https://agents.acme.dev/card");
+    const run = new ScriptRun();
+    const p = runner(remoteAdapter([run])).run(OPTS);
+    run.push(...frames.flatMap((f) => mapStreamResponse(f, state)));
+    run.close();
+    return (await p).report;
+  }
+  const count = (hay: string, needle: string): number => hay.split(needle).length - 1;
+
+  test("chunk + whole-text lastChunk → the report has it once", async () => {
+    // The wire shape of the report: one delta, then the whole text again as the
+    // closing artifact (legal A2A, `append:false`) — the composed artifact is "CIAO".
+    const report = await reportOf([
+      artFrame("CIAO", false),
+      artFrame("CIAO", false, true),
+      completed(),
+    ]);
+    expect(count(report, "CIAO")).toBe(1);
+    expect(report.startsWith("CIAO")).toBe(true);
+  });
+
+  test("append:true deltas still concatenate", async () => {
+    // The anti-overreach pin: an appending stream is NOT a replacement.
+    const report = await reportOf([
+      artFrame("Ot", true),
+      artFrame("tarina-42", true, true),
+      completed(),
+    ]);
+    expect(report.startsWith("Ottarina-42")).toBe(true);
+    expect(count(report, "Ottarina-42")).toBe(1);
+  });
+
+  test("an artifact replaced mid-stream keeps only the replacement", async () => {
+    const report = await reportOf([
+      artFrame("Ot", true),
+      artFrame("tarina-42", true),
+      artFrame("OTTARINA-42", false, true),
+      completed(),
+    ]);
+    expect(report.startsWith("OTTARINA-42")).toBe(true);
+    expect(report.includes("Ottarina-42")).toBe(false);
   });
 });
 
