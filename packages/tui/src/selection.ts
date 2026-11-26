@@ -62,10 +62,10 @@ export function isNonEmpty(sel: Selection): boolean {
 }
 
 /**
- * A release copies only a DELIBERATE selection: one that crossed two rows, or
- * that travelled at least this many cells along a row. A press-release with
- * less movement is a click (a hand jitter while focusing the terminal), and
- * copying it silently overwrote the person's clipboard with a stray fragment.
+ * A release copies only a DELIBERATE selection: one that travelled at least this
+ * many cells along a row, or crossed two rows. A press-release with less
+ * movement is a click (a hand jitter while focusing the terminal), and copying
+ * it silently overwrote the person's clipboard with a stray fragment.
  */
 export const COPY_MIN_CELLS = 3;
 
@@ -75,20 +75,16 @@ export const COPY_MIN_CELLS = 3;
  * A ONE-row jump is not enough on its own: a cell is ~2x taller than wide, so a
  * press a pixel from a row boundary emits one drag report on the next row, and
  * the copy would take the rest of that row plus the next one's prefix — the same
- * stray-clipboard bug along the other axis. So crossing a single row must also
- * travel `COPY_MIN_CELLS` forward along the row (the reading-order end past the
- * reading-order start); two rows apart is deliberate by itself.
+ * stray-clipboard bug along the other axis. So the test is PHYSICAL travel,
+ * direction-free: two rows apart, or `COPY_MIN_CELLS` along a row. Direction
+ * must not matter, because the ordinary gesture for a phrase that wraps is the
+ * tail of one row down to the head of the next, with the head LEFT of the
+ * anchor (requiring forward travel silently dropped exactly that copy).
  */
 export function isDeliberate(sel: Selection): boolean {
-  const rows = sel.head.row - sel.anchor.row;
-  if (Math.abs(rows) >= 2) {
-    return true;
-  }
-  if (rows === 0) {
-    return Math.abs(sel.head.col - sel.anchor.col) >= COPY_MIN_CELLS;
-  }
-  const forward = rows > 0 ? sel.head.col - sel.anchor.col : sel.anchor.col - sel.head.col;
-  return forward >= COPY_MIN_CELLS;
+  const rows = Math.abs(sel.head.row - sel.anchor.row);
+  const cols = Math.abs(sel.head.col - sel.anchor.col);
+  return rows >= 2 || cols >= COPY_MIN_CELLS;
 }
 
 /** How long the status bar keeps the copy confirmation. */

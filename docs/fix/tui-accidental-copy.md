@@ -81,9 +81,11 @@ travels ≥ 3 cells or ≥ 2 rows) and by the geometry fact that a terminal cell
 
 **Design.** Two pure decisions plus their wiring:
 1. `isDeliberate(sel)` (`selection.ts`) — a release copies only when the
-   selection crossed **two** rows, or travelled `COPY_MIN_CELLS` (= 3) along a
-   row (for a one-row crossing, forward, in the drag direction). Anything less is
-   a click.
+   selection crossed **two** rows, or travelled `COPY_MIN_CELLS` (= 3) cells along
+   a row. **Round-2 correction:** physical travel, direction-free — round 1
+   required the one-row travel to be *forward*, which refused the ordinary
+   gesture for a phrase that wraps (the tail of one row down to the head of the
+   next). Anything less is a click.
 2. `copiedLabel(chars)` / `COPIED_NOTE_MS` (`selection.ts`) — the transient
    status-bar text and its 2 s life.
    `dispatchMouse` emits `copySelection` only for a deliberate selection;
@@ -102,7 +104,9 @@ text guard still applies. *Second copy inside 2 s* → the timer restarts
 (`clearTimeout`), so the note never expires early. *Unmount before the timer* →
 `setState` on an unmounted tree is a no-op in React 18; App's effect count is
 pinned by structural tests, so no cleanup effect was added. *One-row jitter* →
-`isDeliberate` false (round 1). *Selection scrolled out of view* → unchanged: the
+`isDeliberate` false (round 1). *Wrapped phrase* (tail of one row → head of the
+next, head LEFT of the anchor) → `isDeliberate` true: the rule is direction-free
+(round 2). *Selection scrolled out of view* → unchanged: the
 App assembles the whole buffer on release.
 
 **Tests.** Pure rule (extent thresholds, both orientations), integration through
@@ -210,6 +214,75 @@ on both files touched.
 *— deepseek, 2026-11-26*
 
 *— claude-opus-5-5, 2026-11-26*
+
+### Fix round 2
+
+**R2 finding 1 (HIGH — a selection across a line break did not copy).** Root
+cause: `isDeliberate`'s one-row case compared *displacement along the row in the
+drag direction* (`selection.ts` round-1 lines 90-91), so the wrap gesture — press
+(5,40), drag (6,5) — had a negative "forward" and was judged a click: highlight
+shown, release copied nothing, silently.
+
+Fix (`packages/tui/src/selection.ts:82-88`): the rule is physical travel and
+direction-free —
+
+```ts
+const rows = Math.abs(sel.head.row - sel.anchor.row);
+const cols = Math.abs(sel.head.col - sel.anchor.col);
+return rows >= 2 || cols >= COPY_MIN_CELLS;
+```
+
+The doc comment now states *why* direction must not matter (the wrap gesture),
+and `COPY_MIN_CELLS`'s comment was reworded ("travelled ≥ 3 cells along a row,
+or crossed two rows"). No other call site changed: `mouse-stream.ts:340` is still the one
+guard and `useMouse`'s empty-text guard is untouched.
+
+**Red first** on the unfixed rule (`bun test packages/tui/test/accidental-copy.test.tsx`):
+
+```
+(fail) isDeliberate (pure rule) > a one-row jump needs COPY_MIN_CELLS of physical travel, on either axis
+(fail) accidental copy > a wrapped phrase: tail of one row to the head of the next still copies
+(fail) dispatchMouse release > emits copySelection only for a deliberate selection
+ 8 pass
+ 3 fail
+```
+
+Green after the fix: `11 pass / 0 fail`. The probe the reviewer used
+(`.tentacle/tmp/tui-accidental-copy/r2.ts`), before → after:
+
+```
+jitter down (5,10)->(6,11): false -> false
+wrap phrase down (5,40)->(6,5): false -> true
+wrap phrase up   (6,5)->(5,40): false -> true
+down-right (5,10)->(6,20): true -> true
+```
+
+**Tests added/changed** (`accidental-copy.test.tsx`): the pure-rule test is now
+"needs COPY_MIN_CELLS of physical travel, on either axis" (the round-1 assertion
+that pinned *backwards* travel as "no copy" is replaced by the wrap cases — it
+pinned the bug); a new integration test presses (10,1) and drags to (2,2) —
+a wrapped phrase through the real App — expecting exactly one copy whose text
+contains a newline and "Copied · " in the status bar; the dispatch seam gained
+`mk(5, 1, 40)` (anchor row 0 col 40 → head row 1 col 5, deliberate). The jitter
+cases are unchanged and still refused.
+
+**Mutations (both reverted; `git status` shows only the two intended files).**
+- M6 forward-only travel again (`rows >= 2 || sel.head.col - sel.anchor.col >=
+  COPY_MIN_CELLS`) → 4 fail: the single-row rule, the one-row rule, the wrap
+  integration test, the dispatch seam. This is the round-1 bug, so the new tests
+  are pinned against its return, not only against its absence.
+- M7 any row change deliberate (`rows >= 1`) → 3 fail: the one-row rule, the
+  one-row jitter integration test, the dispatch seam (the jitter direction is
+  still guarded).
+
+**Verification.** Narrow: `accidental-copy` + `mouse-stream` + `app` = 159
+pass / 0 fail. `bunx biome check` on both changed files: clean. Drift: Implementation's Design item 1 and the Failure-modes line now state
+the direction-free rule (round-2 correction, marked as such) — the plan described
+the rule round 1 shipped, which the R2 review showed to be a regression.
+
+Not addressed (round-2 note, not a finding): the UTF-16 `copyLabel` count nit.
+
+*— claude (Anthropic; this CLI exposes no model id to the agent), 2026-11-26*
 
 ## Review
 
