@@ -291,6 +291,16 @@ export function sheetOptions(req: PermissionRequest): readonly SheetOption[] {
         : []),
     ];
   }
+  // A container preview (docs/feat/container-apps-devices.md OD2): once or no.
+  if (req.kind === "container_preview") {
+    return [
+      { optionId: "allow_once", label: "Show once", kind: "allow" },
+      { optionId: "reject_once", label: "No", kind: "deny" },
+      ...(req.reply !== undefined
+        ? ([{ optionId: "reply", label: "No, let's talk about it", kind: "reply" }] as const)
+        : []),
+    ];
+  }
   const always =
     req.suggestion !== undefined
       ? `Allow \`${req.suggestion.prefix}\` commands for this session`

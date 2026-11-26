@@ -761,6 +761,14 @@ const FIXTURES: Record<string, Json[]> = {
     { rev: 1, daemons: [] },
     { rev: 2, daemons: [{ cwd: "/Users/me/project", addresses: [], startedAt: 9, self: true }] },
   ],
+  // feat/container-apps-devices: a device's byte tunnel to a container port.
+  "methods/session~1preview_connect/params": [{ sessionId: "s", previewId: "0a1b" }],
+  "methods/session~1preview_connect/result": [{ tunnelId: "t-1" }],
+  "methods/session~1preview_stop/params": [{ sessionId: "s", previewId: "0a1b" }],
+  "methods/session~1preview_stop/result": [{ ok: true }, { ok: false, reason: "no such preview" }],
+  "notifications/preview~1data/params": [{ tunnelId: "t-1", data: "aGk=" }],
+  "notifications/preview~1ack/params": [{ tunnelId: "t-1", bytes: 2 }],
+  "notifications/preview~1close/params": [{ tunnelId: "t-1" }, { tunnelId: "t-1", reason: "end" }],
   "methods/session~1context/params": [
     {},
     { sessionId: "s" },

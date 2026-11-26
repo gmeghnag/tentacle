@@ -20,6 +20,7 @@ import {
 import { ContentBlockSchema, PromptContentBlockSchema } from "./content.ts";
 import { ModelNameSchema, ReasoningRecordSchema } from "./model.ts";
 import { PermissionReplyTextSchema } from "./permission-reply.ts";
+import { PreviewRowSchema } from "./preview.ts";
 import { ToolResultSpillSchema } from "./spill.ts";
 import { line } from "./text-line.ts";
 
@@ -1627,6 +1628,12 @@ export const SnapshotResultSchema = z.object({
    * never "none".
    */
   apps: z.array(AppRowSchema).optional(),
+  /**
+   * The session's container previews at the cut, the FULL list (first page
+   * only). Absent means "this daemon does not report them" (older, previews
+   * off, or a pod), never "none".
+   */
+  previews: z.array(PreviewRowSchema).optional(),
   /**
    * The session's workflow runs at the cut — the current one + the last few
    * ended (docs/feat/agent-workflows.md D5; first page only). Absent from an

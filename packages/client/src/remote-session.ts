@@ -2701,6 +2701,7 @@ export class RemoteSession implements SessionStreamListener {
       case "jobs":
       case "schedules":
       case "apps":
+      case "previews":
       case "subagent_notify":
       case "subagent_message":
         return;
@@ -2813,6 +2814,7 @@ export class RemoteSession implements SessionStreamListener {
       update.type === "jobs" ||
       update.type === "schedules" ||
       update.type === "apps" ||
+      update.type === "previews" ||
       update.type === "subagent_notify" ||
       update.type === "subagent_message"
     ) {

@@ -80,6 +80,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `mount.hideExtra` | — | — | Extra paths to hide, ADDED to the default list. |
 | `network` | `TENTACLE_NETWORK` | — | Network of `run`'s container: a name, or `none` for air-gapped runs; `--network` wins. |
 | `packages.*` | — | — | Whether this installed package is enabled. |
+| `previews.enabled` | — | false | Offer the agent `container_preview` on `serve`. |
 | `push.enabled` | — | `true` | Whether this `serve` pushes notifications to its paired phones. |
 | `push.graceSeconds` | — | `30` | How long an unanswered permission request waits before a phone is pushed. |
 | `relay.enabled` | — | `true` | Whether `serve` dials the mobile relay at all. |

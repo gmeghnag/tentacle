@@ -13,6 +13,7 @@ import type {
   AppsLink,
   ArtifactSink,
   AttachmentSource,
+  PreviewsLink,
   ScheduleLink,
   ToolImageStore,
 } from "@tentacle/core";
@@ -78,6 +79,7 @@ import type { ServeLimits } from "./flags.ts";
 import { daemonDocumentPolicy, daemonImagePolicy } from "./image-policy.ts";
 import { type McpHub, capStderr, createMcpHub } from "./mcp-hub.ts";
 import type { ProviderFactory } from "./model-provider.ts";
+import { enginePreviewResolver } from "./preview-resolver.ts";
 import { readRelaySecret } from "./relay-secret.ts";
 import { type ServeA2AOptions, buildA2A } from "./serve-a2a.ts";
 import { serveHooksTrustPrecheck } from "./serve-hooks-trust.ts";
@@ -242,6 +244,8 @@ export function createServeAgent(
     readonly schedules?: () => ScheduleLink | null;
     /** The session's published apps (docs/feat/session-apps-publish.md D1). */
     readonly apps?: () => AppsLink | null;
+    /** The session's container previews (docs/feat/container-apps-devices.md). */
+    readonly previews?: () => PreviewsLink | null;
   },
   /** The daemon-wide MCP set: its tools join every registry this builds (S2). */
   mcpHub?: Pick<McpHub, "onBuilt">,
@@ -276,6 +280,9 @@ export function createServeAgent(
       // Session apps: only where the host handed the link (`apps.enabled`).
       // `tunnelledAgent` never passes this.
       ...(ctx.apps ? { apps: ctx.apps } : {}),
+      // Container previews: only where the host handed the link
+      // (`previews.enabled`). `tunnelledAgent` and the worker never pass this.
+      ...(ctx.previews ? { previews: ctx.previews } : {}),
       // Workflows (docs/feat/agent-workflows.md D3): `serve` runs them unattended
       // on the user's own host. `tunnelledAgent` never passes this.
       workflows: true,
@@ -820,6 +827,9 @@ async function reloadedHost(
   const sessionHost = new SessionHost({
     defaultCwd: config.cwd,
     ...(apps ? { apps } : {}),
+    // Container previews, for the paired devices only: `serve` alone, and only
+    // with `previews.enabled` (docs/feat/container-apps-devices.md OD8).
+    ...(config.previews.enabled ? { previews: enginePreviewResolver() } : {}),
     // A deleted session takes its spilled tool output with it.
     onSessionDeleted: (id) => void toolOutputStore().removeSession(id),
     maxSessions: options.maxSessions ?? DEFAULT_MAX_SESSIONS,

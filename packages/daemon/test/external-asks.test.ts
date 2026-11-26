@@ -76,6 +76,10 @@ describe("external asks", () => {
   test("a publish ask is the owner's only, in every mode", () => {
     const own = askOf(update({ tool: "app_publish" }), true);
     expect(own.kind).toBe("app_publish");
+    // Mutation: drop the `container_preview` branch → a caller could answer it.
+    const preview = askOf(update({ tool: "container_preview" }), true);
+    expect(preview.kind).toBe("container_preview");
+    expect(callerMayAnswer(preview, "both")).toBe(false);
     expect(callerMayAnswer(own, "both")).toBe(false);
     expect(callerMayAnswer(own, "owner")).toBe(false);
   });

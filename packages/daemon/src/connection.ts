@@ -63,6 +63,12 @@ import {
   PROTOCOL_VERSION,
   type PinParams,
   type PinResult,
+  type PreviewAckParams,
+  type PreviewCloseParams,
+  type PreviewConnectParams,
+  type PreviewConnectResult,
+  type PreviewDataParams,
+  type PreviewStopParams,
   type PromptParams,
   type PromptResult,
   type ReclaimParams,
@@ -120,6 +126,7 @@ import {
 import { artifactListResult } from "./artifact-store.ts";
 import type { Attachment, HostedSession } from "./hosted-session.ts";
 import { type PairHandler, pairingRefusedError } from "./pairing-handler.ts";
+import { type PreviewDial, PreviewTunnels, dialLoopback } from "./preview-tunnels.ts";
 import { hasDocuments, resolvePromptDocuments } from "./prompt-documents.ts";
 import type { SessionHost } from "./session-host.ts";
 import { versionMismatch } from "./version-mismatch.ts";
@@ -146,6 +153,8 @@ export interface ConnectionOptions {
    * call would fail obscurely) — the session itself stays for re-attach.
    */
   readonly servesModel?: boolean;
+  /** The dial of a preview tunnel (default: TCP to `127.0.0.1`). */
+  readonly previewDial?: PreviewDial;
   /**
    * WHO this connection is (docs/feat/device-pairing.md 9b/9c). Absent = a token
    * client, today's behaviour: every method. A `device` has exactly the same
@@ -252,6 +261,10 @@ export class Connection {
    */
   private timeZone: string | undefined;
 
+  /** This connection's preview tunnels (docs/feat/container-apps-devices.md). */
+  private readonly tunnels: PreviewTunnels;
+  private readonly previewDial: PreviewDial;
+
   constructor(
     channel: DuplexChannel,
     host: SessionHost,
@@ -262,6 +275,8 @@ export class Connection {
     this.servesModel = options.servesModel === true;
     this.principal = options.principal ?? { kind: "token" };
     this.hooksTrustPrecheck = options.hooksTrustPrecheck;
+    this.previewDial = options.previewDial ?? dialLoopback;
+    this.tunnels = new PreviewTunnels((method, params) => this.peer.notify(method, params));
     this.peer = new RpcPeer(channel, {
       onRequest: (method, params, context) => this.onRequest(method, params, context),
       onNotification: (method, params) => this.onNotification(method, params),
@@ -293,6 +308,8 @@ export class Connection {
     // is left running for a connection that is gone (F11).
     this.discoveryUnsubscribe?.();
     this.discoveryUnsubscribe = undefined;
+    // Every preview socket of this link closes with it (the previews stay).
+    this.tunnels.closeAll();
     this.peer.close();
   }
 
@@ -534,6 +551,14 @@ export class Connection {
         // awaits the host's `DELETE` (§7 "don't serialize the peer").
         const { sessionId, app } = params as AppUnpublishParams;
         return this.lookup(sessionId).unpublishApp(app);
+      }
+      case Method.PreviewConnect:
+        return this.connectPreview(params as PreviewConnectParams);
+      case Method.PreviewStop: {
+        const { sessionId, previewId } = params as PreviewStopParams;
+        const hosted = this.lookup(sessionId);
+        this.requirePreviewDevice();
+        return hosted.stopPreview(previewId);
       }
       case Method.ScheduleCreate: {
         // agent-workflows slice 10: answers up to the create (reads the file);
@@ -982,6 +1007,68 @@ export class Connection {
     );
   }
 
+  /** Previews are viewed by paired devices only (OD5): a token client answers the ask, no more. */
+  private requirePreviewDevice(): void {
+    if (this.principal.kind !== "device") {
+      throw new RpcError(
+        DomainErrorCode.Unauthorized,
+        "only a paired device may open or stop a preview",
+      );
+    }
+  }
+
+  /**
+   * `session/preview_connect`: ask the engine again, dial the loopback port it
+   * names now, and tie the tunnel to the preview. Only this request awaits (§7
+   * "don't serialize the peer"); the slot is held meanwhile, for the cap.
+   */
+  private async connectPreview(params: PreviewConnectParams): Promise<PreviewConnectResult> {
+    const { sessionId, previewId } = params;
+    const hosted = this.lookup(sessionId);
+    this.requirePreviewDevice();
+    const slot = this.tunnels.reserve();
+    if (!slot) {
+      throw new RpcError(
+        DomainErrorCode.PreviewUnavailable,
+        "too many open preview tunnels on this connection",
+      );
+    }
+    try {
+      const target = await hosted.connectPreview(previewId);
+      if (!target.ok) {
+        throw new RpcError(
+          target.gone ? DomainErrorCode.PreviewGone : DomainErrorCode.PreviewUnavailable,
+          target.reason,
+        );
+      }
+      const socket = await this.previewDial(target.hostPort).catch((error: Error) => {
+        throw new RpcError(
+          DomainErrorCode.PreviewUnavailable,
+          `the container's port is not answering: ${error.message}`,
+        );
+      });
+      // The session may have ended, or the preview been stopped, during the dial.
+      // Filled below, in the same synchronous step: the watcher cannot run before.
+      const opened: { tunnelId?: string } = {};
+      const unwatch = hosted.watchPreview(previewId, (reason) => {
+        if (opened.tunnelId !== undefined) this.tunnels.close(opened.tunnelId, reason, true);
+      });
+      if (!unwatch) {
+        socket.destroy();
+        throw new RpcError(DomainErrorCode.PreviewGone, "the preview was stopped");
+      }
+      const tunnelId = slot.open(socket, unwatch);
+      if (tunnelId === undefined) {
+        unwatch();
+        throw new RpcError(DomainErrorCode.PreviewUnavailable, "the connection is closing");
+      }
+      opened.tunnelId = tunnelId;
+      return { tunnelId };
+    } finally {
+      slot.release();
+    }
+  }
+
   /**
    * `session/watch`: a read-only follower. A session must be LIVE (a `serve`
    * daemon's archived one is `UnknownSession`, never revived by a watch), and
@@ -1260,6 +1347,19 @@ export class Connection {
       if (entry && this.host.get(sessionId) === entry.hosted) {
         entry.hosted.cancel(turnId);
       }
+      return;
+    }
+    // Tunnel traffic, synchronous and in frame order. A tunnel only exists on a
+    // device connection; any other principal's frames are ignored.
+    if (this.principal.kind !== "device") return;
+    if (method === Notification.PreviewData) {
+      const { tunnelId, data } = params as PreviewDataParams;
+      this.tunnels.data(tunnelId, data);
+    } else if (method === Notification.PreviewAck) {
+      const { tunnelId, bytes } = params as PreviewAckParams;
+      this.tunnels.ack(tunnelId, bytes);
+    } else if (method === Notification.PreviewClose) {
+      this.tunnels.close((params as PreviewCloseParams).tunnelId, "phone", false);
     }
   }
 }

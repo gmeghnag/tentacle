@@ -65,7 +65,7 @@ import {
   workflowWaitNote,
   workflowWaitWakeDue,
 } from "@tentacle/agent";
-import type { AppsLink } from "@tentacle/core";
+import type { AppsLink, PreviewResolver, PreviewsLink } from "@tentacle/core";
 import {
   AGENT_MESSAGE_MAX_CHARS,
   type AgentJob,
@@ -140,6 +140,8 @@ import {
   MAX_SESSION_TITLE,
   type PermissionOutcome,
   type PermissionRequestUpdate,
+  type PreviewRow,
+  type PreviewStopResult,
   type PromptContentBlock,
   type PromptResult,
   QUESTION_ANSWER_OPTION,
@@ -243,6 +245,11 @@ import type { ImagePolicy, WorkloadShellsLike } from "./session-host.ts";
 import { type SessionSummary, liveRunCount } from "./session-list.ts";
 import { type LogBase, SessionLog, replayFromBase } from "./session-log.ts";
 import type { SessionPersister } from "./session-persister.ts";
+import {
+  type PreviewDialTarget,
+  type PreviewEndReason,
+  SessionPreviews,
+} from "./session-previews.ts";
 import type { SessionLiveness } from "./session-reaper.ts";
 import {
   TITLE_TIMEOUT_MS,
@@ -413,6 +420,8 @@ interface Cut {
   readonly workflows: readonly WorkflowRow[];
   /** The published apps as of the cut: the last `apps` list emitted (docs/feat/session-apps-publish.md). */
   readonly apps: readonly AppRow[];
+  /** The container previews as of the cut: the last `previews` list emitted. */
+  readonly previews: readonly PreviewRow[];
 }
 
 /**
@@ -1254,6 +1263,10 @@ export class HostedSession {
   private apps: SessionApps | undefined;
   /** The last `apps` list emitted (or the restored one): what the cut records. */
   private lastApps: readonly AppRow[] = [];
+  /** The session's container previews; absent where this runtime previews nothing. */
+  private previews: SessionPreviews | undefined;
+  /** The last `previews` list emitted: what the cut records. */
+  private lastPreviews: readonly PreviewRow[] = [];
   /**
    * The ONE user-wait timer (docs/feat/workflow-run-awareness.md S6): the wait
    * key it was armed for, its run, and when that wait began (the note's `since`).
@@ -1312,6 +1325,7 @@ export class HostedSession {
     artifacts: ArtifactStore = new ArtifactStore(new ArtifactBudget()),
     schedules?: SessionSchedules,
     apps?: AppsService,
+    previews?: PreviewResolver,
   ) {
     this.id = id;
     this.uploads = uploads;
@@ -1402,7 +1416,12 @@ export class HostedSession {
       schedules: [],
       workflows: [],
       apps: [],
+      previews: [],
     };
+    // Container previews live in memory only (OD6): nothing to restore.
+    if (previews !== undefined) {
+      this.previews = new SessionPreviews(previews, () => this.previewsChanged(), now);
+    }
     // The published apps a restart or a reopen brings back (session apps D8):
     // each renews at once. Their timers fire after this constructor returns.
     if (apps !== undefined) {
@@ -2652,6 +2671,8 @@ export class HostedSession {
       ...(cursor === undefined && this.scheduling ? { schedules: [...cut.schedules] } : {}),
       // Only where the session publishes apps (a pod daemon never does).
       ...(cursor === undefined && this.apps ? { apps: [...cut.apps] } : {}),
+      // Only where the session previews containers (a `serve` with previews on).
+      ...(cursor === undefined && this.previews ? { previews: [...cut.previews] } : {}),
       // Only where the session runs workflows (a tunnelled session has no driver).
       ...(cursor === undefined && this.workflows ? { workflows: [...cut.workflows] } : {}),
     };
@@ -2698,6 +2719,7 @@ export class HostedSession {
       schedules: this.lastSchedules,
       workflows: this.lastWorkflows,
       apps: this.lastApps,
+      previews: this.lastPreviews,
     };
     this.ring.evict(this.seq);
     // The committed prefix moved: its changes join the log (pointer compares only).
@@ -4607,6 +4629,54 @@ export class HostedSession {
     }
   }
 
+  // --- container previews (docs/feat/container-apps-devices.md) ----------------
+
+  /**
+   * This session's previews as its tool reaches them (`AgentContext.previews`),
+   * or `null` where the host previews nothing or the session has ended.
+   */
+  previewsLink(): PreviewsLink | null {
+    return this.previews === undefined || this.closed ? null : this.previews;
+  }
+
+  /** The port a `session/preview_connect` may dial: the engine is asked again. */
+  connectPreview(previewId: string): Promise<PreviewDialTarget> {
+    return this.previews && !this.closed
+      ? this.previews.connect(previewId)
+      : Promise.resolve({ ok: false, gone: true, reason: "this session has no such preview" });
+  }
+
+  /** A tunnel's hold on its preview: `undefined` = already gone. */
+  watchPreview(
+    previewId: string,
+    onEnd: (reason: PreviewEndReason) => void,
+  ): (() => void) | undefined {
+    return this.closed ? undefined : this.previews?.watch(previewId, onEnd);
+  }
+
+  /** `session/preview_stop`: the user takes one preview down. */
+  stopPreview(previewId: string): PreviewStopResult {
+    return this.previews?.remove(previewId, "stopped")
+      ? { ok: true }
+      : { ok: false, reason: "no such preview" };
+  }
+
+  /** The previews changed: the list, never a write (OD6: not persisted). */
+  private previewsChanged(): void {
+    if (this.closed || this.previews === undefined) {
+      return;
+    }
+    this.lastPreviews = this.previews.list();
+    try {
+      this.emit({ type: "previews", previews: [...this.lastPreviews] });
+    } catch (error) {
+      this.reportTurnError(error);
+    }
+    if (this.controller === null) {
+      this.recordCut(null);
+    }
+  }
+
   // --- published apps (docs/feat/session-apps-publish.md) ---------------------
 
   /**
@@ -5422,6 +5492,8 @@ export class HostedSession {
       workflows: this.lastWorkflows,
       // And the published apps: a public page is the session's (`/clear` keeps it).
       apps: this.lastApps,
+      // And the container previews, likewise the session's.
+      previews: this.lastPreviews,
     };
     // A new log segment: the SAME array was replaced in place, so it is never
     // diffed — the reference copy is reset (F3). Before the emit, like the cut.
@@ -5498,6 +5570,11 @@ export class HostedSession {
     // Every end takes the apps offline (session apps D9): the rows go now, the
     // `DELETE`s are fired and never awaited here.
     void this.apps?.endAll();
+    // And the previews: every tunnel closes now (`preview/close` "session"); the
+    // cut forgets them.
+    this.previews?.close();
+    this.lastPreviews = [];
+    this.cut = { ...this.cut, previews: [] };
     if (this.activeTurnId !== null) {
       try {
         this.finishTurn(this.activeTurnId, { stopReason: "cancelled" });

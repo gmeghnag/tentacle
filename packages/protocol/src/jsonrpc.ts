@@ -83,6 +83,18 @@ export const DomainErrorCode = {
    * failure, so adding one is additive.
    */
   ArtifactUnavailable: -32020,
+  /**
+   * A `session/preview_connect` for a preview that is no longer served (it was
+   * removed, or its container went away, stopped or no longer qualifies,
+   * docs/feat/container-apps-devices.md). The row is gone: ask again.
+   */
+  PreviewGone: -32021,
+  /**
+   * A `session/preview_connect` that failed but KEPT the preview (the port is
+   * not answering, the engine is unreachable, or a limit was hit): the message
+   * says why, and a later connect may work.
+   */
+  PreviewUnavailable: -32022,
 } as const;
 
 /**

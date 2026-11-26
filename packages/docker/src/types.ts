@@ -16,8 +16,31 @@ export interface ContainerInspect {
     readonly Error?: string;
     readonly OOMKilled?: boolean;
   };
-  readonly Config?: { readonly Labels?: Readonly<Record<string, string>> | null };
+  readonly Config?: {
+    readonly Labels?: Readonly<Record<string, string>> | null;
+    /** The image reference the container was created from. */
+    readonly Image?: string;
+  };
+  /** The image's id (`sha256:…`). */
+  readonly Image?: string;
+  readonly HostConfig?: {
+    readonly NetworkMode?: string;
+    readonly Privileged?: boolean;
+  };
+  readonly NetworkSettings?: {
+    /** `"<port>/<proto>"` → its host bindings; `null` = exposed, not published. */
+    readonly Ports?: Readonly<Record<string, readonly PortBinding[] | null>> | null;
+  };
+  readonly Mounts?: readonly {
+    readonly Source?: string;
+    readonly Destination?: string;
+  }[];
   readonly [key: string]: unknown;
+}
+
+export interface PortBinding {
+  readonly HostIp?: string;
+  readonly HostPort?: string;
 }
 
 /** `GET /exec/{id}/json` — the fields we read. */

@@ -382,6 +382,9 @@ export function updateToEvent(
     case "schedules":
     // `apps` (the session's published pages) by `onSessionApps`, likewise.
     case "apps":
+    // `previews` (container previews, full state): the viewer is the phone's
+    // (docs/feat/container-apps-devices.md S2); no stream event here.
+    case "previews":
     case "subagent_notify":
     case "subagent_message":
     case "session_settings":

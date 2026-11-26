@@ -19,6 +19,7 @@ import {
   A2A_ADD_AGENT_TOOL,
   APP_PUBLISH_TOOL,
   BROWSER_ACTION_TOOL,
+  CONTAINER_PREVIEW_TOOL,
   type PermissionRequest,
   type PermissionResponse,
   WORKFLOW_APPROVE_TOOL,
@@ -164,6 +165,8 @@ export function toPermissionRequest(update: AskUpdate): PermissionRequest {
     ...(update.tool === A2A_ADD_AGENT_TOOL ? { kind: "agent_add" as const } : {}),
     // Publishing a public web page (session apps D3): same rule.
     ...(update.tool === APP_PUBLISH_TOOL ? { kind: "app_publish" as const } : {}),
+    // Showing a container to the paired devices (container-apps-devices OD2): same rule.
+    ...(update.tool === CONTAINER_PREVIEW_TOOL ? { kind: "container_preview" as const } : {}),
     tool: update.tool,
     level: "ask",
     title: update.title,

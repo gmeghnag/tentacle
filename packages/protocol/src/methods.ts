@@ -41,6 +41,15 @@ import {
 } from "./model.ts";
 import { ResolvePermissionParamsSchema, ResolvePermissionResultSchema } from "./permission.ts";
 import {
+  PreviewAckParamsSchema,
+  PreviewCloseParamsSchema,
+  PreviewConnectParamsSchema,
+  PreviewConnectResultSchema,
+  PreviewDataParamsSchema,
+  PreviewStopParamsSchema,
+  PreviewStopResultSchema,
+} from "./preview.ts";
+import {
   DevicePushRegisterParamsSchema,
   DevicePushRegisterResultSchema,
   DevicePushUnregisterParamsSchema,
@@ -307,6 +316,14 @@ export const Method = {
    * never restarted for that turn, and so the daemon can forget the slot (F17).
    */
   DeviceLiveActivityEnded: "device/live_activity_ended",
+  /**
+   * A paired device opens one byte tunnel to an approved container preview
+   * (docs/feat/container-apps-devices.md). Device only. An older daemon answers
+   * `MethodNotFound`.
+   */
+  PreviewConnect: "session/preview_connect",
+  /** A paired device takes one preview down (and its tunnels). Device only. */
+  PreviewStop: "session/preview_stop",
 } as const;
 export type MethodName = (typeof Method)[keyof typeof Method];
 
@@ -322,6 +339,13 @@ export const Notification = {
    * an older client (its `onError`), so it would not be additive.
    */
   DaemonDiscovery: "daemon/discovery",
+  /**
+   * Preview tunnel traffic (docs/feat/container-apps-devices.md), BOTH ways.
+   * Sent only on a connection that opened that tunnel, so it is additive.
+   */
+  PreviewData: "preview/data",
+  PreviewAck: "preview/ack",
+  PreviewClose: "preview/close",
 } as const;
 export type NotificationName = (typeof Notification)[keyof typeof Notification];
 
@@ -464,6 +488,11 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     params: DeviceLiveActivityEndedParamsSchema,
     result: DeviceLiveActivityEndedResultSchema,
   },
+  [Method.PreviewConnect]: {
+    params: PreviewConnectParamsSchema,
+    result: PreviewConnectResultSchema,
+  },
+  [Method.PreviewStop]: { params: PreviewStopParamsSchema, result: PreviewStopResultSchema },
 };
 
 /** params schema for every notification method. */
@@ -473,6 +502,9 @@ export const NotificationSchemas: Readonly<Record<NotificationName, z.ZodTypeAny
   [Notification.Progress]: ProgressParamsSchema,
   [Notification.CancelRequest]: CancelRequestParamsSchema,
   [Notification.DaemonDiscovery]: DaemonDiscoverySchema,
+  [Notification.PreviewData]: PreviewDataParamsSchema,
+  [Notification.PreviewAck]: PreviewAckParamsSchema,
+  [Notification.PreviewClose]: PreviewCloseParamsSchema,
 };
 
 export function isMethodName(value: string): value is MethodName {

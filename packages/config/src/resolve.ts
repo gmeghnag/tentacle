@@ -30,6 +30,7 @@ import {
   DEFAULT_MAX_INLINE_OUTPUT_CHARS,
   DEFAULT_MAX_ITERATIONS,
   DEFAULT_MODEL,
+  DEFAULT_PREVIEWS_ENABLED,
   DEFAULT_PROVIDER,
   DEFAULT_REDACT_SECRETS,
   DEFAULT_SCHEDULES_EXPIRY_DAYS,
@@ -112,6 +113,14 @@ export interface WorkloadShellConfig {
 }
 
 /**
+ * `previews`, resolved (docs/feat/container-apps-devices.md): whether `serve`
+ * offers `container_preview`. File-only, never carried.
+ */
+export interface PreviewsConfig {
+  readonly enabled: boolean;
+}
+
+/**
  * `apps`, resolved: whether the agent is offered `app_publish` and the domain it
  * publishes to (docs/feat/session-apps-publish.md D11). File-only, never carried:
  * the host that publishes decides, and a pod never does (AGENTS §7).
@@ -158,6 +167,8 @@ export interface ResolvedConfig {
   readonly sessionHop: SessionHopConfig;
   /** The agent's `workload_shell` tool (docs/fix/workload-shell-live.md, owner decision 1). */
   readonly workloadShell: WorkloadShellConfig;
+  /** Container previews on `serve` (docs/feat/container-apps-devices.md). */
+  readonly previews: PreviewsConfig;
   /** The agent's session apps (docs/feat/session-apps-publish.md). */
   readonly apps: AppsConfig;
   /** The host's limits on the agent's scheduled wakes (docs/feat/cron-tool.md D3). */
@@ -353,6 +364,7 @@ export interface ResolvedConfig {
     readonly contextPruneOutputChars: Source;
     readonly sessionHopTool: Source;
     readonly workloadShellTool: Source;
+    readonly previewsEnabled: Source;
     readonly appsEnabled: Source;
     readonly appsDomain: Source;
     readonly schedulesMaxJobs: Source;
@@ -763,6 +775,8 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     fileConfig.workloadShell?.tool,
     DEFAULT_WORKLOAD_SHELL_TOOL,
   );
+  // File-only: the host that would show a container decides.
+  const previewsEnabled = pick(undefined, fileConfig.previews?.enabled, DEFAULT_PREVIEWS_ENABLED);
   // File-only: the host that would publish decides.
   const appsEnabled = pick(undefined, fileConfig.apps?.enabled, DEFAULT_APPS_ENABLED);
   const appsDomain = pick(undefined, fileConfig.apps?.domain, DEFAULT_APPS_DOMAIN);
@@ -905,6 +919,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     },
     sessionHop: { tool: sessionHopTool.value },
     workloadShell: { tool: workloadShellTool.value },
+    previews: { enabled: previewsEnabled.value },
     apps: { enabled: appsEnabled.value, domain: appsDomain.value },
     schedules: {
       maxJobs: schedulesMaxJobs.value,
@@ -995,6 +1010,7 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
       contextPruneOutputChars: contextPruneOutputChars.source,
       sessionHopTool: sessionHopTool.source,
       workloadShellTool: workloadShellTool.source,
+      previewsEnabled: previewsEnabled.source,
       appsEnabled: appsEnabled.source,
       appsDomain: appsDomain.source,
       schedulesMaxJobs: schedulesMaxJobs.source,
