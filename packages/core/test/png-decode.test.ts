@@ -375,7 +375,78 @@ describe("PngSuite: formats (T1)", () => {
     });
   }
 
-  // Adam7: each interlaced file is the same picture as its non-interlaced twin.
+  // `f0N` uses filter type N on every row. The five are NOT one picture (checked
+  // with pngjs 3.4.0, an independent decoder), so each is pinned by spot pixels:
+  // RGB at (1,1), (16,16) and (31,31) as pngjs reads them.
+  const filtered: Record<string, number[]> = {
+    f00n2c08: [255, 31, 8, 0, 0, 0, 0, 32, 255],
+    f01n2c08: [255, 31, 8, 0, 0, 0, 0, 32, 255],
+    f02n2c08: [255, 31, 8, 4, 255, 0, 0, 32, 255],
+    f03n2c08: [255, 31, 8, 4, 255, 0, 0, 32, 255],
+    f04n2c08: [255, 31, 8, 4, 255, 0, 0, 32, 255],
+  };
+  for (const [name, spots] of Object.entries(filtered)) {
+    test(`${name} has its spot pixels`, async () => {
+      const { pixels } = await decoded(name);
+      const at = (x: number, y: number) => [...pixels.subarray((y * 32 + x) * 3).subarray(0, 3)];
+      expect([...at(1, 1), ...at(16, 16), ...at(31, 31)]).toEqual(spots);
+    });
+  }
+
+  // 16-bit: the high byte of each sample, worked out by hand from the inflated
+  // IDAT bytes below (filters are bytewise, so the low bytes never carry).
+  const wide: [string, number, [number, number, number[]][]][] = [
+    // row 0: 01 (Sub) 0000 0900 · row 1: 02 (Up) 0200 0200
+    // (1,0) = 09+00; (0,1) = 02+00; (1,1) = 02+09.
+    [
+      "basn0g16",
+      1,
+      [
+        [0, 0, [0]],
+        [1, 0, [9]],
+        [0, 1, [2]],
+        [1, 1, [11]],
+      ],
+    ],
+    // row 0: 01 (Sub) ffff ffff 0000 · f8be 0000 0000
+    // row 1: 04 (Paeth) 0000 f8be 0000 · 0000 0000 0000
+    // (1,0) = f8+ff, 00+ff, 00; (0,1) = above + raw; (1,1) predicts f7 (above), f7 (left).
+    [
+      "basn2c16",
+      3,
+      [
+        [0, 0, [255, 255, 0]],
+        [1, 0, [247, 255, 0]],
+        [0, 1, [255, 247, 0]],
+        [1, 1, [247, 247, 0]],
+      ],
+    ],
+    // row 0: 01 (Sub) ffff ffff 0000 0000 · f8bd 0000 0000 0000
+    // row 1: 01 (Sub) ffff f7bc 0000 0000 · 0000 0843 0000 1085
+    // (1,0) = f8+ff, 00+ff; (1,1) = 00+ff, 08+f7, 00, 10+00.
+    [
+      "basn6a16",
+      4,
+      [
+        [0, 0, [255, 255, 0, 0]],
+        [1, 0, [247, 255, 0, 0]],
+        [0, 1, [255, 247, 0, 0]],
+        [1, 1, [255, 255, 0, 16]],
+      ],
+    ],
+  ];
+  for (const [name, channels, spots] of wide) {
+    test(`${name} keeps the high byte of each 16-bit sample`, async () => {
+      const { pixels } = await decoded(name);
+      for (const [x, y, want] of spots) {
+        const from = (y * 32 + x) * channels;
+        expect([...pixels.subarray(from, from + channels)]).toEqual(want);
+      }
+    });
+  }
+
+  // Adam7: each interlaced file is the same picture as its non-interlaced twin
+  // (the bundled README does not say so; pngjs 3.4.0 decodes each pair equal).
   for (const kind of ["0g08", "2c08", "3p08", "6a08"]) {
     test(`basi${kind} has the pixels of basn${kind}`, async () => {
       const interlaced = await decoded(`basi${kind}`);

@@ -671,6 +671,45 @@ nothing was unpacked, and `unblock.sh` was not run (it makes the same calls).
 `png-decode.test.ts`: 41 pass, 35 fail, all in the PngSuite groups. The unblock
 above is still needed from the orchestrator/owner.
 
+### Fix round 1 (after the 5th review pass; fixtures in place)
+
+*— claude-sonnet-5-5, 2026-11-26* — **complete**; this replaces the PARTIAL
+status above.
+
+**Finding 1 (HIGH, PngSuite): fixed.** The orchestrator ran `unblock.sh`
+(`db02cba1`: the named subset, licence files, `README.md` with source and sha256
+per file); `png-decode.test.ts` was then 76 pass, 0 fail. Steps 2–4, test file
+only, no production change:
+
+- **Pairs.** The bundled `PngSuite.README` does not say which files share a
+  picture, so it was checked with `pngjs@3.4.0` (`pairs.ts`, scratch): each
+  `basi*` equals its `basn*` (0g08, 2c08, 3p08, 6a08). Each of `f00…f04n2c08`
+  uses its own filter type on every row, and `f01…f04` all differ from `f00`: no
+  identity check.
+- **Spot pixels instead** (`png-decode.test.ts`, T1): three per `f0N`, values as
+  `pngjs` reads them.
+- **16-bit** (`basn0g16`, `basn2c16`, `basn6a16`): four pixels each, high bytes
+  worked out by hand from the inflated IDAT hex quoted in the comments.
+
+These tests were written after the decoder, so there is no red-first run; their
+non-vacuity, and M2 on T1, come from mutation (`mutate-t1.ts`; file restored,
+verified). PngSuite failures only:
+
+| Mutation | Result | PngSuite tests red |
+|---|---|---|
+| M2 swap two Adam7 pass offsets | 75 pass, 9 fail | 8: the four `basi*` size tests and the four pairs |
+| T1a 16-bit takes the low byte | 78 / 6 | the three 16-bit tests |
+| T1b Sub uses above | 77 / 7 | `f01`, `basn2c16`, `basn6a16`, three pairs |
+| T1c Up uses left | 81 / 3 | `f02`, `basn0g16` |
+| T1d Average rounds up | 83 / 1 | `f03` |
+| T1e Paeth always takes b | 81 / 3 | `f04`, the 0g08 pair |
+
+**Finding 2 (MEDIUM):** stays fixed (code unchanged).
+
+**Checks.** `png-decode`, `image-region` and `image-view-region` tests: 134
+pass, 0 fail. `biome check` on the changed test file: clean. Gate not run (the
+script's).
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner, different from the executor)
