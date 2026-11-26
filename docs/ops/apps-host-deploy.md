@@ -380,3 +380,4 @@ already has 5 live apps».
 ## Deploy log
 
 *(nothing deployed yet)*
+- 2026-11-26 ~13:55 (owner OK): first deploy on the tentacle.so box — main e3210260-era binary `dist/tentacle-apps-host` (91 MB) as systemd `apps-host` on 127.0.0.1:4200; Caddy 2.11.9 + caddy-dns/hetzner v2, `import /etc/caddy/apps.tentacle.so.caddy`; wildcard + apex certificates issued by DNS-01; terms/privacy at https://tentacle.so/terms and /privacy; abuse@tentacle.so forwarded by Forward Email (paid plan, delivery test accepted); kill switch held on `publish` until then, LIFTED at go-live. Smoke: `/healthz` 200, robots `Disallow: /`, HSTS, no Server/Set-Cookie; signed publish → 201 `https://oxuuzdlswp3qnepn.apps.tentacle.so/` (warning page, CSP `default-src none`; lease 5 min, left to expire). Browser checks (Safari/Chrome steps 1–7) still to do by hand.
