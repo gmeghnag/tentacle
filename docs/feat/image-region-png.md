@@ -533,6 +533,23 @@ corrupt stream, byte cap, full store. After: with `image-view`,
 `image-region`, wiring, sub-agent and provider tool-image tests: 85 pass, 35
 fail (all in `png-decode.test.ts`, the fixtures). Gate not run (the script's).
 
+### Gate-fix round after fix round 1
+
+*— claude-sonnet-5-5, 2026-11-26* — still **PARTIAL**, no code or test change.
+
+The gate failures shown are the missing PngSuite fixtures. `png-decode.test.ts`:
+41 pass, 35 fail. No archive or fixture is in the worktree or in
+`.tentacle/tmp/image-region-png/`, and the download command again needed a
+permission approval; not worked around, nothing forged, no test skipped.
+To unblock, the orchestrator/owner runs:
+
+```sh
+curl -fL -o /Users/gmeghnag/tentacle/.tentacle/tmp/image-region-png/PngSuite-2017jul19.tgz \
+  http://www.schaik.com/pngsuite/PngSuite-2017jul19.tgz
+```
+
+Then Execution steps 1–4.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-26* (fresh context; same model family as the planner, different from the executor)
