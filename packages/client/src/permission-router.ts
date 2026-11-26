@@ -425,8 +425,9 @@ export class PermissionRouter {
       return [];
     }
     this.current = entry;
-    // Only a permission request carries a workflow (a remote question has none).
-    const workflow = entry.update.type === "permission_request" ? entry.update.workflow : undefined;
+    // Both ask updates carry a workflow: a remote question raised inside a
+    // workflow step keeps its run attribution (docs/fix/a2a-question-workflow-label.md).
+    const workflow = entry.update.workflow;
     return [
       {
         kind: "prompt",

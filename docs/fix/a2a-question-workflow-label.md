@@ -101,7 +101,7 @@ One additive field, threaded through the existing seams — no new update, no ne
 2. **Daemon.** `packages/daemon/src/permission-map.ts`: one private `workflowOrigin(workflow)` that builds the five keys field-by-field and drops the whole thing unless `typeof workflow.name === "string"` (lifted verbatim from `:78-90`); both builders use it. `toQuestionRequestUpdate` gains the `workflow` parameter; `toAskUpdate` passes it to **both** branches and the `:134-135` comment is replaced by «the question carries it too (docs/fix/a2a-question-workflow-label.md)». Both hosted-session call sites already pass `options?.workflow` — no daemon change beyond the mapper.
 3. **Client.** `packages/client/src/permission-router.ts:428-429`: `const workflow = entry.update.workflow;` (both members have it), comment updated. The bounding block (`:448-459`) is unchanged — a pod's numbers still go through `progressText`/`Number.isFinite`.
 4. **Phone, one tap to the field.** `apps/mobile/src/permission-sheet.ts` `answerFor` (`:590-605`): handle `"reply"` — commit `{...state, parked: false, replyOpen: true, replyText: ""}` and return `"typing"`, only when `state.requestId === requestId` and the option is offered; never settle, never send. `apps/mobile/src/workflow-run-controller.ts`: `CardAsk` gains `question?: boolean` (set in `askSourceFromSheet` from `view.request.kind === "question"`, `:130-157`); `AskSource.answerFor`'s `optionId` becomes `"allow_once" | "reject_once" | "reply"` (`:89-95`, `:128-135`); `AskBar`'s `ask` variant gains `action: "review" | "answer"`, decided in `askBarFor` from `ask.question` (`:255-282`) — `foreign` and `open-session` are unchanged; new `openAnswer()` beside `reviewAsk()` (`:559-561`) which calls `deps.asks?.answerFor(ask.requestId, "reply")` for the bar's ask and raises `RUN_ASK_GONE` on `"ignored"`.
-5. **Screen (presentation only).** `apps/mobile/src/screens/WorkflowRun.tsx`: `AskPanel` prints `bar.action === "answer" ? "Answer" : "Review"` for `kind: "ask"` (`:92-110`) and calls a new `onAnswerAsk` prop (`:56`); `apps/mobile/App.tsx:2203` wires `onAnswerAsk={() => controller.openAnswer()}` next to `onReviewAsk`.
+5. **Screen (presentation only).** `apps/mobile/src/screens/WorkflowRun.tsx`: `AskPanel` prints `bar.action === "answer" ? "Answer" : "Review"` for `kind: "ask"` (`:92-110`) and calls a new `onOpenAnswer` prop (`:56`); `apps/mobile/App.tsx:2203` wires `onOpenAnswer={() => controller.openAnswer()}` next to `onReviewAsk`. **Plan corrected during Execution:** the prop was planned as `onAnswerAsk`, which the existing wiring guard `expect(RUN).not.toContain("onAnswer")` (`apps/mobile/test/workflow-screens-wiring.test.ts:53`, pinning "no inline answer on the run screen") forbids by substring; renamed, behaviour identical.
 6. **Changelog fragment** `changelog.d/a2a-question-workflow-label.fixed.md` (one bullet: a remote agent's question inside a workflow step is shown over its run, with `Answer`).
 
 ### Files
@@ -115,8 +115,8 @@ One additive field, threaded through the existing seams — no new update, no ne
 | 5 | `packages/client/src/permission-router.ts` | read `entry.update.workflow` for both types (`:428-429`) |
 | 6 | `apps/mobile/src/permission-sheet.ts` | `answerFor(..., "reply")` opens the field + unparks (`:590-605`) |
 | 7 | `apps/mobile/src/workflow-run-controller.ts` | `CardAsk.question`, `AskSource` argument, `AskBar.action`, `openAnswer()` (`:78-160`, `:255-282`, `:550-561`) |
-| 8 | `apps/mobile/src/screens/WorkflowRun.tsx` | label + `onAnswerAsk` prop (`:49-60`, `:92-110`) |
-| 9 | `apps/mobile/App.tsx` | wire `onAnswerAsk` (`:2196-2207`) |
+| 8 | `apps/mobile/src/screens/WorkflowRun.tsx` | label + `onOpenAnswer` prop (`:49-60`, `:92-110`; renamed from `onAnswerAsk`, see Design 5) |
+| 9 | `apps/mobile/App.tsx` | wire `onOpenAnswer` (`:2196-2207`) |
 | 10 | `changelog.d/a2a-question-workflow-label.fixed.md` | new fragment |
 | 11 | tests (see *Tests*) | 6 files, new cases only |
 
@@ -168,13 +168,118 @@ Red before green — each case names the mutation that must turn it red (§9). F
 - `answerFor(id, "reply")` on a *parked* question unparks and opens the field, returns `"typing"`, settles nothing (no `session/answer_question`); a different `requestId` → `"ignored"`; `sendReply` with blank text still sends nothing (unchanged guard). Mutation: settle on "reply" → red.
 
 **Phone — `apps/mobile/test/workflow-screens-wiring.test.ts`** (source-text, cheap)
-- the run screen takes `onAnswerAsk`, `App.tsx` passes it, `AskPanel` prints from `bar.action` (not the literal `"Review"`). This is a wiring pin only — the behaviour is proven by the controller test above.
+- the run screen takes `onOpenAnswer`, `App.tsx` passes it, `AskPanel` prints from `bar.action` (`"Answer"`/`"Review"`, both literals present — the existing guard at `:57` pins `"Review"`). This is a wiring pin only — the behaviour is proven by the controller test above.
 
 Gate: `bun run test` + `bun run typecheck` + `bun run lint` (§4), narrow files during iteration. Repo style: double quotes, trailing commas, no `!`.
 
 ## Execution
 
-*— not started (executor to sign, with `bun run check`'s result)*
+*— claude (model id not exposed by this harness), 2026-11-26*
+
+Branch `fix/a2a-question-workflow-label` off `main` (`98d9a14c`, the plan commit).
+
+**Load-bearing check first.** The Context's repro was re-run on the branch (script
+`.tentacle/tmp/a2a-question-workflow-label/repro.ts`, in the owner-designated
+scratch dir, imports by ABSOLUTE path into this worktree — the doc's relative
+paths resolved against the main checkout, a different tree). Output, before any
+edit — identical to the doc:
+
+```
+1. question_request.workflow   = undefined
+   permission_request.workflow = {"name":"rassegna","runId":"wf-1","stepId":"generate","index":1,"count":5}
+2. router prompt.workflow     = undefined
+   router prompt.agent        = {"type":"a2a:acme","description":"review","id":"sa-1"}
+3. askForRunStep(wf-1/generate) = undefined
+```
+
+After slices 1–5 the same script prints lines 1 and 2 as the five-key origin —
+so the workflow DOES reach the daemon's question ask (the plan's load-bearing
+assumption holds; nothing was derived from `agent.id`, D3). Line 3 stays
+`undefined` by construction: the fake ask in that script carries no `origin`, so
+that line says nothing after the fix (the pairing itself is proven by the
+controller test). The script is gitignored and does not survive; its text is in
+Context above with the one change noted here.
+
+**As built, in the plan's order.**
+
+1. `packages/protocol/src/permission.ts` — the inline five-key object extracted to
+   an exported `AskWorkflowSchema` (identical keys, no `.int()`/`.max()`: the
+   update is blocking), referenced by `PermissionRequestUpdateSchema`.
+2. `packages/protocol/src/question.ts` — `workflow: AskWorkflowSchema.optional()`
+   on `QuestionRequestUpdateSchema`, with the display-only doc comment. No
+   `PROTOCOL_VERSION` edit, no `protocol.d/` note (D2: free field).
+3. `packages/protocol/schema/protocol.json` — regenerated by `bun run
+   schema:export` (nothing hand-edited).
+4. `packages/daemon/src/permission-map.ts` — private `workflowOrigin(workflow)`
+   (field-by-field, dropped unless `name` is a string) used by BOTH builders;
+   `toQuestionRequestUpdate` takes `workflow` and `toAskUpdate` forwards it to the
+   question branch too; the old "has no place to go" comment replaced.
+5. `packages/client/src/permission-router.ts` — `const workflow =
+   entry.update.workflow;` (both union members carry it, no cast); the bounding
+   block untouched.
+6. `apps/mobile/src/permission-sheet.ts` — `answerFor(..., "reply")` unparks,
+   opens the field, returns `"typing"`, sends nothing; it does NOT consult the age
+   guard (D5) and requires the reply option to be offered. The interface's return
+   type gained `"typing"` and its doc comment was rewritten.
+7. `apps/mobile/src/workflow-run-controller.ts` — `CardAsk.question`,
+   `askSourceFromSheet` sets it from `view.request.kind === "question"`,
+   `AskSource.answerFor` accepts `"reply"` and returns `"typing"`, `AskBar`'s
+   `ask` variant gained `action: "review" | "answer"` (decided in `askBarFor`),
+   new `openAnswer()` beside `reviewAsk()` (raises `RUN_ASK_GONE` when the sheet
+   answers `"ignored"`).
+8. `apps/mobile/src/screens/WorkflowRun.tsx` — `AskPanel` prints
+   `bar.action === "answer" ? "Answer" : "Review"` and routes the tap to the new
+   `onOpenAnswer` prop; the screen forwards it.
+9. `apps/mobile/App.tsx` — `onOpenAnswer={() => controller.openAnswer()}`.
+10. `changelog.d/a2a-question-workflow-label.fixed.md` (one bullet).
+
+**Drift from Implementation (one, plan corrected in place).** The prop was
+planned as `onAnswerAsk`. That name is forbidden by an EXISTING guard —
+`expect(RUN).not.toContain("onAnswer")` (`apps/mobile/test/workflow-screens-wiring.test.ts`,
+pinning "no inline answer on the run screen") — which failed on the first run.
+Renamed to `onOpenAnswer` (behaviour identical, the guard's intent preserved
+rather than relaxed); Design step 5, the Files table and the wiring-test bullet
+were corrected in the doc, per §8.
+
+**Tests (red before green).** New cases only, in the six files the plan named:
+`packages/protocol/test/question.test.ts` (3), `packages/daemon/test/permission-map-workflow.test.ts`
+(4 + extended assertion), `packages/daemon/test/question-ask.test.ts` (1, through
+`SessionHost`), `packages/client/test/permission-router.test.ts` (2),
+`apps/mobile/test/workflow-run-controller.test.ts` (5), `apps/mobile/test/permission-sheet-question.test.ts`
+(4), `apps/mobile/test/workflow-screens-wiring.test.ts` (1). The controller
+harness's `answerFor` fake now mirrors the sheet: `"reply"` returns `"typing"` and
+keeps the ask on screen, the settle options clear it.
+
+**Non-vacuity — every mutation the plan named, applied, run, reverted (§9):**
+
+| Mutation | Result |
+|---|---|
+| `question.ts`: `workflow` required | 4 fail, incl. "round-trips … and is absent on an older daemon's update" |
+| `permission.ts`: `index: z.number().int()` | 1 fail: "a bad value never makes the blocking update unparseable" |
+| `permission-map.ts`: question branch without `workflow` | 1 fail: "toAskUpdate forwards it to BOTH branches" |
+| `permission-map.ts`: `...workflow` spread | 2 fail: the forged-origin cases (both builders) |
+| `permission-router.ts`: restore the `type === "permission_request"` guard | 1 fail: "a QUESTION carries it too, bounded the same way" |
+| `workflow-run-controller.ts`: `action: "review"` hard-coded | 1 fail: "the question pairs with its step and the bar's action is `answer`" |
+| `workflow-run-controller.ts`: tap routed to `allow_once` | 1 fail: "its tap opens the field BY ID and sends no allow/reject" |
+| `workflow-run-controller.ts`: drop `origin.runId === runId` | 2 fail: the foreign-run pairings (the new question one + the S8 one) |
+| `permission-sheet.ts`: no `"reply"` branch (settles/ignores like a grant) | 1 fail: "a PARKED question unparks and opens the field; nothing is settled" |
+
+One test expectation was corrected against the schema rather than the code: the
+hostile-numbers case used `count: Number.NaN`, which `z.number()` rejects — the
+PRE-EXISTING `permission_request.workflow` behaves the same way, so the plan's
+"a float" reading is the right one and the case uses `index: 1.5, count: 1e9`
+(no new constraint added to a blocking update).
+
+**Checks run here (narrow, per the owner's budget).** The 8 touched/covering test
+files: **133 pass, 0 fail**; `packages/protocol/test/json-schema.test.ts` +
+`version.test.ts` (regenerated schema, no version bump): 25 pass;
+`bunx tsc -p apps/mobile` clean (the `.tsx` side no test can typecheck);
+`bunx biome check` on every changed file: clean. The FULL `bun run check` was not
+run here — the orchestrator's gate runs it after this branch.
+
+**Not done deliberately:** no TUI change (D7), no push-banner run name (D8), no
+`PROTOCOL_VERSION`/`protocol.d/` note (D2), no persistence change (a question is
+never resumable), `TODO.md` untouched.
 
 ## Review
 

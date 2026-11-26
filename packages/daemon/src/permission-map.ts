@@ -77,32 +77,47 @@ export function toPermissionRequestUpdate(
       : {}),
     // Field by field, never by spread: the wire carries the five known keys and
     // nothing a requester may have put beside them.
-    ...(workflow !== undefined && typeof workflow.name === "string"
-      ? {
-          workflow: {
-            name: workflow.name,
-            ...(workflow.runId !== undefined ? { runId: workflow.runId } : {}),
-            ...(workflow.stepId !== undefined ? { stepId: workflow.stepId } : {}),
-            ...(workflow.index !== undefined ? { index: workflow.index } : {}),
-            ...(workflow.count !== undefined ? { count: workflow.count } : {}),
-          },
-        }
-      : {}),
+    ...workflowOrigin(workflow),
     // This daemon carries a reply with a refusal to the model (docs/feat/permission-reply.md).
     reply: { maxChars: MAX_PERMISSION_REPLY_CHARS },
   };
 }
 
 /**
+ * The `workflow` attribution of an ask, field by field, never by spread: the
+ * wire carries the five known keys and nothing a requester may have put
+ * beside them. Absent unless `name` is a string.
+ */
+function workflowOrigin(workflow: PermissionRequestOptions["workflow"]): {
+  workflow?: NonNullable<PermissionRequestUpdate["workflow"]>;
+} {
+  if (workflow === undefined || typeof workflow.name !== "string") {
+    return {};
+  }
+  return {
+    workflow: {
+      name: workflow.name,
+      ...(workflow.runId !== undefined ? { runId: workflow.runId } : {}),
+      ...(workflow.stepId !== undefined ? { stepId: workflow.stepId } : {}),
+      ...(workflow.index !== undefined ? { index: workflow.index } : {}),
+      ...(workflow.count !== undefined ? { count: workflow.count } : {}),
+    },
+  };
+}
+
+/**
  * The stream event for a remote agent's question (docs/feat/a2a-client.md C6):
  * the request's `detail` is the question, its `reply.maxChars` the answer's
- * bound (never above `MAX_QUESTION_ANSWER_CHARS`).
+ * bound (never above `MAX_QUESTION_ANSWER_CHARS`). It carries `workflow` too:
+ * a remote question raised inside a workflow step keeps its run attribution
+ * (docs/fix/a2a-question-workflow-label.md).
  */
 export function toQuestionRequestUpdate(
   requestId: string,
   toolCallId: string,
   req: PermissionRequest,
   agent?: PermissionRequestOptions["agent"],
+  workflow?: PermissionRequestOptions["workflow"],
 ): QuestionRequestUpdate {
   return {
     type: "question_request",
@@ -119,6 +134,7 @@ export function toQuestionRequestUpdate(
           },
         }
       : {}),
+    ...workflowOrigin(workflow),
     maxChars: Math.min(req.reply?.maxChars ?? MAX_QUESTION_ANSWER_CHARS, MAX_QUESTION_ANSWER_CHARS),
   };
 }
@@ -131,10 +147,10 @@ export function toAskUpdate(
   agent?: PermissionRequestOptions["agent"],
   workflow?: PermissionRequestOptions["workflow"],
 ): PermissionRequestUpdate | QuestionRequestUpdate {
-  // A question carries no workflow attribution (`question_request` has no such
-  // field); a permission request keeps it (docs/fix/mobile-ask-surfaces.md).
+  // The question carries `workflow` too: a remote question of a workflow step
+  // keeps its run attribution (docs/fix/a2a-question-workflow-label.md).
   return req.kind === "question"
-    ? toQuestionRequestUpdate(requestId, toolCallId, req, agent)
+    ? toQuestionRequestUpdate(requestId, toolCallId, req, agent, workflow)
     : toPermissionRequestUpdate(requestId, toolCallId, req, agent, workflow);
 }
 

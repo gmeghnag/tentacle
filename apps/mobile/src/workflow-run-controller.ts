@@ -83,12 +83,25 @@ export interface CardAsk {
   readonly title: string;
   /** Never truncated: a `run` command is shown as it will run (§7). */
   readonly detail: string;
+  /**
+   * A remote agent's QUESTION rather than an approval. It takes no grant: the
+   * answer is text, so the bar says «Answer» and its tap opens the field
+   * (docs/fix/a2a-question-workflow-label.md D4).
+   */
+  readonly question?: boolean;
 }
 
 /** The phone's permission sheet for THIS session, narrowed to what a card needs. */
 export interface AskSource {
   current(): CardAsk | null;
-  answerFor(requestId: string, optionId: "allow_once" | "reject_once"): "sent" | "ignored";
+  /**
+   * `"reply"` opens the ask's text field (it settles nothing); the settle
+   * options are the sheet's own. Only ever the ask on screen: keyed on its id.
+   */
+  answerFor(
+    requestId: string,
+    optionId: "allow_once" | "reject_once" | "reply",
+  ): "sent" | "typing" | "ignored";
   subscribe(listener: () => void): () => void;
   /** Bring the parked ask's sheet back (the slim row's tap). Absent: nothing to bring. */
   unpark?(): void;
@@ -129,7 +142,10 @@ export function askForRunStep(
  */
 export function askSourceFromSheet(sheet: {
   view(): SheetState;
-  answerFor(requestId: string, optionId: "allow_once" | "reject_once"): "sent" | "ignored";
+  answerFor(
+    requestId: string,
+    optionId: "allow_once" | "reject_once" | "reply",
+  ): "sent" | "typing" | "ignored";
   subscribe(listener: () => void): () => void;
   unpark?(): void;
 }): AskSource {
@@ -145,6 +161,7 @@ export function askSourceFromSheet(sheet: {
         origin: view.origin,
         title: view.request.title,
         detail: view.request.detail ?? "",
+        ...(view.request.kind === "question" ? { question: true } : {}),
       };
     },
     answerFor: (requestId, optionId) => sheet.answerFor(requestId, optionId),
@@ -253,7 +270,13 @@ export function pendingAsk(
  * session — never a button that cannot work. Null = nothing waits, so no bar.
  */
 export type AskBar =
-  | { readonly kind: "ask"; readonly stepId: string | null; readonly ask: CardAsk }
+  | {
+      readonly kind: "ask";
+      readonly stepId: string | null;
+      readonly ask: CardAsk;
+      /** What its button says: a grant decision «Review», a question «Answer». */
+      readonly action: "review" | "answer";
+    }
   /** An ask that is NOT this run's (Q1): a slim row; its tap opens the session. */
   | { readonly kind: "foreign"; readonly ask: CardAsk }
   | { readonly kind: "open-session"; readonly stepId: string };
@@ -265,7 +288,12 @@ export function askBarFor(
 ): AskBar | null {
   const pending = pendingAsk(state);
   if (pending !== null) {
-    return { kind: "ask", stepId: pending.stepId, ask: pending.ask };
+    return {
+      kind: "ask",
+      stepId: pending.stepId,
+      ask: pending.ask,
+      action: pending.ask.question === true ? "answer" : "review",
+    };
   }
   if (state.foreign !== undefined && state.foreign !== null) {
     return { kind: "foreign", ask: state.foreign };
@@ -307,6 +335,11 @@ export interface WorkflowRunController {
   answer(stepId: string | null, optionId: "allow_once" | "reject_once"): void;
   /** Bring the parked ask's sheet back over this run (the slim row's tap). */
   reviewAsk(): void;
+  /**
+   * Open the text field of the run's own QUESTION ask (the bar's «Answer»): the
+   * answer is typed and sent by the sheet, never by a second resolve path.
+   */
+  openAnswer(): void;
   stop(): Promise<void>;
   resume(): Promise<void>;
   rerun(stepId: string): Promise<void>;
@@ -558,6 +591,16 @@ export function createWorkflowRunController(deps: WorkflowRunDeps): WorkflowRunC
     },
     reviewAsk() {
       deps.asks?.unpark?.();
+    },
+    openAnswer() {
+      const bar = state().askBar;
+      const ask = bar !== null && bar.kind === "ask" ? bar.ask : undefined;
+      const opened =
+        ask !== undefined && deps.asks !== null
+          ? deps.asks.answerFor(ask.requestId, "reply")
+          : "ignored";
+      notice = opened === "ignored" ? RUN_ASK_GONE : null;
+      changed();
     },
     stop: () => act({ action: "stop", runId: deps.runId }),
     resume: () => act({ action: "resume", runId: deps.runId }),

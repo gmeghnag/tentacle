@@ -199,10 +199,16 @@ export interface PermissionSheet {
    * A workflow card's answer (docs/feat/workflows-ui.md D4): `answer`, but only
    * when the ask on screen IS `requestId` — a card left over from an ask that
    * was settled elsewhere must never answer the one that replaced it. The same
-   * settle path as a tap (never a second resolve path) and the same age guard;
-   * the reply option is the sheet's own (its text field lives there).
+   * settle path as a tap (never a second resolve path) and the same age guard.
+   * `"reply"` is the exception: opening the text field settles nothing, so it is
+   * not guarded and not sent (docs/fix/a2a-question-workflow-label.md D5) — it
+   * unparks and opens the field, and `sendReply` stays the guarded send.
    */
-  answerFor(requestId: string, optionId: SheetOptionId, now?: number): "sent" | "ignored";
+  answerFor(
+    requestId: string,
+    optionId: SheetOptionId,
+    now?: number,
+  ): "sent" | "typing" | "ignored";
   /** The refusal field's text (only while the reply option is open). */
   setReplyText(text: string): void;
   /** Send the refusal with the person's words (`reject_once` + `message`). */
@@ -588,11 +594,25 @@ export function createPermissionSheet(deps: PermissionSheetDeps): PermissionShee
       return "sent";
     },
     answerFor(requestId, optionId, at) {
-      if (state.kind !== "asking" || state.requestId !== requestId || optionId === "reply") {
+      if (state.kind !== "asking" || state.requestId !== requestId) {
         return "ignored";
       }
       const entry = current;
-      if (entry === null || !armed(now(at))) {
+      if (entry === null) {
+        return "ignored";
+      }
+      if (optionId === "reply") {
+        // Opening the field sends nothing, so the age guard does not apply (it
+        // protects a DECISION from a stray tap); `sendReply` stays guarded. Keyed
+        // on `requestId`, it can never touch another ask.
+        if (!sheetOptions(entry.req).some((o) => o.optionId === "reply")) {
+          return "ignored";
+        }
+        replyOpen = true;
+        commit({ ...state, parked: false, replyOpen: true, replyText: "" });
+        return "typing";
+      }
+      if (!armed(now(at))) {
         return "ignored";
       }
       const offered = sheetOptions(entry.req).some((o) => o.optionId === optionId);
