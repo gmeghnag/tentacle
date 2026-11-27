@@ -57,6 +57,7 @@ import {
   type ModelPurpose,
   type ModelStreamChunkedResult,
   type ModelStreamResult,
+  type ModelsParams,
   Notification,
   type OpenParams,
   type OpenResult,
@@ -92,6 +93,7 @@ import {
   type SessionTtlParams,
   type SetAutoAcceptParams,
   type SetCapabilityParams,
+  type SetModelParams,
   type SnapshotParams,
   type SnapshotResult,
   type SubagentMessageParams,
@@ -436,6 +438,15 @@ export class Connection {
       case Method.UpdateSettings: {
         const { sessionId, id, settings } = params as UpdateSettingsParams;
         return this.host.updateSettings(this.lookup(sessionId), id, settings);
+      }
+      // `/model` (docs/feat/model-switch.md). Both synchronous, no lock (AGENTS §7).
+      case Method.Models: {
+        const { sessionId } = params as ModelsParams;
+        return this.host.models(sessionId === undefined ? undefined : this.lookup(sessionId));
+      }
+      case Method.SetModel: {
+        const { sessionId, name } = params as SetModelParams;
+        return this.host.setModel(this.lookup(sessionId), name);
       }
       // Synchronous, holds no lock (AGENTS §7): it never awaits a turn, and the
       // fan-out is synchronous, so two sets keep one total order (P2).

@@ -74,6 +74,7 @@ import {
   type ModelStreamChunkedResult,
   type ModelStreamParams,
   type ModelStreamResult,
+  type ModelsResult,
   Notification,
   type OpenResult,
   PROTOCOL_VERSION,
@@ -103,6 +104,7 @@ import {
   type SessionUpdateParams,
   type SetAutoAcceptResult,
   type SetCapabilityResult,
+  type SetModelResult,
   type Sha256,
   type SnapshotResult,
   type SubagentRow,
@@ -786,6 +788,17 @@ function bunSha256Bytes(): ((bytes: Uint8Array) => string) | undefined {
 /** An older daemon's answer to a method it does not have (AGENTS §7: additive methods). */
 function isMethodNotFound(error: unknown): boolean {
   return error instanceof RpcError && error.code === JsonRpcErrorCode.MethodNotFound;
+}
+
+/** `session/models` / `session/set_model` on a daemon that has neither: say what to do. */
+function modelsOldDaemon(error: unknown): never {
+  if (isMethodNotFound(error)) {
+    throw new RpcError(
+      JsonRpcErrorCode.MethodNotFound,
+      "this daemon's tentacle predates /model switching — update it",
+    );
+  }
+  throw error;
 }
 
 /**
@@ -1667,6 +1680,34 @@ export class RemoteClient {
   /** The session's published apps as last reported; undefined if never reported. */
   appsOf(sessionId: string): readonly AppRow[] | undefined {
     return this.sessions.get(sessionId)?.apps;
+  }
+
+  /**
+   * `session/models` (docs/feat/model-switch.md): the daemon's catalogue, with
+   * `sessionId`'s selection. No id (nothing opened yet) → the catalogue alone.
+   * An older daemon's `MethodNotFound` says to update it. The caller must hold
+   * the trust bit.
+   */
+  models(sessionId?: string): Promise<ModelsResult> {
+    if (sessionId === undefined && !this.up && this.channelFactory) {
+      return Promise.reject(new Error("not connected to the daemon"));
+    }
+    const call =
+      sessionId === undefined
+        ? this.call(this.peer, Method.Models, {})
+        : this.sessionCall(sessionId, Method.Models, { sessionId }, "once");
+    return call.then((result) => result as ModelsResult, modelsOldDaemon);
+  }
+
+  /**
+   * `session/set_model`: switch the session's main model, between turns. Not
+   * re-sent after a drop (idempotent by value: the user runs it again).
+   */
+  setModel(sessionId: string, name: string | null): Promise<SetModelResult> {
+    return this.sessionCall(sessionId, Method.SetModel, { sessionId, name }, "once").then(
+      (result) => result as SetModelResult,
+      modelsOldDaemon,
+    );
   }
 
   /**

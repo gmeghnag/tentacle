@@ -1943,6 +1943,56 @@ export const UpdateSettingsResultSchema = z.object({
 });
 export type UpdateSettingsResult = z.infer<typeof UpdateSettingsResultSchema>;
 
+// --- session/models, session/set_model ----------------------------------
+// The user's `/model` (docs/feat/model-switch.md): which models this daemon's
+// own config can run a session on, and a switch of a LIVE session's main model
+// from its next model request. Only a daemon that decides its model by its own
+// config offers it (the worker, `serve`); elsewhere the call is refused, and an
+// older daemon answers `MethodNotFound`. Names, model ids and windows only —
+// never a URL or a key. The selection is the live session's (not persisted).
+// Refused while a turn (`TurnInProgress`) or a compaction runs; idempotent by
+// value. Additive.
+
+export const ModelsParamsSchema = z.object({
+  /** Absent: the daemon's catalogue alone (`active` null). */
+  sessionId: SessionIdSchema.optional(),
+});
+export type ModelsParams = z.infer<typeof ModelsParamsSchema>;
+
+export const ModelsResultSchema = z.object({
+  /** The model the run started on (`/model default`); `entry` when it is a `models` entry. */
+  start: z.object({
+    model: z.string(),
+    contextWindow: z.number().int().nonnegative(),
+    entry: z.string().optional(),
+  }),
+  entries: z.array(
+    z.object({
+      name: z.string(),
+      model: z.string(),
+      contextWindow: z.number().int().nonnegative(),
+    }),
+  ),
+  /** The session's selected entry; null = the start model. */
+  active: z.string().nullable(),
+});
+export type ModelsResult = z.infer<typeof ModelsResultSchema>;
+
+export const SetModelParamsSchema = z.object({
+  sessionId: SessionIdSchema,
+  /** A `models` entry name; null = the run's start model. */
+  name: z.string().min(1).max(64).nullable(),
+});
+export type SetModelParams = z.infer<typeof SetModelParamsSchema>;
+
+export const SetModelResultSchema = z.object({
+  active: z.string().nullable(),
+  /** The model id the next request goes to, and its window. */
+  model: z.string(),
+  contextWindow: z.number().int().nonnegative(),
+});
+export type SetModelResult = z.infer<typeof SetModelResultSchema>;
+
 // --- session/set_auto_accept --------------------------------------------
 // Open or close the session's auto-accept (docs/feat/session-auto-accept.md D2).
 // It is the SESSION's state, held by a daemon that SHARES it (the worker, a

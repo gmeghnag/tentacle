@@ -3670,6 +3670,62 @@
       "required": ["arguments", "id", "name"],
       "type": "object"
     },
+    "ModelsParams": {
+      "additionalProperties": true,
+      "properties": {
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "type": "object"
+    },
+    "ModelsResult": {
+      "additionalProperties": true,
+      "properties": {
+        "active": {
+          "type": ["string", "null"]
+        },
+        "entries": {
+          "items": {
+            "additionalProperties": true,
+            "properties": {
+              "contextWindow": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "model": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": ["contextWindow", "model", "name"],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "start": {
+          "additionalProperties": true,
+          "properties": {
+            "contextWindow": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "entry": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            }
+          },
+          "required": ["contextWindow", "model"],
+          "type": "object"
+        }
+      },
+      "required": ["active", "entries", "start"],
+      "type": "object"
+    },
     "OpenParams": {
       "additionalProperties": true,
       "properties": {
@@ -6417,6 +6473,45 @@
       "required": ["capabilities"],
       "type": "object"
     },
+    "SetModelParams": {
+      "additionalProperties": true,
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sessionId": {
+          "$ref": "#/$defs/SessionId"
+        }
+      },
+      "required": ["name", "sessionId"],
+      "type": "object"
+    },
+    "SetModelResult": {
+      "additionalProperties": true,
+      "properties": {
+        "active": {
+          "type": ["string", "null"]
+        },
+        "contextWindow": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "model": {
+          "type": "string"
+        }
+      },
+      "required": ["active", "contextWindow", "model"],
+      "type": "object"
+    },
     "SkillListEntry": {
       "additionalProperties": true,
       "properties": {
@@ -8950,6 +9045,14 @@
         "$ref": "#/$defs/LogResult"
       }
     },
+    "session/models": {
+      "params": {
+        "$ref": "#/$defs/ModelsParams"
+      },
+      "result": {
+        "$ref": "#/$defs/ModelsResult"
+      }
+    },
     "session/open": {
       "params": {
         "$ref": "#/$defs/OpenParams"
@@ -9060,6 +9163,14 @@
       },
       "result": {
         "$ref": "#/$defs/SetCapabilityResult"
+      }
+    },
+    "session/set_model": {
+      "params": {
+        "$ref": "#/$defs/SetModelParams"
+      },
+      "result": {
+        "$ref": "#/$defs/SetModelResult"
       }
     },
     "session/skills": {

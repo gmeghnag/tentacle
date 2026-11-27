@@ -20,6 +20,7 @@ import type { AppRow, BrowserStatusResult, PreviewRow, WorkflowRow } from "@tent
 import type { AppProps, SessionController } from "../app-types.ts";
 import type { CapOp, CapsView } from "../capability-toggles.ts";
 import type { SlashSkill } from "../commands.ts";
+import type { SwitchedModel } from "../model-switch.ts";
 import type { OpenPanel } from "../panel.ts";
 import type { ScheduleDockRow } from "../schedule-view.ts";
 import type { SkillsSync } from "../skills-sync.ts";
@@ -130,6 +131,10 @@ export interface CommandContext {
   readonly cwd: string;
   /** The model label the status bar shows (`/model`). */
   readonly shownModel: string;
+  /** A `/model` switch landed: the label and ctx window follow it, on that session. */
+  readonly modelSwitched: (switched: SwitchedModel) => void;
+  /** The ctx count the status bar shows now (null: none yet). */
+  readonly contextTokens: () => number | null;
   /** Take the frame now (a notice was written straight into `stateRef`). */
   readonly flushNow: () => void;
   /** Back to the bottom of the transcript. */

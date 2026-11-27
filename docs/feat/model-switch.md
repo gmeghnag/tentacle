@@ -128,10 +128,16 @@ for a demo-day change. Swapping the provider touches no broker at all.
    `assertIdle` guard, same synchronous stretch as the select): «a turn is
    running — switch the model after it ends (Esc stops it)». Nothing changes.
 3. **D3 — not persisted.** The selection is the live session's, in daemon memory.
-   A `--resume`, a `serve` restart's reload, `/clear` (a new session) and
-   `/sessions` start on the run's START model (config main, or the `--model`
-   entry). The notice says «for this session». No new log entry type (no §7
-   persistence change, no `critical` entry to decide).
+   A `--resume` and a `serve` restart's reload (a newly built agent) start on the
+   run's START model (config main, or the `--model` entry). The notice says
+   «for this session». No new log entry type (no §7 persistence change, no
+   `critical` entry to decide).
+   *Corrected at execution:* `/clear` resets the conversation IN PLACE (same
+   session, same agent — `SessionController.clear`, `app-types.ts`), so the
+   selection STAYS (pinned in `daemon/test/set-model.test.ts`). `/sessions`
+   starts on the start model only when the daemon builds a new agent: a
+   `connect` TUI returning to a session still LIVE on `serve` keeps its
+   selection there (label: see D4).
 4. **D4 — no new `session/update` kind.** The switching TUI updates from the
    RPC result. Another client attached to the same `serve` session keeps its
    label until it re-attaches (debt, below).
@@ -238,13 +244,16 @@ with no id ⇒ sessionless call.
   hue alone — owner is colour-blind); `switchedNotice(old, next, ctxTokens?)`
   (incl. D9 warning); `modelSwitchFailedNotice(error)` (TurnInProgress /
   CompactInProgress / MethodNotFound / unavailable / unknown name); and
-  `viewModel(startup, switched, sessionId)` → `{ label, contextWindow }`, the
-  switched values only while `switched.sessionId === sessionId`.
+  `viewModel(startup, switched, session)` → `{ label, contextWindow }`, the
+  switched values only while `switched.session === session`. *Corrected at
+  execution:* keyed on the CONTROLLER, not the session id — a swap back
+  (`/sessions`, a hop) is a new controller on the same id with a newly built
+  agent, so an id key would show the old switch again.
 - `SessionController` (`app-types.ts`) gains optional `models?()`,
   `setModel?(name)`; `commands/model.ts` uses them (absent ⇒ today's one-line
   show + «switching isn't available on this runtime»); description «show or
   switch the model (/model <name>, /model default)».
-- `App.tsx`: one state `switched: { sessionId, label, contextWindow } | null`;
+- `App.tsx`: one state `switched: { session, label, contextWindow } | null`;
   `shownModel` / the `contextWindow` passed down come from `viewModel(…)`.
 - Built-in skill text `config/builtin-skills/tentacle/SKILL.md:56` follows the
   new description (regenerate with its generator if its drift test fails).
@@ -273,7 +282,9 @@ with no id ⇒ sessionless call.
 | Window shrink below current context | Allowed; notice warns with `/compact` (D9); prune/awareness thresholds use the new window from the next request. |
 | Background child on the main model | Follows from its next request (D8); its foreign reasoning is skipped by `source`. |
 | Two clients switch at once | Synchronous select, last wins; the other's label is stale until re-attach (D4, debt). |
-| `/clear`, `/sessions`, `--resume`, serve reload | New/reloaded session on the start model; TUI label keyed by sessionId reverts (D3). |
+| `/clear` | In place: selection and label stay (D3). |
+| `/sessions`, `/move`, `--resume` | New controller: the label reverts; a newly built agent is on the start model (D3). A still-live `serve` session keeps its selection, label stale (D4). |
+| `serve` restart under a connected TUI | Same controller: daemon on the start model, label stale until `/model <name>`; `/model` lists the truth (debt). |
 | `--model <entry>` on run/attach/serve | Refused, exit 2, clear message (D6). |
 | Main key leak | `withMainEntry` drops the main `apiKey` for an own-connection entry; `forEntry` never uses the main key (tested). |
 | `/model` before the first message | List: sessionless call. Switch: `ensureOpen()` then select. |
@@ -317,7 +328,63 @@ starred ones (§9).
 
 ## Execution
 
-*— <model-id>, <date>*
+*— claude-sonnet-5-5, 2026-11-27*
+
+**Repro** (at HEAD `9a70907c`, via `git show HEAD:…`): no `set_model` /
+`session/models` in `methods.ts`; `/model` only shows; `load.ts:778` injects
+`--model` as `TENTACLE_MODEL`. **Load-bearing check: holds** — one provider
+object in `buildAgent`; `Agent` keeps its config by reference
+(`agent.ts:977`), so `window` and `modelId` getters are read live;
+`subagent.ts:594-601` shares the objects with a default child.
+
+**As built**, in dependency order, each slice's tests red on stubs first:
+config → protocol → daemon → CLI + `--model` → client + `local-runtime` → TUI →
+skill text (`bun run skills:gen`) → changelog fragment. `protocol.json`
+regenerated; no `protocol.d/` note.
+
+**Drift**
+- D3 and the `viewModel` key corrected above (the code contradicts them).
+- `modelId` is a getter set with `Object.defineProperty` (a spread would copy it
+  once); one shared `createModelProviders` for the switch and the sub-agents.
+- `select(null)` leaves `current()` at the start value (`mainEntry ?? null`).
+- `json-schema.test.ts`: fixtures for the two methods; its null allowlist gained
+  `active` (×2) and `SetModelParams.name` (null states «start model»).
+- `screenContextTokens` lives in `model-switch.ts` (the S10 structure test
+  forbids computing it in `App.tsx`). TUI mirrors two `DomainErrorCode`s (it
+  imports protocol types only), pinned by its test.
+- Updated: `app-frames.test.tsx` (help line), the controller-forward guard in
+  `subagent-panel-controller.test.ts`.
+
+**Mutations** (`.tentacle/tmp/model-switch/mutate.ts`; each restored):
+```
+KILLED T1 withMainEntry keeps the main apiKey
+KILLED T2 the wrapper streams from the base provider
+KILLED T2 awareness window frozen at build
+KILLED T2 prune window frozen at build
+KILLED T2 modelId spread once
+KILLED T2 workerSessionBuild drops modelSwitch
+KILLED T2 local-runtime setModel not forwarded to the session
+KILLED T3 set_model without the idle guard
+KILLED T4 setModel without the trust check
+KILLED T5 viewModel ignores which session was switched
+KILLED T5 App drops the switch
+KILLED T6 main never passes modelEntry
+```
+
+**Tests:** `packages/tui/test` 3249/0; `packages/cli/test` 3106 pass, 2 skip,
+1 fail (the forward guard; updated, its file then 4/0);
+daemon+client+protocol+config+2 CLI files 4170 pass, 1 skip, 1 error:
+`client/test/chart-args-roundtrip.test.ts` imports `apps/mobile`, which cannot
+resolve `@tentacle/core` in this worktree (untouched here). Biome clean on the
+six touched packages. Typecheck and the full gate: not run (orchestrator).
+
+**Found, not changed (outside the plan — for Review)**
+- A local `--model <entry>` session that `/move`s to a container records the
+  entry's model ID (`hop-targets.ts:372`, `:815`); a later `attach` / relay
+  applies it on the MAIN endpoint (the D6 hazard, by the hop door).
+- `imageTokenEstimate` (`wiring.ts`) stays the start provider's.
+- No live run in a real terminal against real providers: verify with
+  `tentacle`, `/model`, `/model haiku`, one turn, `tentacle --model haiku`.
 
 ## Review
 

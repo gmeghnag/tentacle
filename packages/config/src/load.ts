@@ -17,7 +17,12 @@ import {
   PROMPT_FILENAME,
 } from "./defaults.ts";
 import { type ProjectHooks, discoverProjectHooks } from "./hooks-scan.ts";
-import { type PublishedModels, type ResolvedModel, publishedModelNames } from "./models.ts";
+import {
+  type PublishedModels,
+  type ResolvedModel,
+  publishedModelNames,
+  withMainEntry,
+} from "./models.ts";
 import {
   type PackageHook,
   type PackageInfo,
@@ -110,6 +115,12 @@ export interface LoadConfigOptions {
   readonly profile?: string;
   /** The model id (`--model`), on the active profile's endpoint; beats `TENTACLE_MODEL`. */
   readonly model?: string;
+  /**
+   * The local session modes (docs/feat/model-switch.md D6): a `model` that names
+   * a `models` entry (of the active profile) makes that entry the run's main
+   * model, connection and all, instead of a model id.
+   */
+  readonly modelEntry?: true;
   /**
    * A load that needs no key: a pod daemon's (`serve --model-proxy`,
    * `--resident-status`, `--resident-stop`) and a command that never calls a
@@ -211,6 +222,8 @@ export interface TentacleConfig {
    * Never loaded from a file: only the laptop's carried settings set it.
    */
   readonly publishedModels?: PublishedModels;
+  /** The `models` entry the run started on (`--model <entry>`); never carried to a pod. */
+  readonly mainEntry?: string;
   readonly maxInlineOutputChars: number;
   /** Days a spilled tool output is kept; `<= 0` = never swept. */
   readonly toolOutputRetentionDays: number;
@@ -773,15 +786,12 @@ async function resolveModelKeys(
 
 export async function loadConfig(options: LoadConfigOptions = {}): Promise<TentacleConfig> {
   const base = options.env ?? process.env;
-  // `--model` is TENTACLE_MODEL's CLI twin: resolved from a COPY, so no child
-  // process (nor the caller) ever sees it in its environment.
-  const env = options.model !== undefined ? { ...base, TENTACLE_MODEL: options.model } : base;
-  const home = env.HOME ?? homedir();
+  const home = base.HOME ?? homedir();
   const launchCwd = options.cwd ?? process.cwd();
   const scaffold = options.scaffold ?? true;
   const runCommand = options.runCommand ?? defaultRunner;
 
-  const configDir = resolveConfigDir(options.configDir, env, home);
+  const configDir = resolveConfigDir(options.configDir, base, home);
   const configPath = join(configDir, CONFIG_FILENAME);
   const defaultPromptPath = join(configDir, PROMPT_FILENAME);
 
@@ -799,12 +809,27 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
 
   // Fold the selected profile over the base BEFORE anything reads the file
   // config (prompt file, key command, MCP servers downstream).
-  const profile = options.profile ?? (env.TENTACLE_PROFILE || undefined);
+  const profile = options.profile ?? (base.TENTACLE_PROFILE || undefined);
   const applied = applyProfile(parsedFile, profile);
   if (!applied.ok) {
     throw new ConfigError(`${configPath}: ${applied.reason}`);
   }
   const fileConfig = applied.config;
+
+  // `--model <entry>` (docs/feat/model-switch.md D6): a `models` name wins over
+  // a model id, where the caller allows entries.
+  const mainEntry =
+    options.modelEntry === true &&
+    options.model !== undefined &&
+    Object.hasOwn(fileConfig.models ?? {}, options.model)
+      ? options.model
+      : undefined;
+  // `--model <id>` is TENTACLE_MODEL's CLI twin: resolved from a COPY, so no
+  // child process (nor the caller) ever sees it in its environment.
+  const env =
+    options.model !== undefined && mainEntry === undefined
+      ? { ...base, TENTACLE_MODEL: options.model }
+      : base;
 
   // Resolve the prompt file: explicit `systemPromptFile` (relative to the
   // config dir) or the default `PROMPT.md`.
@@ -899,7 +924,7 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
   );
   packageDiagnostics.push(...contributed.diagnostics);
 
-  return {
+  const loaded: TentacleConfig = {
     provider: resolved.provider,
     baseURL: resolved.baseURL,
     model: resolved.model,
@@ -987,4 +1012,5 @@ export async function loadConfig(options: LoadConfigOptions = {}): Promise<Tenta
     ...(profile !== undefined ? { profile } : {}),
     sources: { ...resolved.sources, apiKey: resolved.apiKeySource },
   };
+  return mainEntry === undefined ? loaded : withMainEntry(loaded, mainEntry);
 }
