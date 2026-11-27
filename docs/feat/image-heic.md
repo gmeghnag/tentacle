@@ -423,3 +423,32 @@ Exact long edge also checked for 4032, 3024, 2268, 2048, 1701 and 1568. (`repro.
 - A turn cancel does not stop a running conversion (no signal in `HeicConverter`); each child is bounded at 20 s, so one conversion at worst ≈ 100 s (size + 4 decodes).
 - An output over 15 MiB is refused without the ×0.75 steps (D3's stat bound).
 - Unverified: Linux (only through the injected `platform`), a real iPhone portrait HEIC (Notes). No automated test checks that the OS enforces the denials; run once by hand with the shipped `sipsSandboxProfile` (`deny.ts`): control `exit 0, output exists`; read under `/Users` `exit 0, no output`; write outside the temp dir `exit 13, no output`.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-27 (fresh context; SAME model family as the planner — shared blind spots possible)*
+
+**Verdict: REQUEST-CHANGES** (one MEDIUM, security claim of H3/D3).
+
+**Gate (touched scope):** 8 touched test files 236 pass / 0 fail; `bun run lint` clean (2760 files); `bun run typecheck` clean. Full `bun run test` not re-run in this pass.
+
+**Findings**
+1. **MEDIUM — the `sips` sandbox does not confine a compromised decoder** (`packages/tools/src/heic-convert.ts:76-78`, `sipsSandboxProfile`). The profile is `(allow default)` plus three denies, so `process-fork`, `process-exec*` and `mach-lookup` stay allowed. Failure scenario: a malicious workspace `.heic` (the model can `fs_read` any file without a prompt, H3's own threat) exploits ImageIO; the payload writes a script into the writable user temp dir and runs `/bin/launchctl submit -- <script>` (or `open x.command`). launchd/LaunchServices start it OUTSIDE the sandbox, with full `/Users` read and network access. H3 says "confined" and the doc says "crash- and memory-isolated", but this setup only stops file and network access by the `sips` process itself. **Unverified here:** the probe `.tentacle/tmp/image-heic/rv/escape.sh` (harmless `touch` through `launchctl submit` under the shipped profile, then `launchctl remove`) needed an approval this non-interactive run could not get. Run it once. Fix: add `(deny process-fork)(deny process-exec* (require-not (literal "/usr/bin/sips")))`, check that `sips` still converts, and pin it in T2's profile assertion. In Notes, state what remains (direct mach/XPC to launchd needs a deny-default profile; that is a follow-up).
+
+**Mutations (all red, reverted, `git status` clean):** skip `checkHeicOutput` → 5 fail (T1 + live 50 % cut); drop `sandbox-exec` from argv + drop `rm` in `finally` → 3 fail (T2); attach ref from HEIC bytes → T7 red; `heic: undefined` in wiring → T6 red.
+
+**Attacks tried**
+- The child swaps `work/` for a symlink to a user directory, then the `finally` `rm -r` runs: Bun `rm(symlink,{recursive})` unlinks the link and does not follow it (`rv/rmsym.ts`). Holds.
+- End-to-end with real `sips` on the 12 MP `photo.heic` (`rv/e2e.ts`):
+  - edge 8000 gives `4032×3024 · HEIC→JPEG · 2.3 MB`, `putTool image/jpeg`, 200 ms;
+  - edge 1568 gives `1568×1176 · HEIC 4032×3024→JPEG`;
+  - an attach gives `photo.jpg image/jpeg`;
+  - a 4000 B cut is refused with the "not whole" sentence.
+
+  Holds.
+- §7 pod trust: a pod has no store, so there is no conversion (unchanged D7). §7 Ink: every child pipe is `pipe`/`ignore`, never `inherit` (`heic-convert.ts:101-106,135-141`). Holds.
+- Premises spot-checked TRUE: `readBytes` takes `maxBytes` (`core/src/execution.ts:49`); attach conversions run one after another (`attach-files.ts:333-334`).
+
+**Scope note:** `packages/cli/test/fixtures/worker-exit-net.ts` (an exit-net flake fix) is outside this task. It is harmless, but it belongs to its own fix.
+
+**Executor behaviour:** a faithful plan-to-code mapping, strong fakes, honest Execution notes on what is unverified. The only weakness is the over-claimed confinement above.
