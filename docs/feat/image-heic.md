@@ -474,3 +474,17 @@ Exact long edge also checked for 4032, 3024, 2268, 2048, 1701 and 1568. (`repro.
 **Scope note:** `packages/cli/test/fixtures/worker-exit-net.ts` (an exit-net flake fix) is outside this task. It is harmless, but it belongs to its own fix.
 
 **Executor behaviour:** a faithful plan-to-code mapping, strong fakes, honest Execution notes on what is unverified. The only weakness is the over-claimed confinement above.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-27 (fresh context; same model family as the planner)*
+
+**Verdict: PASS.** Finding 1 is fixed as asked. `sipsSandboxProfile` (`heic-convert.ts:79-82`) now adds `(deny process-fork)(deny process-exec* (require-not (literal "/usr/bin/sips")))`. The OS enforces both, and new live tests cover them: `/usr/bin/true` is refused under the profile; a bash subshell fork prints nothing while a control run prints `alive`. The doc's Notes name the residual: Mach/XPC is still allowed, and a deny-default profile is a follow-up.
+
+**Mutations (red, reverted, `git status` clean):**
+- drop `process-fork` → 2 fail (the T2 profile assertion and the live fork test);
+- drop `process-exec*` → 2 fail (T2 and the live exec test).
+
+**Regressions:** real `sips` still converts under the tighter profile: the live test, wiring T6, and `rv/e2e.ts` (12 MP → `4032×3024 · HEIC→JPEG` in 193 ms; `1568×1176` on the smaller edge; attach `photo.jpg image/jpeg`; a truncated file refused). Touched tests 49 pass / 0 fail; `bun run lint` clean; `bun run typecheck` clean. Full `bun run test` not re-run in this pass.
+
+**Not run:** the `launchctl submit` probe still needs an approval this run could not get. The exec deny covers the `launchctl`/`open` command route. A direct XPC call to launchd remains, as Notes says.
