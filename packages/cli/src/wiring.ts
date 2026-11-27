@@ -125,6 +125,7 @@ import {
   createTaskTool,
   createWorkflowTool,
   createWorkloadShellTool,
+  defaultHeicConverter,
   diagramTool,
   presentTool,
   shellTool,
@@ -1449,6 +1450,8 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
         images: true,
         maxImageBytes: imageLimitValues.maxBytes,
         maxEdge: imageFileMaxEdge(config.provider),
+        // This HOST's decoder (docs/feat/image-heic.md D5): none off macOS.
+        heic: defaultHeicConverter(),
       }),
     );
     // Its `region` re-encodes a picture: under the same byte cap.

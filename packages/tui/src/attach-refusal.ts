@@ -21,7 +21,8 @@ export type AttachRefusal =
   | { readonly reason: "unreadable"; readonly path: string }
   | { readonly reason: "empty"; readonly path: string }
   | { readonly reason: "too-large"; readonly path: string; readonly size: number }
-  | { readonly reason: "heic"; readonly path: string }
+  /** A HEIC that was not converted (docs/feat/image-heic.md D6): the whole sentence. */
+  | { readonly reason: "heic"; readonly path: string; readonly why: string }
   | { readonly reason: "not-image"; readonly path: string }
   /**
    * A PDF this session cannot take (docs/feat/pdf-read.md D6): no `documents`
@@ -54,7 +55,7 @@ export function refusalText(refusal: AttachRefusal): string {
         MAX_IMAGE_BYTES,
       )} limit`;
     case "heic":
-      return `cannot attach ${refusal.path}: HEIC/HEIF images are not supported yet — export it as PNG or JPEG first (macOS: sips -s format png "${refusal.path}" --out out.png)`;
+      return `cannot attach ${refusal.path}: ${refusal.why}`;
     case "not-image":
       return `cannot attach ${refusal.path}: it is not a PNG, JPEG, GIF or WebP image`;
     case "documents-off":

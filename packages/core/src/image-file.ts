@@ -283,12 +283,13 @@ export function imageOverCapReason(size: number, max: number): string {
  * An image file's marker, in image-view's grammar plus what a file has and a
  * PDF page has not: the format and `high only` (`low` needs a decoder, 3a/3b).
  * `[image <name> · W×H · <format> · <size> · ref <12 hex> · high only]`
+ * A converted picture's `format` says so (`heicFormatLabel`).
  */
 export function imageFileMarker(
   name: string,
   width: number,
   height: number,
-  format: ImageFileFormat,
+  format: string,
   size: number,
   id: string,
 ): string {

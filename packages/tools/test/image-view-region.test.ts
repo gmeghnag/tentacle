@@ -26,6 +26,7 @@ import {
   formatBytes,
 } from "@tentacle/core";
 import { AttachmentStore, UploadBudget } from "../../daemon/src/attachment-store.ts";
+import { createFsReadTool } from "../src/builtins.ts";
 import { type ImageViewInput, createImageViewTool } from "../src/image-view.ts";
 import { BunImage, difference, fixture, reference } from "./support/jpeg-oracle.ts";
 
@@ -808,6 +809,40 @@ describe("JPEG pictures (docs/feat/image-region-jpeg.md T6)", () => {
       expect(r.isError).toBe(true);
       expect(r.content).toContain("is no longer held");
     }
+  });
+});
+
+describe("a HEIC read, then viewed (docs/feat/image-heic.md T5)", () => {
+  test("fs_read's converted JPEG gives a region of the DISPLAYED picture", async () => {
+    const heic = new Uint8Array(
+      await Bun.file(
+        `${import.meta.dir}/../../core/test/fixtures/heic/small-orient-6.heic`,
+      ).arrayBuffer(),
+    );
+    const jpeg = await fixture("small-orient-6");
+    const store = storeOf();
+    const reading = createFsReadTool({
+      images: true,
+      heic: async () => ({
+        bytes: jpeg,
+        width: 64,
+        height: 48,
+        sourceWidth: 64,
+        sourceHeight: 48,
+      }),
+    });
+    const env = {
+      readBytes: async (_path: string, o?: { readLimitBytes?: number }) =>
+        o?.readLimitBytes === undefined ? heic : heic.subarray(0, o.readLimitBytes),
+    } as unknown as ToolContext["env"];
+    const read = await reading.execute({ path: "IMG_6.heic" }, { ...ctx(store), env });
+    const ref = read.content.toString().match(/ref ([0-9a-f]{12})/)?.[1] ?? "";
+    const r = await view(store, { ref, region: QUARTER });
+    expect(r.isError).toBeUndefined();
+    expect(r.image?.mimeType).toBe("image/jpeg");
+    expect(r.content).toContain("IMG_6.heic · region ");
+    expect(r.content).toContain(" of 48×64");
+    expect(r.content).toContain(" · EXIF orientation 6 applied");
   });
 });
 

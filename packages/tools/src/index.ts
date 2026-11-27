@@ -24,6 +24,8 @@ export * from "./diagram-parse.ts";
 export * from "./subagent-tools.ts";
 export * from "./present.ts";
 export * from "./image-view.ts";
+// HEIC → JPEG through the OS's own decoder (docs/feat/image-heic.md D3).
+export * from "./heic-convert.ts";
 export * from "./browser.ts";
 export * from "./a2a-add-agent.ts";
 export * from "./app-publish.ts";

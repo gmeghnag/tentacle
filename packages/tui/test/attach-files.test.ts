@@ -162,14 +162,71 @@ describe("inspectPath — every failure mode", () => {
     expect(refusalText({ reason: "empty", path: "/a/empty.png" })).toContain("empty (0 bytes)");
   });
 
-  test("HEIC is RECOGNISED and refused with a convert remedy, not 'not an image'", async () => {
+  // docs/feat/image-heic.md D6/T7.
+  test("HEIC with no decoder: refused with a sentence saying so, not 'not an image'", async () => {
     const probe = fakeProbe({ "/a/IMG_0001.HEIC": { kind: "file", bytes: sized(HEIC, 64) } });
     const result = await inspectPath(probe, "/a/IMG_0001.HEIC");
-    expect(result.ok === false && result.refusal.reason).toBe("heic");
-    const text = refusalText({ reason: "heic", path: "/a/IMG_0001.HEIC" });
-    expect(text).toContain("HEIC/HEIF");
-    expect(text).toContain("sips -s format png");
-    expect(text).not.toContain("not a PNG");
+    if (result.ok) throw new Error("expected a refusal");
+    expect(result.refusal.reason).toBe("heic");
+    expect(refusalText(result.refusal)).toBe(
+      "cannot attach /a/IMG_0001.HEIC: HEIC/HEIF pictures are converted by macOS's own decoder, and this computer has none — export it as JPEG first",
+    );
+  });
+
+  test("HEIC with a decoder: the ref, the bytes and the name all describe the JPEG", async () => {
+    const heic = sized(HEIC, 64);
+    const jpeg = sized([0xff, 0xd8, 0xff, 0xe0], 50);
+    const calls: [Uint8Array, number, number][] = [];
+    const probe: FileProbe = {
+      ...fakeProbe({ "/a/IMG_0001.HEIC": { kind: "file", bytes: heic } }),
+      convertHeic: async (bytes, { maxEdge, maxBytes }) => {
+        calls.push([bytes, maxEdge, maxBytes]);
+        return { bytes: jpeg, width: 2048, height: 1536, sourceWidth: 4032, sourceHeight: 3024 };
+      },
+    };
+    const result = await inspectPath(probe, "/a/IMG_0001.HEIC");
+    if (!result.ok || result.kind !== "image") throw new Error("expected an image");
+    expect(result.image.ref).toEqual({
+      id: sha256Hex(jpeg),
+      mimeType: "image/jpeg",
+      size: 50,
+      name: "IMG_0001.jpg",
+    });
+    expect(result.image.bytes).toBe(jpeg);
+    expect(result.image.path).toBe("/a/IMG_0001.HEIC");
+    expect(calls.map(([b, e, m]) => [b.length, e, m])).toEqual([[64, 2048, MAX_IMAGE_BYTES]]);
+    // The same HEIC twice is the same picture (F14).
+    const twice = await collectAttachments(probe, ["/a/IMG_0001.HEIC", "/a/IMG_0001.HEIC"]);
+    expect(twice.images).toHaveLength(1);
+    expect(twice.refusals.map((r) => r.reason)).toEqual(["duplicate"]);
+  });
+
+  test("a decoder's refusal is the sentence the user reads", async () => {
+    const probe: FileProbe = {
+      ...fakeProbe({ "/a/bad.heic": { kind: "file", bytes: sized(HEIC, 64) } }),
+      convertHeic: async () => ({ refused: "the HEIC is corrupt (no readable size)" }),
+    };
+    const decision = await attachPaths(probe, ["/a/bad.heic"]);
+    if (decision.kind !== "refused") throw new Error("expected refused");
+    expect(decision.refusals.map(refusalText)).toEqual([
+      "cannot attach /a/bad.heic: the HEIC is corrupt (no readable size)",
+    ]);
+  });
+
+  test("a HEIC over the wire's cap is too-large and never reaches the decoder", async () => {
+    let calls = 0;
+    const probe: FileProbe = {
+      ...fakeProbe({
+        "/a/huge.heic": { kind: "file", bytes: sized(HEIC, MAX_IMAGE_BYTES + 1) },
+      }),
+      convertHeic: async () => {
+        calls += 1;
+        return { refused: "unused" };
+      },
+    };
+    const result = await inspectPath(probe, "/a/huge.heic");
+    expect(result.ok === false && result.refusal.reason).toBe("too-large");
+    expect(calls).toBe(0);
   });
 
   test("a non-image (PDF, text) → not-image, and it is NEVER named by extension", async () => {

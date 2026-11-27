@@ -1,0 +1,1 @@
+- **HEIC/HEIF pictures work like PNG/JPEG on macOS.** `fs_read` of an iPhone `.heic` shows the picture to a vision model (and `image_view` zooms into it), and an attached HEIC is converted to JPEG; on a host without macOS's decoder (Linux `serve`, or a Linux terminal) the read or attach is refused with a sentence saying so.

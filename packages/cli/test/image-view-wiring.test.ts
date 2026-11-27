@@ -201,6 +201,34 @@ describe("fs_read on an image file: the limits come from wiring (T6)", () => {
     expect(r.content).toBe("[image omitted: 45 B is over this model's 20 B limit — small.png]");
   });
 
+  // docs/feat/image-heic.md T6 (mutation: drop `heic:` from wiring → red on macOS).
+  test("a HEIC read reaches this host's decoder, or says there is none", async () => {
+    const path = join(dir, "photo.heic");
+    await writeFile(
+      path,
+      new Uint8Array(
+        await Bun.file(
+          `${import.meta.dir}/../../core/test/fixtures/heic/small-orient-1.heic`,
+        ).arrayBuffer(),
+      ),
+    );
+    const s = store();
+    const wired = workerAgentFactory(vision(), { attachments: s, toolImages: s });
+    const tool = wired.tools.get("fs_read");
+    if (tool === undefined) throw new Error("fs_read is not registered");
+    const r = await tool.execute({ path } as never, {
+      sessionId: "S",
+      signal: new AbortController().signal,
+      env: new HostExecution({ cwd: dir }),
+      images: s,
+    });
+    expect(r.content).toContain(
+      process.platform === "darwin"
+        ? "[image photo.heic · 64×48 · HEIC→JPEG · "
+        : `this host (${process.platform}) has none`,
+    );
+  });
+
   // docs/feat/image-region-png.md D4: a re-encoded region is under the same cap.
   test("the model's own maxImageBytes reaches image_view's region", async () => {
     const s = store();

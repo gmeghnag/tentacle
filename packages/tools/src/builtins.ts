@@ -10,6 +10,7 @@
  */
 import type {
   ExecOptions,
+  HeicConverter,
   Tool,
   ToolContext,
   ToolDiffDetail,
@@ -202,6 +203,8 @@ export function createFsReadTool(opts: {
   /** This model's per-image cap and Q1's largest side (docs/feat/image-files.md D2). */
   readonly maxImageBytes?: number;
   readonly maxEdge?: number;
+  /** The host's HEIC decoder, where it has one (docs/feat/image-heic.md D4). */
+  readonly heic?: HeicConverter | undefined;
 }): Tool<z.infer<typeof fsReadInput>> {
   if (!opts.images) {
     return fsReadTool;
@@ -209,10 +212,11 @@ export function createFsReadTool(opts: {
   const imageOptions: ImageFileOptions = {
     maxImageBytes: opts.maxImageBytes ?? MAX_IMAGE_BYTES,
     maxEdge: opts.maxEdge ?? DEFAULT_IMAGE_FILE_MAX_EDGE,
+    heic: opts.heic,
   };
   return {
     ...fsReadTool,
-    description: `${fsReadTool.description} With image_view available, a kept picture's marker carries a ref (\`[image p.N · W×H · ref <hex>]\`): call \`image_view\` with a marker's ref when a picture matters to the answer (diagrams, charts, scanned pages); skip logos. A PNG or JPEG file (read by its bytes) is kept the same way: its marker is \`[image <name> · W×H · <format> · <size> · ref <hex> · high only]\`, and only high detail is available for it.`,
+    description: `${fsReadTool.description} With image_view available, a kept picture's marker carries a ref (\`[image p.N · W×H · ref <hex>]\`): call \`image_view\` with a marker's ref when a picture matters to the answer (diagrams, charts, scanned pages); skip logos. A PNG, JPEG or HEIC file (read by its bytes; HEIC is converted to JPEG where macOS's decoder exists) is kept the same way: its marker is \`[image <name> · W×H · <format> · <size> · ref <hex> · high only]\`, and only high detail is available for it.`,
     // The image branch of the read: the same range parsing and PDF-first order,
     // then the file's own limits, so the model's cap and Q1's side bound are the
     // session's (docs/feat/image-files.md D2).

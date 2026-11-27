@@ -3,6 +3,7 @@
  * `.jpeg` in the workspace goes into the session's store through image-view's
  * OWN tool-image path, and the text keeps the same kind of marker — with a ref
  * `image_view` shows. `high` only: nothing downscales yet, so `low` IS `high`.
+ * A HEIC is converted to JPEG first, where the host can (image-heic.md D4).
  *
  * Pure over `ctx.env` / `ctx.images`: the decision is here, the bytes and the
  * store are the caller's. `undefined` means "not an image file — run the text
@@ -11,12 +12,15 @@
  */
 import {
   FileTooLargeError,
+  HEIC_FILE_MAX_EDGE,
+  type HeicConverter,
   MAX_IMAGE_BYTES,
   PDF_HEAD_BYTES,
   type ToolContext,
   type ToolImageEntry,
   type ToolImageStore,
   type ToolResult,
+  heicFormatLabel,
   imageFileMarker,
   imageOverCapReason,
   inspectImageFile,
@@ -34,6 +38,8 @@ export interface ImageFileOptions {
   readonly maxImageBytes: number;
   /** The largest side accepted (Q1: 8000 px on Anthropic, 1568 on OpenAI-compatible). */
   readonly maxEdge: number;
+  /** The host's HEIC decoder; absent where it has none (a HEIC is then refused). */
+  readonly heic?: HeicConverter | undefined;
 }
 
 /** The hint line a successful read appends: the ref is what `image_view` wants. */
@@ -85,9 +91,7 @@ export async function readImageFile(
   const sniffed = sniffImageType(head);
   const name = displayName(path);
   if (sniffed.kind === "heic") {
-    return refused(
-      `${name}: HEIC/HEIF images are not readable as images yet (${sniffed.brand}) — convert it to PNG or JPEG`,
-    );
+    return readHeicFile(path, range, readBytes, store, options);
   }
   const imageType = sniffed.kind === "image" ? sniffed.mimeType : undefined;
   if (imageType !== undefined && imageType !== "image/png" && imageType !== "image/jpeg") {
@@ -130,6 +134,57 @@ export async function readImageFile(
   const marker = imageFileMarker(name, width, height, format, bytes.length, put.high.ref.id);
   // 0 refs, like a PDF read: the ref is text in the marker, so no message this
   // read writes can exceed one.
+  return { content: `${marker}\n${VIEW_HINT}` };
+}
+
+/**
+ * A HEIC (docs/feat/image-heic.md D4): converted ONCE to a JPEG, which then is
+ * the picture — stored, marked and viewed like any JPEG file. The input is
+ * bounded by the wire's cap; the model's cap applies to the JPEG.
+ */
+async function readHeicFile(
+  path: string,
+  range: { readonly offset?: number | undefined; readonly limit?: number | undefined },
+  readBytes: NonNullable<ToolContext["env"]["readBytes"]>,
+  store: ToolImageStore,
+  options: ImageFileOptions,
+): Promise<ToolResult> {
+  const name = displayName(path);
+  if (range.offset !== undefined || range.limit !== undefined) {
+    return refused(`${path} is an image: no line ranges`);
+  }
+  if (options.heic === undefined) {
+    return refused(
+      `${name}: HEIC/HEIF pictures are converted by macOS's own decoder, and this host (${process.platform}) has none — convert it to JPEG first`,
+    );
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = await readBytes(path, { maxBytes: MAX_IMAGE_BYTES });
+  } catch (error) {
+    if (error instanceof FileTooLargeError) {
+      return refused(
+        `[image omitted: ${imageOverCapReason(error.sizeBytes, MAX_IMAGE_BYTES)} — ${name}]`,
+      );
+    }
+    throw error;
+  }
+  const converted = await options.heic(bytes, {
+    maxEdge: Math.min(options.maxEdge, HEIC_FILE_MAX_EDGE),
+    maxBytes: Math.min(options.maxImageBytes, MAX_IMAGE_BYTES),
+  });
+  if ("refused" in converted) {
+    return refused(`${name}: ${converted.refused}`);
+  }
+  const { width, height } = converted;
+  const jpeg = converted.bytes;
+  const size = { width, height, mimeType: "image/jpeg" } as const;
+  const put = await keepImageFile(store, jpeg, size, name);
+  if ("refused" in put) {
+    return refused(`[image ${name} · ${width}×${height} · not kept: ${put.refused}]`);
+  }
+  const format = heicFormatLabel(converted);
+  const marker = imageFileMarker(name, width, height, format, jpeg.length, put.high.ref.id);
   return { content: `${marker}\n${VIEW_HINT}` };
 }
 
