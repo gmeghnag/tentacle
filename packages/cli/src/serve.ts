@@ -8,7 +8,7 @@ import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { EMPTY_SKILL_LISTING, projectKey } from "@tentacle/agent";
 import type { TentacleConfig } from "@tentacle/config";
-import { DEFAULT_PUSH_GRACE_SECONDS } from "@tentacle/config";
+import { DEFAULT_PUSH_GRACE_SECONDS, modelCatalogue } from "@tentacle/config";
 import type {
   AppsLink,
   ArtifactSink,
@@ -868,6 +868,9 @@ async function reloadedHost(
       return wired;
     },
     newSessionSkills: () => skillScan.newSession(),
+    // `/model` from a `connect` TUI (docs/feat/model-switch.md): this daemon
+    // runs its own config's model. `podSessionHost` passes none.
+    models: () => modelCatalogue(config),
     // `/mcp` (`mcp/status`): the connection set is daemon-wide, so this is the
     // right answer for every session on it (docs/feat/serve-mcp.md S2).
     mcpStatus: () => mcpHub.status(),

@@ -394,6 +394,8 @@ test("GUARD: every `SessionController` member a `RemoteSession` has is on the ru
       "opened",
       "context",
       "rename",
+      "models",
+      "setModel",
       "onReturned",
       "watch",
       "open",

@@ -8,6 +8,7 @@
 import type { AgentType, SubagentModel } from "@tentacle/agent";
 import { type PublishedModels, type TentacleConfig, pickSubagentModel } from "@tentacle/config";
 import type { ModelProvider } from "@tentacle/core";
+import type { ModelSwitch } from "@tentacle/daemon";
 import { type CreateModelProviderOptions, createModelProvider } from "@tentacle/providers";
 import { logModelRetry } from "./daemon-log.ts";
 
@@ -80,6 +81,65 @@ export function createModelProviders(
       });
       ids.set(modelId, made);
       return made;
+    },
+  };
+}
+
+/** A live agent's main model (docs/feat/model-switch.md D1). */
+export interface LiveModelSwitch extends ModelSwitch {
+  /** What the agent is built with: every call goes to the selected target. */
+  readonly provider: ModelProvider;
+  /** The selected target's window and model id, read at each use. */
+  contextWindow(): number;
+  modelId(): string;
+}
+
+/**
+ * The delegating main provider of one agent: `base` (the run's start model) or
+ * a `models` entry's, from the SAME `providers` the sub-agents use, so an entry
+ * keeps its own endpoint and key. `id` follows the target: another provider's
+ * reasoning is then skipped by its `source`.
+ */
+export function createModelSwitch(
+  config: Pick<TentacleConfig, "model" | "contextWindow" | "models" | "mainEntry">,
+  base: ModelProvider,
+  providers: ModelProviders,
+): LiveModelSwitch {
+  const start = {
+    name: config.mainEntry ?? null,
+    provider: base,
+    model: config.model,
+    contextWindow: config.contextWindow,
+  };
+  let target = start;
+  return {
+    provider: {
+      get id() {
+        return target.provider.id;
+      },
+      stream: (request) => target.provider.stream(request),
+      // `undefined` = this target cannot count: the caller estimates.
+      countTokens: (request) =>
+        target.provider.countTokens?.(request) ?? Promise.resolve(undefined),
+    },
+    contextWindow: () => target.contextWindow,
+    modelId: () => target.model,
+    current: () => target.name,
+    select(name) {
+      if (name === null) {
+        target = start;
+      } else {
+        // Both can throw: before `target` moves.
+        const provider = providers.forEntry(name);
+        const entry = config.models[name];
+        target = {
+          name,
+          provider,
+          model: entry?.model ?? name,
+          contextWindow: entry?.contextWindow ?? start.contextWindow,
+        };
+      }
+      return { model: target.model, contextWindow: target.contextWindow };
     },
   };
 }

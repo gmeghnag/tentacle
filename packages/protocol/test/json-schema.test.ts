@@ -164,6 +164,23 @@ const FIXTURES: Record<string, Json[]> = {
       },
     },
   ],
+  "methods/session~1models/params": [{}, { sessionId: "s" }],
+  "methods/session~1models/result": [
+    { start: { model: "m", contextWindow: 1000 }, entries: [], active: null },
+    {
+      start: { model: "m", contextWindow: 1000, entry: "haiku" },
+      entries: [{ name: "haiku", model: "m", contextWindow: 1000 }],
+      active: "haiku",
+    },
+  ],
+  "methods/session~1set_model/params": [
+    { sessionId: "s", name: "haiku" },
+    { sessionId: "s", name: null },
+  ],
+  "methods/session~1set_model/result": [
+    { active: "haiku", model: "m", contextWindow: 1000 },
+    { active: null, model: "m", contextWindow: 1000 },
+  ],
   "methods/browser~1status/params": [{ sessionId: "s" }],
   "methods/browser~1status/result": [
     { available: false, tabs: [] },
@@ -1171,6 +1188,11 @@ describe("wire hygiene — optional fields are omitted, never null", () => {
     expect(nullSites(buildProtocolJsonSchema())).toEqual([
       "#/$defs/BackgroundExit/properties/exitCode/anyOf/1",
       "#/$defs/JsonRpcErrorResponse/properties/id/anyOf/1",
+      // docs/feat/model-switch.md: null = "the run's start model", a choice the
+      // caller states — an omitted `name` must be refused, never read as a reset.
+      "#/$defs/ModelsResult/properties/active",
+      "#/$defs/SetModelParams/properties/name/anyOf/1",
+      "#/$defs/SetModelResult/properties/active",
       // docs/fix/workflows-ux.md D1: both are REQUIRED (an older daemon must fail
       // at `initialize`, not render a graph with no edges), and "no edge" is a
       // fact a client must be told — absent would be indistinguishable from a

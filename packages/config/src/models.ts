@@ -129,6 +129,85 @@ export function withRunModel<
   return { ...config, model, models };
 }
 
+/** What `/model` may list: names, model ids and windows — never a URL or a key. */
+export interface ModelCatalogue {
+  readonly start: {
+    readonly model: string;
+    readonly contextWindow: number;
+    readonly entry?: string;
+  };
+  readonly entries: readonly {
+    readonly name: string;
+    readonly model: string;
+    readonly contextWindow: number;
+  }[];
+}
+
+/** The main-model fields of a config (`withMainEntry`). */
+interface MainModelFields {
+  readonly provider: "openai" | "anthropic";
+  readonly baseURL: string;
+  readonly model: string;
+  readonly apiKey?: string;
+  readonly contextWindow: number;
+  readonly maxTokens?: number;
+  readonly maxImageBytes?: number;
+  readonly images?: boolean;
+  readonly titleModel?: string;
+  readonly mainEntry?: string;
+  readonly models: Readonly<Record<string, ResolvedModel>>;
+}
+
+/**
+ * The run's main model becomes entry `name` (`--model <entry>`,
+ * docs/feat/model-switch.md): its connection, ids and limits replace the main
+ * ones. The key is the ENTRY's — with none the main key is removed, never sent
+ * to another endpoint — and an entry with its own connection drops
+ * `titleModel` (an id on the old endpoint). `models` is untouched.
+ */
+export function withMainEntry<C extends MainModelFields>(config: C, name: string): C {
+  const entry = has(config.models, name) ? config.models[name] : undefined;
+  if (entry === undefined) {
+    throw new Error(`no models entry ${JSON.stringify(name)}`);
+  }
+  const {
+    apiKey: _apiKey,
+    maxTokens: _maxTokens,
+    maxImageBytes: _maxImageBytes,
+    images: _images,
+    titleModel,
+    ...rest
+  } = config;
+  return {
+    ...rest,
+    provider: entry.provider,
+    baseURL: entry.baseURL,
+    model: entry.model,
+    contextWindow: entry.contextWindow,
+    ...(entry.apiKey !== undefined ? { apiKey: entry.apiKey } : {}),
+    ...(entry.maxTokens !== undefined ? { maxTokens: entry.maxTokens } : {}),
+    ...(entry.maxImageBytes !== undefined ? { maxImageBytes: entry.maxImageBytes } : {}),
+    ...(entry.images !== undefined ? { images: entry.images } : {}),
+    ...(titleModel !== undefined && entry.apiKeySource === "inherited" ? { titleModel } : {}),
+    mainEntry: name,
+  } as unknown as C;
+}
+
+/** The `/model` list of a run: its start model and every entry, sorted by name. */
+export function modelCatalogue(config: MainModelFields): ModelCatalogue {
+  return {
+    start: {
+      model: config.model,
+      contextWindow: config.contextWindow,
+      ...(config.mainEntry !== undefined ? { entry: config.mainEntry } : {}),
+    },
+    // `?? {}`: a partial config (a test fixture) has no `models`.
+    entries: Object.entries(config.models ?? {})
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([name, entry]) => ({ name, model: entry.model, contextWindow: entry.contextWindow })),
+  };
+}
+
 /** The part of a config view the reference check reads. */
 interface RefView {
   readonly models?: Readonly<Record<string, unknown>> | undefined;

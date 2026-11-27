@@ -417,7 +417,7 @@ Usage:
                            only reports (exit 10: an update is available)
   tentacle --help          show this help
   tentacle --version       print the version and exit
-  --model <id> | --profile <name>
+  --model <id|entry> | --profile <name>
                            flags of the commands that start a session, written
                            AFTER the command: run, attach, serve, and the bare
                            session (tentacle --model X, -i --profile Y, --resume
@@ -425,9 +425,13 @@ Usage:
                            --profile applies a profile from config.jsonc
                            ("profiles"); --model uses that model id on the
                            active profile's endpoint (beats TENTACLE_MODEL; the
-                           context window stays the profile's). attach uses the
-                           run's own model unless one is given. serve: the model
-                           its connect clients use. Not before a command
+                           context window stays the profile's). In a local
+                           session (not run, attach, serve) a \`models\` entry
+                           name wins: the session starts on that entry, its
+                           endpoint, key and window; /model switches between
+                           entries. attach uses the run's own model unless one
+                           is given. serve: the model its connect clients use.
+                           Not before a command
                            (tentacle --model X run is an error), and not on
                            connect, ps, rm, update, hooks, package
 
@@ -1039,10 +1043,26 @@ export async function main(argv: readonly string[], io: CliIO = {}): Promise<num
       ...(usesModel ? {} : { podDaemon: true }),
       ...(profileFlag !== undefined ? { profile: profileFlag } : {}),
       ...(modelFlag !== undefined ? { model: modelFlag } : {}),
+      // A local session may start on a `models` entry (docs/feat/model-switch.md D6).
+      ...(mode === "tui" || mode === "plain" || mode === "prompt" || mode === "empty"
+        ? { modelEntry: true as const }
+        : {}),
     });
   } catch (error) {
     err(`\n[config error] ${error instanceof Error ? error.message : String(error)}\n`);
     return 1;
+  }
+  // These record a model ID and re-apply it on the main endpoint (`relay.ts`,
+  // `attach`): an entry name would silently reach the wrong one (D6).
+  if (
+    modelFlag !== undefined &&
+    (mode === "run" || mode === "attach" || mode === "serve") &&
+    Object.hasOwn(config.models, modelFlag)
+  ) {
+    err(
+      `[error] --model ${modelFlag} is a models entry: entries work for the local TUI only for now — pass a model id or --profile\n`,
+    );
+    return 2;
   }
 
   // `tentacle package …` (docs/feat/packages.md): no TUI, plain output.

@@ -44,6 +44,7 @@ import {
   type LiveActivityStatus,
   MAX_PINNED_SESSIONS,
   type McpServerStatus,
+  type ModelsResult,
   type OpenParams,
   type PushRegisterStatus,
   type SessionContextResult,
@@ -56,6 +57,7 @@ import {
   type SessionToolsResult,
   type SessionTtlParams,
   type SessionTtlResult,
+  type SetModelResult,
   type UpdateSettingsResult,
   type WorkflowCatalogueResult,
   type WorkflowListResult,
@@ -222,6 +224,26 @@ export interface WorkloadShellsLike {
   dispose(): Promise<void>;
 }
 
+/**
+ * One agent's main model, switchable between `models` entries
+ * (docs/feat/model-switch.md D1); the factory's builder implements it.
+ */
+export interface ModelSwitch {
+  /** The selected entry; null = the run's start model. */
+  current(): string | null;
+  /**
+   * From the next model request. SYNCHRONOUS; throws on an unknown name, with
+   * the selection unchanged.
+   */
+  select(name: string | null): { readonly model: string; readonly contextWindow: number };
+}
+
+/** What this daemon's own config lets `/model` list: names, ids and windows only. */
+export interface ModelsCatalogue {
+  readonly start: ModelsResult["start"];
+  readonly entries: readonly ModelsResult["entries"][number][];
+}
+
 export type AgentFactory = (
   cwd: string,
   context: AgentContext,
@@ -255,6 +277,11 @@ export type AgentFactory = (
   titleModel?: ModelProvider;
   /** What it did with `context.settings`: `session/open`'s result reports it. */
   settingsReport?: SessionSettingsReport;
+  /**
+   * The switch of this agent's main model (docs/feat/model-switch.md). Absent
+   * (a pod daemon, a tunnelled factory) → `session/set_model` is refused.
+   */
+  modelSwitch?: ModelSwitch;
   /**
    * The session's approvals store (the one its gate and its sub-agents use),
    * handed to the next agent on a settings sync (`AgentReuse.grants`) and
@@ -413,6 +440,11 @@ export interface SessionHostOptions extends TurnErrorPolicy {
    * Absent → none (`serve` and pod daemons start no MCP servers today).
    */
   readonly mcpStatus?: () => Promise<readonly McpServerStatus[]>;
+  /**
+   * The models `/model` lists (docs/feat/model-switch.md): the worker and
+   * `serve` only, from their own config. Absent → no switching (a pod daemon).
+   */
+  readonly models?: () => ModelsCatalogue;
   /**
    * Whether every tool this daemon will offer is already listed (the worker's
    * MCP servers finished connecting). `false`: a count of a fresh conversation
@@ -609,6 +641,10 @@ function withPin<T extends { readonly pinnedAt?: number }>(
   return (pinnedAt !== undefined ? { ...rest, pinnedAt } : rest) as T;
 }
 
+/** A pod daemon, a tunnelled session: the model is not this daemon's to switch (D7). */
+const switchingUnavailable = (): RpcError =>
+  new RpcError(JsonRpcErrorCode.InvalidRequest, "model switching is not available in this session");
+
 export class SessionHost {
   private readonly opts: SessionHostOptions;
   /**
@@ -659,6 +695,8 @@ export class SessionHost {
     return this.opts.answersAutoAccept === true;
   }
   private readonly sessions = new Map<string, HostedSession>();
+  /** Each session's model switch, where its agent has one (docs/feat/model-switch.md). */
+  private readonly switches = new WeakMap<HostedSession, ModelSwitch>();
   /** ARCHIVED sessions (a persisting host only). An id is in ONE of the two maps, never both. */
   private readonly archived = new Map<string, ArchivedEntry>();
   /** In-flight reopen loads, by id: concurrent reopens share one read. */
@@ -1734,6 +1772,7 @@ export class SessionHost {
       grants,
       workloadShells,
       workflows,
+      modelSwitch,
     } = this.opts.createAgent(this.opts.defaultCwd, {
       modelLink: () => bound.hosted?.modelLink() ?? null,
       ...(settings ? { settings } : {}),
@@ -1796,6 +1835,9 @@ export class SessionHost {
       this.opts.shares,
     );
     bound.hosted = hosted;
+    if (modelSwitch) {
+      this.switches.set(hosted, modelSwitch);
+    }
     hosted.settingsReport = settingsReport;
     hosted.imagesPolicy = this.opts.images;
     if (this.opts.browser !== undefined) {
@@ -1833,6 +1875,47 @@ export class SessionHost {
    */
   async stopShares(): Promise<void> {
     await this.opts.shares?.close?.();
+  }
+
+  /**
+   * `session/models` (docs/feat/model-switch.md): this daemon's catalogue and
+   * `hosted`'s selection (no session → `active` null). Refused with no
+   * catalogue, or for a session whose agent has no switch.
+   */
+  models(hosted?: HostedSession): ModelsResult {
+    const catalogue = this.opts.models?.();
+    const modelSwitch = hosted ? this.switches.get(hosted) : undefined;
+    if (catalogue === undefined || (hosted !== undefined && modelSwitch === undefined)) {
+      throw switchingUnavailable();
+    }
+    return {
+      start: catalogue.start,
+      entries: [...catalogue.entries],
+      active: modelSwitch?.current() ?? null,
+    };
+  }
+
+  /**
+   * `session/set_model` (docs/feat/model-switch.md D1/D2). SYNCHRONOUS from the
+   * idle check to the select: no turn or compaction can take the slot in
+   * between. A refusal or a throw leaves the selection as it was.
+   */
+  setModel(hosted: HostedSession, name: string | null): SetModelResult {
+    const catalogue = this.opts.models?.();
+    const modelSwitch = this.switches.get(hosted);
+    if (catalogue === undefined || modelSwitch === undefined) {
+      throw switchingUnavailable();
+    }
+    hosted.assertIdle();
+    if (name !== null && !catalogue.entries.some((entry) => entry.name === name)) {
+      const known = catalogue.entries.map((entry) => entry.name).join(", ");
+      throw new RpcError(
+        JsonRpcErrorCode.InvalidParams,
+        `no models entry ${JSON.stringify(name)} (${known ? `known: ${known}` : "no models defined"})`,
+      );
+    }
+    const { model, contextWindow } = modelSwitch.select(name);
+    return { active: modelSwitch.current(), model, contextWindow };
   }
 
   /**
@@ -1911,6 +1994,12 @@ export class SessionHost {
       ...((next.grants ?? reuse.grants) ? { grants: next.grants ?? reuse.grants } : {}),
       id,
     });
+    // The switch is the agent's: the new one's, or none.
+    if (next.modelSwitch) {
+      this.switches.set(hosted, next.modelSwitch);
+    } else {
+      this.switches.delete(hosted);
+    }
     return { applied: true, settings: next.settingsReport };
   }
 }

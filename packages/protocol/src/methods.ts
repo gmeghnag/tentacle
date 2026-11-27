@@ -90,6 +90,8 @@ import {
   JobKillResultSchema,
   JobOutputParamsSchema,
   JobOutputResultSchema,
+  ModelsParamsSchema,
+  ModelsResultSchema,
   OpenParamsSchema,
   OpenResultSchema,
   PinParamsSchema,
@@ -113,6 +115,8 @@ import {
   SetAutoAcceptResultSchema,
   SetCapabilityParamsSchema,
   SetCapabilityResultSchema,
+  SetModelParamsSchema,
+  SetModelResultSchema,
   SnapshotParamsSchema,
   SnapshotResultSchema,
   SubagentMessageParamsSchema,
@@ -161,6 +165,10 @@ export const Method = {
   Clear: "session/clear",
   /** Apply a laptop's settings to a live session, between turns (docs/feat/session-settings-apply.md). */
   UpdateSettings: "session/update_settings",
+  /** The models `/model` may switch a session to (docs/feat/model-switch.md). */
+  Models: "session/models",
+  /** Switch a live session's main model, between turns (docs/feat/model-switch.md). */
+  SetModel: "session/set_model",
   /** The session's auto-accept, on or off, for every client (docs/feat/session-auto-accept.md). */
   SetAutoAccept: "session/set_auto_accept",
   /** Turn one MCP server or skill on/off for the model in this session (docs/feat/session-capabilities.md). */
@@ -376,6 +384,8 @@ export const RequestSchemas: Readonly<Record<MethodName, RequestSchema>> = {
     params: UpdateSettingsParamsSchema,
     result: UpdateSettingsResultSchema,
   },
+  [Method.Models]: { params: ModelsParamsSchema, result: ModelsResultSchema },
+  [Method.SetModel]: { params: SetModelParamsSchema, result: SetModelResultSchema },
   [Method.SetAutoAccept]: {
     params: SetAutoAcceptParamsSchema,
     result: SetAutoAcceptResultSchema,

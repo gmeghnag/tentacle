@@ -78,6 +78,7 @@ import { stoppedNotice } from "./link-status.ts";
 import { linkOpenError, linkOpenStep } from "./links.ts";
 import { localSession } from "./local-session.ts";
 import { pickPalette } from "./mascot.ts";
+import { type SwitchedModel, screenContextTokens, viewModel } from "./model-switch.ts";
 import { type OpenPanel, panelClick, panelNoSwitchNotice, panelSwitchOp } from "./panel.ts";
 import { pasteTarget, sanitizePasted } from "./paste.ts";
 import { insertReply, orphanNotice } from "./permission-reply.ts";
@@ -229,7 +230,7 @@ export function App({
   modelLabel,
   cwd,
   version,
-  contextWindow = 128000,
+  contextWindow: startWindow = 128000,
   target,
   permissions,
   jobs,
@@ -271,7 +272,9 @@ export function App({
   // The name the screen SHOWS for the model: the daemon's own, when `connect`
   // learned it at `initialize`; `model` otherwise. Never read by a decision —
   // `model === "remote"` still means "the daemon's model" (the error hint).
-  const shownModel = modelLabel ?? model;
+  const startLabel = modelLabel ?? model;
+  // The last `/model` switch: shown (with its window) only on the session it moved.
+  const [switched, setSwitched] = useState<SwitchedModel | null>(null);
 
   const [size, setSize] = useState(() => ({
     columns: fixedColumns ?? stdout?.columns ?? 80,
@@ -428,7 +431,7 @@ export function App({
             {
               kind: "header",
               ...(version !== undefined ? { version } : {}),
-              model: shownModel,
+              model: startLabel,
               cwd,
               ...(home !== undefined ? { home } : {}),
               palette: pickPalette(),
@@ -691,6 +694,11 @@ export function App({
   if (sessionRef.current === null) {
     sessionRef.current = makeSession();
   }
+  const { label: shownModel, contextWindow } = viewModel(
+    { label: startLabel, contextWindow: startWindow },
+    switched,
+    sessionRef.current,
+  );
   // The current session's skills and when to ask again (`skills-sync.ts`); a
   // changed `/name` list re-renders the popup.
   const [, setSkillsVersion] = useState(0);
@@ -700,6 +708,13 @@ export function App({
   }
   const skillsSync = skillsSyncRef.current;
   const [contextOpen, setContextOpen] = useState<ContextOpen | null>(null);
+  // The ctx count on screen, read when a command asks (`/model`'s window warning).
+  const contextOpenRef = useRef(contextOpen);
+  contextOpenRef.current = contextOpen;
+  const contextTokens = useCallback(
+    () => screenContextTokens(stateRef.current, contextOpenRef.current),
+    [],
+  );
   const skills = useCallback(() => skillsSync.slash(), [skillsSync]);
   // The latest `handleCommand`: an unknown `/word` resolves again through it.
   const handleCommandRef = useRef<((raw: string, again?: boolean) => void) | null>(null);
@@ -1982,6 +1997,8 @@ export function App({
           capsRef,
           sendSwitch,
           browserStatusRef,
+          modelSwitched: setSwitched,
+          contextTokens,
         },
         raw,
         again,
@@ -1994,6 +2011,7 @@ export function App({
       sendSwitch,
       attachCommand,
       clipboard,
+      contextTokens,
       cwd,
       exit,
       flushNow,

@@ -22,6 +22,7 @@ import {
   type JobOutputResult,
   type JobRow,
   JsonRpcErrorCode,
+  type ModelsResult,
   type PreviewRow,
   type PreviewStopResult,
   type QueueState,
@@ -35,6 +36,7 @@ import {
   type SessionSkillsResult,
   type SessionToolsResult,
   type SessionUpdate,
+  type SetModelResult,
   type SubagentRow,
   type TurnEnd,
   type UpdateSettingsResult,
@@ -94,6 +96,9 @@ import {
   type WorkflowAction,
   type WorkflowSaveRequest,
 } from "./workflows.ts";
+
+/** `/model` on a pod session: its model is the laptop's, never its daemon's (AGENTS §7). */
+const MODEL_SWITCH_UNTRUSTED = "model switching is not available in a container session";
 
 /** Own turns remembered by `ownsTurn` after they end (the oldest fall off). */
 const MINTED_TURNS_MAX = 256;
@@ -1443,6 +1448,37 @@ export class RemoteSession implements SessionStreamListener {
     }
     const turnId = this.mintTurn();
     return this.client.workflow(sessionId, { ...params, sessionId, turnId });
+  }
+
+  /**
+   * `/model`'s list (docs/feat/model-switch.md). Only a daemon that decides its
+   * model by its own config is asked (`daemonWakes`: the worker, `connect`):
+   * a pod session rejects locally and sends nothing (AGENTS §7). Before the
+   * first message there is no id: the catalogue alone, nothing opened.
+   */
+  async models(): Promise<ModelsResult> {
+    if (!this.daemonWakes) {
+      throw new Error(MODEL_SWITCH_UNTRUSTED);
+    }
+    return this.client.models(this.id ?? undefined);
+  }
+
+  /**
+   * `/model <name>` (null: the start model), under the same trust rule. Before
+   * the first message it OPENS the session first (`ensureOpen`, the ONE path).
+   */
+  async setModel(name: string | null): Promise<SetModelResult> {
+    if (!this.daemonWakes) {
+      throw new Error(MODEL_SWITCH_UNTRUSTED);
+    }
+    if (this.id === null) {
+      await this.ensureOpen();
+    }
+    const sessionId = this.id;
+    if (sessionId === null) {
+      throw new Error("this session is not open yet");
+    }
+    return this.client.setModel(sessionId, name);
   }
 
   /**

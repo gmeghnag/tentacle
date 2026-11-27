@@ -13,6 +13,7 @@ import {
   type A2ACommandRunner,
   type A2ALookup,
   Agent,
+  type AgentConfig,
   type AgentType,
   type AskHooksTrust,
   BUILTIN_AGENT_TYPES,
@@ -135,9 +136,11 @@ import {
 import { logDaemonError } from "./daemon-log.ts";
 import { createHooksTrustResolver, fileTrustStore } from "./hooks-trust.ts";
 import {
+  type LiveModelSwitch,
   type ProviderFactory,
   configuredModelProvider,
   createModelProviders,
+  createModelSwitch,
   subagentModelResolver,
   tunnelSubagentResolver,
 } from "./model-provider.ts";
@@ -341,6 +344,8 @@ export interface WiredAgent {
   readonly workloadShells?: { dispose(): Promise<void> };
   /** The workflow driver (docs/feat/agent-workflows.md D3): only with `workflows: true`, never tunnelled. */
   readonly workflows?: WorkflowDriver;
+  /** The main model's switch (docs/feat/model-switch.md D1); never tunnelled. */
+  readonly modelSwitch?: LiveModelSwitch;
 }
 
 /**
@@ -586,6 +591,8 @@ export function workerSessionBuild(wired: WiredAgent) {
     agentJobs: wired.agentJobs,
     grants: wired.grants,
     ...(wired.workflows ? { workflows: wired.workflows } : {}),
+    // `/model` (docs/feat/model-switch.md): without it the host refuses the switch.
+    ...(wired.modelSwitch ? { modelSwitch: wired.modelSwitch } : {}),
     // The main thread's config (the laptop's): absent with `autoTitle` off.
     ...(wired.titleModel ? { titleModel: wired.titleModel } : {}),
   };
@@ -929,8 +936,20 @@ function readApprovedTarget(value: unknown): WorkflowContainerTarget | undefined
 }
 
 export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = {}): WiredAgent {
-  const model =
+  const startModel =
     options.modelOverride ?? configuredModelProvider(config, config.model, options.createProvider);
+  // The `models` entries' providers: the sub-agents' and the switch's.
+  const entryProviders = createModelProviders(config, options.createProvider);
+  // `/model` (docs/feat/model-switch.md D1): everything below that calls the
+  // main model holds the switch's provider. A tunnelled (pod) agent has none:
+  // its model is the laptop's (AGENTS §7).
+  const modelSwitch =
+    options.modelOverride === undefined
+      ? createModelSwitch(config, startModel, entryProviders)
+      : undefined;
+  const model = modelSwitch?.provider ?? startModel;
+  // Read at each use: the selected model's window.
+  const mainWindow = () => modelSwitch?.contextWindow() ?? config.contextWindow;
   const outputs = options.toolOutput ?? toolOutputStore();
   const toolOutput = outputs.forProject(config.cwd);
   const env = new HostExecution({
@@ -1051,15 +1070,23 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
 
   // The model is told how full its context is (docs/feat/context-awareness.md),
   // on `model.contextWindow` (a pod daemon's is the laptop's, carried).
-  // Each sub-agent counts its own history on the same window.
+  // Each sub-agent counts its own history on the same window. A getter, so a
+  // `/model` switch moves it (a default child holds this same object).
   const contextAwareness = config.contextAwareness.enabled
-    ? { window: config.contextWindow, stepPercent: config.contextAwareness.stepPercent }
+    ? {
+        get window() {
+          return mainWindow();
+        },
+        stepPercent: config.contextAwareness.stepPercent,
+      }
     : undefined;
   // Smart compaction (docs/feat/smart-compaction.md) on the same window; each
   // sub-agent prunes its own history. Off unless `contextPrune.enabled`.
   const contextPrune = config.contextPrune.enabled
     ? {
-        window: config.contextWindow,
+        get window() {
+          return mainWindow();
+        },
         pruneAtPercent: config.contextPrune.pruneAtPercent,
         minGainPercent: config.contextPrune.minGainPercent,
         keepRecentRounds: config.contextPrune.keepRecentRounds,
@@ -1141,7 +1168,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       );
     }
     const modelFor = !tunnelled
-      ? subagentModelResolver(config, createModelProviders(config, options.createProvider))
+      ? subagentModelResolver(config, entryProviders)
       : published && options.namedModelOverride
         ? tunnelSubagentResolver(published, options.namedModelOverride)
         : undefined;
@@ -1538,12 +1565,8 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     }
   }
 
-  const agent = new Agent({
+  const agentConfig: AgentConfig = {
     model,
-    // The id this provider was built for, when THIS process knows it: a pod's
-    // main model is a tunnel to the laptop's (AGENTS §7), so a tunnelled agent
-    // leaves it out and nobody invents one (docs/feat/subagent-panel.md, M2).
-    ...(options.modelOverride === undefined ? { modelId: config.model } : {}),
     tools,
     env,
     jobs,
@@ -1587,7 +1610,18 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
       disabledTools,
       disabledSkills: builtinDefaultOff(config.skills, config.builtinSkillsEnabled ?? {}),
     },
-  });
+  };
+  // The id this provider was built for, when THIS process knows it: a pod's
+  // main model is a tunnel to the laptop's (AGENTS §7), so a tunnelled agent
+  // has none and nobody invents one (docs/feat/subagent-panel.md, M2). Defined
+  // as a getter, never spread: it follows a `/model` switch.
+  if (modelSwitch !== undefined) {
+    Object.defineProperty(agentConfig, "modelId", {
+      enumerable: true,
+      get: () => modelSwitch.modelId(),
+    });
+  }
+  const agent = new Agent(agentConfig);
   // Names the session after its first exchange (docs/feat/session-titles.md),
   // only with `model.autoTitle` (opt-in; off → no title model, no call):
   // `model.titleModel` on the same endpoint, else the main model. Over the pod
@@ -1609,6 +1643,7 @@ export function buildAgent(config: TentacleConfig, options: BuildAgentOptions = 
     ...(titleModel ? { titleModel } : {}),
     ...(containers !== undefined ? { workloadShells: containers } : {}),
     ...(workflows !== undefined ? { workflows } : {}),
+    ...(modelSwitch !== undefined ? { modelSwitch } : {}),
   };
 }
 

@@ -15,7 +15,9 @@ import type {
   DocumentContent,
   JobOutputResult,
   JobRow,
+  ModelsResult,
   PreviewRow,
+  SetModelResult,
   WorkflowApproveResult,
   WorkflowCatalogueResult,
   WorkflowDeleteResult,
@@ -293,6 +295,14 @@ export interface SessionController {
    * daemon stored. Optional: absent where no daemon owns the session.
    */
   rename?(title: string): Promise<string>;
+  /**
+   * `/model` (docs/feat/model-switch.md): the models this session can run on,
+   * and its selection. Rejects where switching is refused (a container
+   * session, an older daemon). Optional, with `setModel`.
+   */
+  models?(): Promise<ModelsResult>;
+  /** Switch the session's main model (null: the start model), between turns. */
+  setModel?(name: string | null): Promise<SetModelResult>;
   /**
    * Subscribe to MY queued rows coming back from the daemon (a turn left them
    * undrained, docs/feat/queued-broadcast.md): each row once, with my own

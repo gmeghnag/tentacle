@@ -244,7 +244,7 @@ describe("S0 frame set", () => {
         /rename    rename this session (the title every device shows)
         /sessions  list this daemon's sessions and switch
         /close     end this session and quit
-        /model     show the active model
+        /model     show or switch the model (/model <name>, /model default)
         /move      move this session to a container, or back to local
       … m ─
       ❯ /

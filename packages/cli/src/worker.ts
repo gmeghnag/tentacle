@@ -15,7 +15,7 @@
  * used to report MCP connection errors back to the main thread for display;
  * `messagePortChannel` ignores non-string frames, so they don't reach the RPC.
  */
-import type { TentacleConfig } from "@tentacle/config";
+import { type TentacleConfig, modelCatalogue } from "@tentacle/config";
 import type {
   AppsLink,
   ArtifactSink,
@@ -212,6 +212,8 @@ export function workerSessionHost(
     // The client's own build: no skew possible, named for completeness.
     identity: { tentacle: deps.version, kind: "worker" },
     newSessionSkills: () => skillScan.newSession(),
+    // `/model` (docs/feat/model-switch.md): this host runs its own config's model.
+    models: () => modelCatalogue(config),
     ...(deps.mcpStatus ? { mcpStatus: deps.mcpStatus } : {}),
     // A fresh session's context count lacks the MCP tools until they connect:
     // shown as an estimate (`~`) till then (docs/feat/tui-target-badge.md).
