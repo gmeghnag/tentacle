@@ -78,6 +78,9 @@ Second fact the shape stands on: **a skill body is read from a real file through
 
 - **Q1 — the lasting way to turn a built-in ON.** **Recommendation: a map `skills.builtin: { "tentacle": true }`** (absent/empty = all off), the same shape as `tools.enabled` (`schema.ts:849`, `key-docs.ts:1757-1775`): each leaf is a boolean, so it is settable from the shell with `tentacle config set skills.builtin.tentacle true`, per profile, and an unknown name is a config error (names are static per build, as for tools). Alternative: the list `skills.builtin: ["tentacle"]` from the eval — same behaviour, but adding one skill means rewriting the whole array. Not recommended: a `/skills` action that writes the config file from the TUI (a new write path for one convenience).
 
+
+**Owner answer to Q1 (2026-11-26 ~21:30):** OK — `skills.builtin: { "<name>": true }`, empty = all off; skill names `tentacle`, `tentacle-a2a`, `tentacle-workflows`. *(recorded by the orchestrator after the merge; execution was already following it)*
+
 ### Design
 
 1. **Assets (config).** `packages/config/builtin-skills/{tentacle,tentacle-a2a,tentacle-workflows}/SKILL.md` + `tentacle-a2a/references/agent-card.md`. `packages/config/src/builtin-skills.ts` imports each as text and exports `BUILTIN_SKILL_FILES: Readonly<Record<string, Readonly<Record<string, string>>>>` (name → relPath → text) and `builtinSkillsHash()`. `BUILTIN_SKILL_NAMES` lives in `packages/core/src/builtin-skills.ts` (pure, tiny; the daemon needs it for D4 and core is already its dependency, `hosted-session.ts:105`), with `builtinDefaultOff(skills: readonly {name, builtin?}[], enabled: Record<string, boolean>): string[]` — the winners with `builtin` not set `true` in `enabled`, sorted.
