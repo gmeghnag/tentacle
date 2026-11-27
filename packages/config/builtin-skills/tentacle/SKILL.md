@@ -67,6 +67,7 @@ that starts with one as `tentacle -- <prompt>`.
 - `/artifacts`: list the artifacts the model presented here
 - `/schedule`: the wakes this session will be woken by — and delete one
 - `/apps`: the web pages this session publishes — and stop one
+- `/previews`: the containers this session shows — copy a link or stop one
 - `/workflow`: the workflow run in this session — run, stop, resume, re-run a step
 - `/agents`: background sub-agents and jobs: select, open, stop (ctrl+t)
 - `/settings`: the session's settings vs this terminal's (/settings sync to use yours)

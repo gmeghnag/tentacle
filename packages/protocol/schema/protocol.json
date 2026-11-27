@@ -6420,6 +6420,10 @@
     "SkillListEntry": {
       "additionalProperties": true,
       "properties": {
+        "builtin": {
+          "const": true,
+          "type": "boolean"
+        },
         "description": {
           "maxLength": 1024,
           "minLength": 1,
