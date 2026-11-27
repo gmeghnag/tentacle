@@ -1,1 +1,0 @@
-- **Built-in skills (off by default).** tentacle now ships three skills, `tentacle` (commands and how-tos), `tentacle-a2a` (A2A and Agent Cards) and `tentacle-workflows`: switch one on for a session with `/skills`, load it once with `/<name>`, or keep it on with `tentacle config set skills.builtin.<name> true`.

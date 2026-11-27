@@ -8,6 +8,21 @@ those.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-27
+
+### Added
+
+- **Built-in skills (off by default).** tentacle now ships three skills, `tentacle` (commands and how-tos), `tentacle-a2a` (A2A and Agent Cards) and `tentacle-workflows`: switch one on for a session with `/skills`, load it once with `/<name>`, or keep it on with `tentacle config set skills.builtin.<name> true`.
+- **Container previews on `serve` (groundwork, off by default).** With `previews.enabled`, the agent can ask to show a running Docker or Podman container's loopback-published web port to your paired devices: you approve each one, no public URL, nothing persisted. The phone viewer comes in a later release.
+- **HEIC/HEIF pictures work like PNG/JPEG on macOS.** `fs_read` of an iPhone `.heic` shows the picture to a vision model (and `image_view` zooms into it), and an attached HEIC is converted to JPEG; on a host without macOS's decoder (Linux `serve`, or a Linux terminal) the read or attach is refused with a sentence saying so.
+- **Local status on the relay and the apps host.** Each answers `GET /__status` on a separate loopback-only port (4101 / 4201, `--status-port`) with aggregate counters and a 24 h per-minute history.
+- **A container's web port on the internet (OFF by default).** With `previews.enabled` and the new `previews.links`, a `serve` lets the agent propose a running container's loopback web port at `https://<id>.apps.tentacle.so/` (`container_share`), through a tunnel `serve` dials out. You are asked every time and choose who may open it: whoever has a secret link (the default) or anyone with the address (public). `/previews` lists them, copies a link and stops one; it lasts while the session is open. HTTP/1.1 and WebSocket only; TLS ends at the apps host, which also needs the matching update.
+
+### Fixed
+
+- **A session no longer opens empty on the iPhone.** Reaching a session that was already followed, for example with "Open the session" on a workflow run, showed an empty chat until you switched away and back; its history now always appears, and "Open the session" goes back to the screen you already had.
+- **Workflow run screen on iPhone.** The elapsed time now ticks every second, reopening a step always shows it, and Back is no longer ignored while the run updates.
+
 ## [0.8.0] - 2026-11-26
 
 ### Added

@@ -1,1 +1,0 @@
-- **Container previews on `serve` (groundwork, off by default).** With `previews.enabled`, the agent can ask to show a running Docker or Podman container's loopback-published web port to your paired devices: you approve each one, no public URL, nothing persisted. The phone viewer comes in a later release.

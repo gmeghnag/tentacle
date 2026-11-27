@@ -1,1 +1,0 @@
-- **Workflow run screen on iPhone.** The elapsed time now ticks every second, reopening a step always shows it, and Back is no longer ignored while the run updates.

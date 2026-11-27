@@ -1,1 +1,0 @@
-- **A session no longer opens empty on the iPhone.** Reaching a session that was already followed, for example with "Open the session" on a workflow run, showed an empty chat until you switched away and back; its history now always appears, and "Open the session" goes back to the screen you already had.

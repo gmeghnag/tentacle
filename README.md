@@ -16,7 +16,7 @@
   <img alt="engines" src="https://img.shields.io/badge/engines-Kubernetes%20%C2%B7%20Docker%20%C2%B7%20Podman-555">
 <!-- quality-badges:start -->
   <img alt="coverage 86%" src="https://img.shields.io/badge/coverage-86%25-green">
-  <img alt="tests: 20,911 passing" src="https://img.shields.io/badge/tests-20%2C911%20passing-brightgreen">
+  <img alt="tests: 21,342 passing" src="https://img.shields.io/badge/tests-21%2C342%20passing-brightgreen">
 <!-- quality-badges:end -->
 </p>
 
