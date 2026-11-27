@@ -388,7 +388,58 @@ six touched packages. Typecheck and the full gate: not run (orchestrator).
 
 ## Review
 
-*— <model-id>, <date>*
+*— claude-opus-5-5, 2026-11-27* (fresh context; same model as the planner,
+different from the executor DeepSeek — shared plan blind spots possible)
+
+**Verdict: APPROVE** — no HIGH/MEDIUM findings.
+
+**Gate.** `bun run lint` clean · `bun run typecheck` clean · touched files 97
+pass / 0 fail · full `bun run test`: 21399 pass / 0 fail / 5 skip (runs 2–3).
+Run 1 had 1 fail + 1 error that did not come back in two re-runs (flaky,
+not identified: the parallel runner did not print the name). The diff adds no
+skips, so the 5 skips (vs the 3 opt-in skips in §6) are already on main.
+
+**Mutation (all FAIL, all reverted, `git status` clean):** window getter →
+static (`wiring.ts` contextPrune) · `assertIdle` removed (`session-host.ts`
+setModel) · `daemonWakes` guard removed (`remote-session.ts` setModel) · main
+`apiKey` kept (`models.ts` withMainEntry) · `id` getter → `base.id`
+(`model-provider.ts`) · switch built when tunnelled (`wiring.ts`).
+
+**Premises checked:** Agent stores its config by reference, no spread
+(`agent.ts:977`), so the `modelId`/`window` getters stay live ✔; a sub-agent
+copies the window only when it has its own (`subagent.ts:594-601`) ✔; an
+inherited entry carries the main resolved key (`load.ts:776-778`), so
+`withMainEntry` keeps it ✔; the worker gets the whole config including
+`mainEntry` (`worker-bootstrap.ts:10`) ✔; `createServeAgent` returns
+`buildAgent`'s `WiredAgent`, so `modelSwitch` reaches serve's host ✔;
+`daemonWakes` is off unless set (`remote-client.ts:1203`; only the worker and
+`connect` set it) ✔.
+
+**Attacks tried:** (1) a settings sync rebuilding the agent and dropping the
+selection → `updateSettings` is only called with `carried` settings
+(`engine-runtime.ts`, pods only), where there is no switch: nothing found.
+(2) The main key reaching an entry's endpoint through `apiKeyCommand` → it is
+only read by the workspace-mount hider: nothing found. (3) `/clear` or
+`/sessions` leaving a stale label → `/clear` keeps the same controller and
+agent; a swap makes a new controller, and `viewModel` resets: holds. (4) A
+switch racing a prompt → the idle check and the select run synchronously
+with no await (§7 "don't serialize the peer" respected). (5) Pod: refused on
+the client before any frame is sent, and the daemon refuses too (no
+catalogue, no switch).
+
+**End-to-end:** `cli/test/model-switch.test.ts:277` drives the real
+`createLocalRuntime` → `RemoteClient` → `Connection` → `workerSessionHost`
+path (list, switch before the first message, send).
+
+**Accepted debt, below MEDIUM:** a `connect` TUI that comes back to a `serve`
+session that is still live with a selection shows the start label and window,
+while the daemon runs the entry. This is D4 by design. It is cheap to close
+later: on a new controller, read `models().active`.
+
+**Executor behaviour:** the diff follows the plan; the two drifts (`/clear` in
+place, `viewModel` keyed on the controller) are recorded, and both are
+correct. Tests have assertions that fail under mutation, not just correct
+imports.
 
 Debt to red-team (known, deliberate): D3 (not persisted), D4 (no update kind:
 other clients' labels stale), hooks keep the start model id
