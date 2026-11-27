@@ -6,14 +6,17 @@
  * docs/feat/skills-core.md.
  */
 import type { Dirent } from "node:fs";
-import { readFile, readdir, realpath, stat } from "node:fs/promises";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
+import { builtinSkillEntries, builtinSkillsHash } from "./builtin-skills.ts";
 import { SKILL_FILENAME, type SkillInfo, type SkillScope, parseSkillManifest } from "./skills.ts";
 
 /** A directory holding skill directories, and the scope its skills get. */
 export interface SkillRoot {
   readonly path: string;
   readonly scope: SkillScope;
+  /** The materialized skills that ship inside tentacle. */
+  readonly builtin?: true;
 }
 
 /** Bounds: skill dirs per root, files listed per skill, entries visited, depth. */
@@ -88,6 +91,47 @@ export async function skillRoots(
     }
   }
   return unique;
+}
+
+/**
+ * Write the embedded skills to `<configDir>/builtin-skills/<hash>/`, each file
+ * compared first and (re)written atomically (temp + rename) when missing or
+ * different — so an edit or a deletion is undone and an unchanged disk is not
+ * written. Best-effort: any failure is one diagnostic and no root. Other hash
+ * dirs are left in place (another build may be using one).
+ */
+export async function materializeBuiltinSkills(
+  configDir: string,
+): Promise<{ root?: string; diagnostics: string[] }> {
+  const root = join(configDir, "builtin-skills", builtinSkillsHash());
+  try {
+    for (const [path, text] of builtinSkillEntries()) {
+      await writeIfDifferent(join(root, ...path.split("/")), text);
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return { diagnostics: [`built-in skills unavailable: cannot write ${root}: ${detail}`] };
+  }
+  return { root, diagnostics: [] };
+}
+
+async function writeIfDifferent(file: string, text: string): Promise<void> {
+  try {
+    if ((await readFile(file, "utf8")) === text) {
+      return;
+    }
+  } catch {
+    // Missing (or unreadable): the write below decides.
+  }
+  await mkdir(dirname(file), { recursive: true });
+  // A dot name: never listed as a bundled file, should one be left behind.
+  const temp = join(dirname(file), `.${basename(file)}.${crypto.randomUUID()}.tmp`);
+  try {
+    await writeFile(temp, text, "utf8");
+    await rename(temp, file);
+  } finally {
+    await rm(temp, { force: true });
+  }
 }
 
 /** List a skill's bundled files (relative paths), bounded and loop-safe. */
@@ -203,6 +247,7 @@ export async function scanSkills(
         filesTruncated: truncated,
         modelInvocable: parsed.modelInvocable,
         userInvocable: parsed.userInvocable,
+        ...(root.builtin ? { builtin: true as const } : {}),
       });
     }
   }

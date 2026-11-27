@@ -10,12 +10,17 @@ import {
   type ModelProvider,
   PermissionBroker,
   type StreamEvent,
+  isBuiltinSkillName,
 } from "@tentacle/core";
 import { Connection, LogSessionStore, SessionHost } from "@tentacle/daemon";
 import { createChannelPair } from "@tentacle/transport";
 import { createLocalRuntime } from "../src/local-runtime.ts";
 import { SessionSaver } from "../src/session-saver.ts";
 import { buildAgent, createSkillScan } from "../src/wiring.ts";
+
+/** The `/name` names, without the skills that ship inside tentacle. */
+const own = (slash: readonly { readonly name: string }[] | undefined): string[] | undefined =>
+  slash?.map((s) => s.name).filter((name) => !isBuiltinSkillName(name));
 
 // docs/feat/skills-hot-reload.md, end to end over real files and real
 // objects (the `buildAgent` a daemon uses, `SessionHost` + `Connection`, the
@@ -104,8 +109,10 @@ describe("skills follow the disk (T4: real files, daemon + client)", () => {
     await writeSkill("beta");
 
     const view = await controller.skills?.();
-    expect(view?.slash.map((s) => s.name)).toEqual(["alpha", "beta"]);
-    expect(view?.skills.map((s) => [s.name, s.model, s.modelAfterReset])).toEqual([
+    expect(own(view?.slash)).toEqual(["alpha", "beta"]);
+    expect(
+      view?.skills.filter((s) => !s.builtin).map((s) => [s.name, s.model, s.modelAfterReset]),
+    ).toEqual([
       ["alpha", true, undefined],
       ["beta", false, true],
     ]);
@@ -134,7 +141,7 @@ describe("skills follow the disk (T4: real files, daemon + client)", () => {
     await writeSkill("gamma");
     await rm(join(root(), "alpha"), { recursive: true, force: true });
     const view = await controller.skills?.();
-    expect(view?.slash.map((s) => s.name)).toEqual(["gamma"]);
+    expect(own(view?.slash)).toEqual(["gamma"]);
     expect(view?.problems).toContain("alpha: removed — the model keeps it until a context reset");
 
     const events = await drain(controller.send("/gamma now", undefined, { skill: "gamma" }));

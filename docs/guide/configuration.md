@@ -94,6 +94,7 @@ card cannot disagree; the long notes a row cannot hold are on the card.
 | `schedules.promptMaxChars` | — | 2000 | The longest prompt a scheduled wake may carry (1–20000). |
 | `sessionHop.tool` | `TENTACLE_SESSION_HOP_TOOL` | false | Offer the agent `move_session` (OFF by default): it may propose moving this session to another target. |
 | `sessions.keepSuperseded` | — | — | Keep the history a compaction or a `context_reset` replaced in the session file. |
+| `skills.builtin.*` | — | — | Whether this built-in skill starts on. |
 | `subagents.agentTaskDescription` | — | — | Replaces the `agent_task` description (max 4096 bytes; the sub-agent types are appended). |
 | `subagents.agentTaskDescriptionFile` | — | — | The same description, read once at start from a file (config dir or absolute; not both). |
 | `subagents.enabled` | `TENTACLE_SUBAGENTS` | true | Whether the `agent_task` sub-agent tool is offered. |

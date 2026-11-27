@@ -27,6 +27,11 @@ export const SkillListEntrySchema = z.object({
   description: line(1024),
   /** `project` skills are repo-supplied; `user` ones come from the user's dirs. */
   scope: z.enum(["project", "user"]),
+  /**
+   * It ships inside tentacle (docs/feat/builtin-skills.md). Its scope stays
+   * `user` (scope is the trust axis: not repo-supplied).
+   */
+  builtin: z.literal(true).optional(),
   /** Offered to the user as `/name`. */
   user: z.boolean(),
   /** Offered to the model in this session now (its catalog and the `skill` tool). */

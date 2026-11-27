@@ -5,6 +5,36 @@
  * `skills-scan.ts`. Design: docs/feat/skills-core.md.
  */
 
+import { BUILTIN_SKILL_NAMES, isBuiltinSkillName } from "@tentacle/core";
+import { applyProfile } from "./profile.ts";
+import type { FileConfig } from "./schema.ts";
+
+/**
+ * One message per unknown name in `skills.builtin`, in the base and each
+ * profile's MERGED view (one the base already has is reported once). Called by
+ * the file schema, so `loadConfig` and `config set` both refuse it.
+ */
+export function builtinSkillIssues(file: FileConfig): string[] {
+  const issuesOf = (profile: string | undefined): string[] => {
+    const applied = applyProfile(file, profile);
+    return Object.keys((applied.ok && applied.config.skills?.builtin) || {})
+      .filter((name) => !isBuiltinSkillName(name))
+      .map(
+        (name) =>
+          `skills.builtin.${name}: unknown built-in skill (built-in: ${BUILTIN_SKILL_NAMES.join(", ")})`,
+      );
+  };
+  const base = issuesOf(undefined);
+  return [
+    ...base,
+    ...Object.keys(file.profiles ?? {}).flatMap((name) =>
+      issuesOf(name)
+        .filter((issue) => !base.includes(issue))
+        .map((issue) => `profiles.${name}: ${issue}`),
+    ),
+  ];
+}
+
 /** File name of a skill's manifest inside its directory. */
 export const SKILL_FILENAME = "SKILL.md";
 
@@ -44,6 +74,11 @@ export interface SkillInfo {
   readonly modelInvocable: boolean;
   /** False for `user-invocable: false`: not offered as a `/name` command. */
   readonly userInvocable: boolean;
+  /**
+   * It ships inside tentacle (docs/feat/builtin-skills.md), found in the
+   * materialized built-in root; off in a session unless turned on.
+   */
+  readonly builtin?: true;
 }
 
 /** The frontmatter block and the Markdown body after it. */

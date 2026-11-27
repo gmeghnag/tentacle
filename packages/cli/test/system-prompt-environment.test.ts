@@ -57,7 +57,9 @@ async function load(file: Record<string, unknown>, profile?: string): Promise<Te
   await mkdir(cwd, { recursive: true });
   await writeFile(join(configDir, "custom.md"), "You are a custom agent.\n");
   await writeFile(join(configDir, "config.jsonc"), JSON.stringify(file));
-  return loadConfig({ configDir, cwd, env: {}, ...(profile ? { profile } : {}) });
+  // Skills off: these heads are the prompt and the block (the built-in skills add a catalog).
+  const env = { TENTACLE_NO_SKILLS: "1" };
+  return loadConfig({ configDir, cwd, env, ...(profile ? { profile } : {}) });
 }
 
 /** The system head of the first request of one turn. */

@@ -5,7 +5,8 @@
  *
  * Rules: a top-level setting in the profile wins; `subagents`/`tools`/
  * `contextAwareness`/`contextReset`/`contextPrune`/`schedules`/`mount`/`detach`/`tui`/`beta` merge per key
- * (and `tools.enabled` per key inside, docs/feat/tool-toggles.md); `model` merges per key EXCEPT the connection group (provider, baseURL,
+ * (and `tools.enabled` per key inside, docs/feat/tool-toggles.md; `skills`
+ * likewise, with `skills.builtin` per name); `model` merges per key EXCEPT the connection group (provider, baseURL,
  * apiKey, apiKeyCommand), which moves as a unit, so a key is never sent to an
  * endpoint it was not configured for; `mcpServers` merge by name (a definition
  * is replaced whole, `null` removes it); `models` and `subagents.types` merge by
@@ -83,9 +84,20 @@ export function applyProfile(file: FileConfig, name: string | undefined): Profil
     detach,
     tui,
     beta,
+    skills,
     ...scalars
   } = profile;
   const config: FileConfig = { ...base, ...scalars };
+  if (skills) {
+    // `skills.builtin` merges per name, as `tools.enabled` does.
+    config.skills = {
+      ...base.skills,
+      ...skills,
+      ...(base.skills?.builtin !== undefined || skills.builtin !== undefined
+        ? { builtin: { ...base.skills?.builtin, ...skills.builtin } }
+        : {}),
+    };
+  }
   if (mount) {
     config.mount = { ...base.mount, ...mount };
   }

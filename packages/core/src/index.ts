@@ -50,6 +50,7 @@ export * from "./jpeg-decode.ts";
 export * from "./heic.ts";
 export * from "./voice/index.ts";
 export * from "./tool-groups.ts";
+export * from "./builtin-skills.ts";
 export * from "./project-paths.ts";
 export * from "./workflow-spec.ts";
 export * from "./workflow-yaml.ts";

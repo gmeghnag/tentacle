@@ -22,7 +22,13 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
-const baseEnv = (): Record<string, string | undefined> => ({ HOME: dir });
+// Skills off outside the skills tests: these prompts are the identity and AGENTS.md
+// alone (the built-in skills would append a catalog, docs/feat/builtin-skills.md).
+const baseEnv = (): Record<string, string | undefined> => ({ HOME: dir, TENTACLE_NO_SKILLS: "1" });
+const skillEnv = (): Record<string, string | undefined> => ({ HOME: dir });
+/** The skills found on disk, without the ones that ship inside tentacle. */
+const own = <T extends { readonly builtin?: true }>(skills: readonly T[]): T[] =>
+  skills.filter((s) => s.builtin !== true);
 
 describe("loadConfig scaffolding", () => {
   test("creates config.jsonc and PROMPT.md on first run", async () => {
@@ -459,8 +465,8 @@ describe("loadConfig skills discovery", () => {
     await writeSkill(join(dir, ".agents", "skills"), "cfg", "name: cfg\ndescription: home copy");
     await writeSkill(join(dir, ".agents", "skills"), "home", "name: home\ndescription: h");
 
-    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: sub });
-    expect(cfg.skills.map((s) => [s.name, s.description, s.scope])).toEqual([
+    const cfg = await loadConfig({ env: skillEnv(), configDir, cwd: sub });
+    expect(own(cfg.skills).map((s) => [s.name, s.description, s.scope])).toEqual([
       ["dup", "nearest", "project"],
       ["root-only", "r", "project"],
       ["cfg", "c", "user"],
@@ -480,8 +486,8 @@ describe("loadConfig skills discovery", () => {
     const work = join(dir, "notes");
     await mkdir(work, { recursive: true });
     await writeSkill(join(dir, ".agents", "skills"), "home", "name: home\ndescription: h");
-    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: work });
-    expect(cfg.skills.map((s) => [s.name, s.scope])).toEqual([["home", "user"]]);
+    const cfg = await loadConfig({ env: skillEnv(), configDir, cwd: work });
+    expect(own(cfg.skills).map((s) => [s.name, s.scope])).toEqual([["home", "user"]]);
     expect(cfg.skillDiagnostics).toEqual([]);
   });
 
@@ -490,7 +496,7 @@ describe("loadConfig skills discovery", () => {
     await mkdir(join(repo, ".git"), { recursive: true });
     await writeFile(join(repo, AGENTS_FILENAME), "repo rules");
     await writeSkill(join(repo, ".agents", "skills"), "a", "name: a\ndescription: d");
-    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: repo });
+    const cfg = await loadConfig({ env: skillEnv(), configDir, cwd: repo });
     const rules = cfg.systemPrompt.indexOf("repo rules");
     const skills = cfg.systemPrompt.indexOf("# Skills");
     expect(rules).toBeGreaterThan(0);
@@ -499,28 +505,36 @@ describe("loadConfig skills discovery", () => {
 
   test("no skills → prompt byte-identical to the no-skills prompt", async () => {
     await writeFile(join(dir, "p.md"), "identity");
-    const env = { ...baseEnv(), TENTACLE_SYSTEM_PROMPT: "identity\n" };
+    const env = { ...skillEnv(), TENTACLE_SYSTEM_PROMPT: "identity\n" };
     const cfg = await loadConfig({ env, configDir, cwd: dir });
-    expect(cfg.systemPrompt).toBe("identity\n");
-    expect(cfg.skills).toEqual([]);
+    // Only the built-ins are cataloged (a session's switches then project them
+    // out): with none of one's own, nothing else follows the identity.
+    expect(own(cfg.skills)).toEqual([]);
+    expect(cfg.systemPrompt.startsWith("identity\n\n# Skills\n")).toBe(true);
+    const off = await loadConfig({
+      env: { ...env, TENTACLE_NO_SKILLS: "1" },
+      configDir,
+      cwd: dir,
+    });
+    expect(off.systemPrompt).toBe("identity\n");
   });
 
   test("off switch: file `loadSkills: false`, env TENTACLE_NO_SKILLS (env wins both ways)", async () => {
     await writeSkill(join(dir, ".agents", "skills"), "home", "name: home\ndescription: h");
     await mkdir(configDir, { recursive: true });
     await writeFile(join(configDir, CONFIG_FILENAME), `{ "loadSkills": false }`);
-    const off = await loadConfig({ env: baseEnv(), configDir, cwd: dir });
+    const off = await loadConfig({ env: skillEnv(), configDir, cwd: dir });
     expect(off.skills).toEqual([]);
     expect(off.systemPrompt).not.toContain("# Skills");
     const forcedOn = await loadConfig({
-      env: { ...baseEnv(), TENTACLE_NO_SKILLS: "0" },
+      env: { ...skillEnv(), TENTACLE_NO_SKILLS: "0" },
       configDir,
       cwd: dir,
     });
-    expect(forcedOn.skills.map((s) => s.name)).toEqual(["home"]);
+    expect(own(forcedOn.skills).map((s) => s.name)).toEqual(["home"]);
     await writeFile(join(configDir, CONFIG_FILENAME), "{}");
     const envOff = await loadConfig({
-      env: { ...baseEnv(), TENTACLE_NO_SKILLS: "1" },
+      env: { ...skillEnv(), TENTACLE_NO_SKILLS: "1" },
       configDir,
       cwd: dir,
     });
@@ -538,9 +552,9 @@ describe("loadConfig skills discovery", () => {
     );
     await mkdir(join(root, "not-a-skill"), { recursive: true }); // no SKILL.md: silent
     await writeFile(join(root, "stray.txt"), "x"); // a file, not a dir: silent
-    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: dir });
-    expect(cfg.skills.map((s) => [s.name, s.modelInvocable])).toEqual([["hidden", false]]);
-    expect(cfg.systemPrompt).not.toContain("# Skills");
+    const cfg = await loadConfig({ env: skillEnv(), configDir, cwd: dir });
+    expect(own(cfg.skills).map((s) => [s.name, s.modelInvocable])).toEqual([["hidden", false]]);
+    expect(cfg.systemPrompt).not.toContain("<name>hidden</name>");
     expect(cfg.skillDiagnostics.length).toBe(2);
     expect(cfg.skillDiagnostics[0]).toContain("bad-yaml/SKILL.md: unparseable frontmatter");
     expect(cfg.skillDiagnostics[1]).toContain("no-desc/SKILL.md: no description");
@@ -556,7 +570,7 @@ describe("loadConfig skills discovery", () => {
     await writeFile(join(sd, "references.md"), "x");
     await writeFile(join(sd, ".manifest.json"), "x");
     await writeFile(join(sd, "node_modules", "x", "i.js"), "x");
-    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: dir });
+    const cfg = await loadConfig({ env: skillEnv(), configDir, cwd: dir });
     expect(cfg.skills[0]?.files).toEqual(["references.md", "scripts/run.sh"]);
     expect(cfg.skills[0]?.filesTruncated).toBe(false);
     expect(cfg.skills[0]?.dir).toBe(sd);
@@ -568,7 +582,7 @@ describe("loadConfig skills discovery", () => {
     for (let i = 0; i < 60; i++) {
       await writeFile(join(big, `f${String(i).padStart(2, "0")}.txt`), "x");
     }
-    const cfg2 = await loadConfig({ env: baseEnv(), configDir, cwd: dir });
+    const cfg2 = await loadConfig({ env: skillEnv(), configDir, cwd: dir });
     const b = cfg2.skills.find((s) => s.name === "big");
     expect(b?.files.length).toBe(50);
     expect(b?.filesTruncated).toBe(true);
@@ -580,8 +594,8 @@ describe("loadConfig skills discovery", () => {
     await writeSkill(join(dir, "elsewhere"), "linked", "name: linked\ndescription: d");
     await mkdir(join(dir, ".agents", "skills"), { recursive: true });
     await symlink(real, join(dir, ".agents", "skills", "linked"));
-    const cfg = await loadConfig({ env: baseEnv(), configDir, cwd: dir });
-    expect(cfg.skills.map((s) => s.name)).toEqual(["linked"]);
+    const cfg = await loadConfig({ env: skillEnv(), configDir, cwd: dir });
+    expect(own(cfg.skills).map((s) => s.name)).toEqual(["linked"]);
   });
 });
 

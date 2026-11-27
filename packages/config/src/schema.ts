@@ -7,6 +7,7 @@
  */
 import { z } from "zod";
 import { modelRefIssues } from "./models.ts";
+import { builtinSkillIssues } from "./skills.ts";
 import { toolEnabledIssues } from "./tool-groups.ts";
 
 /**
@@ -348,6 +349,19 @@ const settingsShape = {
    * disable.
    */
   loadSkills: z.boolean().optional(),
+  /** Agent Skills settings. */
+  skills: z
+    .object({
+      /**
+       * Which of the skills that ship inside tentacle start ON:
+       * `{ "tentacle": true }` (docs/feat/builtin-skills.md). Unset or `false`
+       * = off in every new session (`/skills` switches one for the session). An
+       * unknown name is an error. A profile's map merges per key over the base's.
+       */
+      builtin: z.record(z.boolean()).optional(),
+    })
+    .strict()
+    .optional(),
   /** Maximum model/tool iterations per turn. */
   maxIterations: z
     .number()
@@ -888,6 +902,10 @@ export const FileConfigSchema = z
     // Built-in tool switches name a known group or tool, never `skill`
     // (docs/feat/tool-toggles.md F1/F2), in the base and each merged profile.
     for (const message of toolEnabledIssues(file)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message });
+    }
+    // `skills.builtin` names a skill this build ships (docs/feat/builtin-skills.md).
+    for (const message of builtinSkillIssues(file)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message });
     }
   });

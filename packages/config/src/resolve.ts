@@ -259,6 +259,8 @@ export interface ResolvedConfig {
   readonly disabledTools: readonly string[];
   /** `tools.enabled` as written (merged profile), for the `true`-has-no-effect notices. */
   readonly toolsEnabled?: Readonly<Record<string, boolean>>;
+  /** `skills.builtin` as written (merged profile): the built-in skills turned on. */
+  readonly builtinSkillsEnabled?: Readonly<Record<string, boolean>>;
   /**
    * The configured default engine of `run`/`attach` (file or profile); absent
    * when unset. Its env form (`TENTACLE_ENGINE`) and the flag are layered by
@@ -967,6 +969,9 @@ export function resolveConfig(ctx: ResolveContext): ResolvedConfig {
     writableDirs: writableDirs.value,
     disabledTools: disabledToolsOf(fileConfig.tools?.enabled ?? {}),
     ...(fileConfig.tools?.enabled !== undefined ? { toolsEnabled: fileConfig.tools.enabled } : {}),
+    ...(fileConfig.skills?.builtin !== undefined
+      ? { builtinSkillsEnabled: fileConfig.skills.builtin }
+      : {}),
     ...(fileConfig.engine !== undefined ? { engine: fileConfig.engine } : {}),
     ...(fileConfig.network !== undefined ? { network: fileConfig.network } : {}),
     ...(fileConfig.rm !== undefined ? { rm: fileConfig.rm } : {}),

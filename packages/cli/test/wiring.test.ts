@@ -19,6 +19,7 @@ import {
   type ToolResult,
 } from "@tentacle/core";
 import { SessionHost, toSessionSkills } from "@tentacle/daemon";
+import { composeSystemPrompt } from "../../config/src/resolve.ts";
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import { daemonErrorLogPath } from "../src/daemon-log.ts";
 import {
@@ -945,7 +946,17 @@ describe("start-up output pinned (docs/feat/context-reset-refresh.md)", () => {
         `---\nname: ${name}\ndescription: ${description}\n${extra}---\n${name} body\n`,
       );
     }
-    return loadConfig({ env: { HOME: home }, configDir: cfgDir, cwd: home });
+    const config = await loadConfig({ env: { HOME: home }, configDir: cfgDir, cwd: home });
+    // The pin is on the user's own set: the skills shipped inside tentacle are
+    // composed after it (docs/feat/builtin-skills.md), their text free to change.
+    const skills = config.skills.filter((s) => s.builtin !== true);
+    const { systemPrompt } = composeSystemPrompt({
+      identity: "IDENTITY\n",
+      agentsMd: "RULES\n",
+      agentsEnabled: true,
+      skills,
+    });
+    return { ...config, skills, systemPrompt };
   }
 
   test("the system prompt and the tool list (names, order, the skill tool's schema) are byte-identical", async () => {

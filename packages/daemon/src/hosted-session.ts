@@ -102,6 +102,7 @@ import {
   checkAttachmentRefs,
   daemonWakeGate,
   formatBytes,
+  isBuiltinSkillName,
   isDefaultOffTool,
   nextDateStamp,
   ownRequest,
@@ -1386,12 +1387,18 @@ export class HostedSession {
     // One exception, off wins: a default-off tool (the browser, which acts with
     // the user's identity) this host built OFF stays off — the record cannot
     // tell "turned on" from "written before the tool existed" (B4 fix round 1).
+    // The same for a skill shipped inside tentacle (docs/feat/builtin-skills.md
+    // D4): `skills.builtin` is what turns one on for good.
     if (restored !== undefined) {
       const record = restored.capabilities ?? NO_CAPABILITIES;
-      const builtOff = session.currentAgent().capabilities().disabledTools.filter(isDefaultOffTool);
+      const built = session.currentAgent().capabilities();
       this.caps = normalizeCapabilities({
         ...record,
-        disabledTools: [...record.disabledTools, ...builtOff],
+        disabledSkills: [
+          ...record.disabledSkills,
+          ...built.disabledSkills.filter(isBuiltinSkillName),
+        ],
+        disabledTools: [...record.disabledTools, ...built.disabledTools.filter(isDefaultOffTool)],
       });
       session.currentAgent().setCapabilities(this.caps);
     } else {

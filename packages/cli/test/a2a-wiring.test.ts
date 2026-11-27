@@ -32,7 +32,9 @@ beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), "a2a-wiring-"));
   saved = process.env.TENTACLE_CONFIG_DIR;
   process.env.TENTACLE_CONFIG_DIR = join(dir, "config"); // never the user's config
-  base = { ...(await loadConfig({ cwd: dir })), subagentsEnabled: true };
+  // Skills off: these heads carry no catalog (the built-in skills would add one).
+  const env = { ...process.env, TENTACLE_NO_SKILLS: "1" };
+  base = { ...(await loadConfig({ cwd: dir, env })), subagentsEnabled: true };
 });
 
 afterAll(async () => {

@@ -15,6 +15,10 @@ import { createSettingsNotifier, settingsNotices } from "../src/carried-settings
 import { type TentacleConfig, loadConfig } from "../src/config.ts";
 import * as serve from "../src/serve.ts";
 
+/** The listed skill names, without the ones that ship inside tentacle. */
+const ownNames = (view: { skills: readonly { name: string; builtin?: true }[] }): string[] =>
+  view.skills.filter((s) => s.builtin !== true).map((s) => s.name);
+
 class ScriptedProvider implements ModelProvider {
   readonly id = "scripted";
   readonly seen: ChatRequest[] = [];
@@ -476,7 +480,7 @@ describe("the laptop's settings reach the pod's agents, per session", () => {
       ".agents/skills/demo/SKILL.md": "---\nname: demo\ndescription: a demo skill\n---\nBody\n",
     };
     const on = await linked(await podConfig({}, await folder(repo)), {});
-    expect((await on.client.sessionSkills()).skills.map((s) => s.name)).toEqual(["demo"]);
+    expect(ownNames(await on.client.sessionSkills())).toEqual(["demo"]);
     await say(on.client, "S");
     expect(systemOf(on.laptop.seen[0])).toContain("RULE-FROM-AGENTS-MD");
     expect(toolsOf(on.laptop.seen[0])).toContain("skill");
@@ -759,10 +763,10 @@ describe("a daemon the laptop does not launch ignores `settings`", () => {
       reports++;
     });
     await client.initialize();
-    expect((await client.sessionSkills()).skills.map((s) => s.name)).toEqual(["demo"]);
+    expect(ownNames(await client.sessionSkills())).toEqual(["demo"]);
     await client.openSession(undefined, undefined, "S");
     expect(reports).toBe(0);
-    expect((await client.sessionSkills("S")).skills.map((s) => s.name)).toEqual(["demo"]);
+    expect(ownNames(await client.sessionSkills("S"))).toEqual(["demo"]);
     connection.close();
     client.close();
   }
