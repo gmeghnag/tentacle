@@ -4,10 +4,12 @@
  * No codec ships with tentacle, and where there is no confined decoder there is
  * no converter at all — never an unconfined run.
  *
- * The bytes are untrusted: `sips` sees only OUR copy of them, has no network,
- * reads nothing under `/Users` or `/Volumes`, writes only in the user temp dir,
- * and is bounded in time, output and number. What it writes is believed only
- * after core's strict checks (`convertHeicWith`).
+ * The bytes are untrusted: `sips` is handed only OUR copy of them, has no
+ * network, reads nothing under `/Users` or `/Volumes`, writes only in the user
+ * temp dir, can neither fork nor run another program, and is bounded in time,
+ * output and number. What it writes is believed only after core's strict checks
+ * (`convertHeicWith`). Not a deny-default sandbox: Mach/XPC services are not
+ * denied (docs/feat/image-heic.md Notes).
  */
 import { existsSync } from "node:fs";
 import { constants, mkdtemp, open, realpath, rm, writeFile } from "node:fs/promises";
@@ -70,10 +72,13 @@ export function parseSipsSize(stdout: string): HeicSize | undefined {
   return w === undefined || h === undefined ? undefined : { w, h };
 }
 
-/** The sandbox profile: everything but the network, the user's files and other writes. */
+/**
+ * The sandbox profile: all allowed but the network, reads of the user's files,
+ * writes elsewhere, forking, and running any program but `sips` itself.
+ */
 export function sipsSandboxProfile(writable: string): string {
   const quoted = writable.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-  return `(version 1)(allow default)(deny network*)(deny file-read* (subpath "/Users") (subpath "/Volumes"))(deny file-write* (require-not (subpath "${quoted}")))`;
+  return `(version 1)(allow default)(deny network*)(deny file-read* (subpath "/Users") (subpath "/Volumes"))(deny file-write* (require-not (subpath "${quoted}")))(deny process-fork)(deny process-exec* (require-not (literal "${SIPS}")))`;
 }
 
 /** The one method `drain` needs: the two `ReadableStream` typings disagree on the rest. */

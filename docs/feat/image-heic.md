@@ -179,13 +179,13 @@ Expected: `low` ≤ 768 px with no `HIGH_ONLY_NOTE`, and the region is an `image
   2. `size` runs `sandbox-exec -p <profile> /usr/bin/sips -g pixelWidth -g pixelHeight in.heic` and parses it with **`parseSipsSize(stdout)`** (exported, pure). `<nil>` → `undefined`.
   3. `toJpeg` runs `sandbox-exec -p <profile> /usr/bin/sips -s format jpeg -s formatOptions 80 [-Z <edge>] in.heic --out out-<n>.jpg`, then reads the output with a stat bound of `MAX_IMAGE_BYTES`. Exit ≠ 0 → `{ refused: "the HEIC could not be decoded (<first stderr line, ≤ 120 chars>)" }`.
   4. `rm -r` the directory in `finally`, on every path.
-- **The profile** (probe4, verified):
+- **The profile** (probe4, verified; the last two denials added in fix round 1):
 
   ```
-  (version 1)(allow default)(deny network*)(deny file-read* (subpath "/Users") (subpath "/Volumes"))(deny file-write* (require-not (subpath "<realpath tmpRoot>")))
+  (version 1)(allow default)(deny network*)(deny file-read* (subpath "/Users") (subpath "/Volumes"))(deny file-write* (require-not (subpath "<realpath tmpRoot>")))(deny process-fork)(deny process-exec* (require-not (literal "/usr/bin/sips")))
   ```
 
-  The path is quoted with `\` and `"` escaped.
+  The path is quoted with `\` and `"` escaped. This is **not** a deny-default sandbox (Notes).
 - **The child:** an absolute argv (no shell, no `PATH`), `env: {}`, `stdin: "ignore"`, and `stdout`/`stderr` `"pipe"`, each read with a 64 KiB bound. **Never `inherit`** (Ink, §7).
 - **Timeout:** `HEIC_CONVERT_TIMEOUT_MS` → SIGKILL → `{ refused: "the HEIC took over 20 s to decode" }`.
 - **At most 2 conversions at once per process** (a small FIFO gate). A batch of HEIC reads cannot fork-bomb the host's memory.
@@ -293,7 +293,7 @@ Red first (§9): each test is shown failing before its code. Paste the red lines
   - `heicJpegName` (`.HEIC`, `.heif`, no extension); `heicFormatLabel`.
 - **T2 `tools/test/heic-convert.test.ts`, fake `spawn`/`exists`.**
   - `platform: "linux"` → `undefined`. Darwin without `sandbox-exec` → `undefined`.
-  - The argv starts `["/usr/bin/sandbox-exec", "-p", <profile>, "/usr/bin/sips", …]`. The profile contains `(deny network*)`, the `/Users` read deny and the realpath'd `tmpRoot` write allowance. `-Z` is present only on a downscale.
+  - The argv starts `["/usr/bin/sandbox-exec", "-p", <profile>, "/usr/bin/sips", …]`. The profile contains `(deny network*)`, the `/Users` read deny, the realpath'd `tmpRoot` write allowance, the fork deny and the exec deny (all but `sips`). `-Z` is present only on a downscale.
   - Spawn options: `env` is `{}`, and stdin/stdout/stderr are never `"inherit"`.
   - A child that never exits is killed at a small injected timeout → refusal.
   - The temp directory is gone after success, after a refusal and after a thrown spawn (`tmpRoot` is a test dir).
@@ -301,6 +301,7 @@ Red first (§9): each test is shown failing before its code. Paste the red lines
   - The gate: 3 concurrent calls → at most 2 children alive at once.
 - **T3 `tools/test/heic-convert.live.test.ts` (real OS, no skip).**
   - On darwin: `defaultHeicConverter()` converts `fixtures/heic/small-orient-6.heic` to a JPEG with `readJpegHeader` 64×48, orientation 6, sniffing as `image/jpeg`. Two runs give the same sha256. A copy cut at 50 % is refused (F6, real `sips`).
+  - On darwin, enforced by the OS: under the shipped profile `/usr/bin/true` does not run; with `/bin/bash` in `sips`'s place in the exec rule, the shell runs but cannot fork a subshell.
   - Elsewhere: `defaultHeicConverter()` is `undefined`.
   - Both branches assert, so neither is vacuous.
 - **T4 `tools/test/fs-read-image.test.ts` additions** (fake converter + spy store):
@@ -339,6 +340,7 @@ Extra validation, pasted into Execution:
 - **Linux decoder.** A user-installed `heif-convert` (libheif) or `ffmpeg` on a Linux `serve` could back the same `HeicConverter`, licensed to the user, not to us. Confinement there would need bubblewrap/seccomp, so it is a separate task.
 - **Metadata.** The converted JPEG keeps `sips`'s EXIF (GPS included), as a JPEG file or attach does today. Stripping location before a provider sees it is a cross-format privacy choice for every image path, not only HEIC.
 - `sandbox-exec` is deprecated by Apple. H3 fails closed; if it disappears, re-plan with an XPC/App Sandbox helper.
+- **What the sandbox does not confine (follow-up: a deny-default profile).** The profile is `(allow default)` with named denials. A decoder taken over by its input cannot fork or exec, but `mach-lookup` and XPC stay allowed: it can still message system services (launchd, LaunchServices), and one that starts work on request would run it outside the sandbox. Whether any does for such a caller is untested. Reads outside `/Users` and `/Volumes` and writes anywhere in the user temp dir are also allowed.
 - The marker still says `high only` (true of what is stored; `low` is made on demand, 3b's note).
 
 ## Execution
@@ -423,6 +425,26 @@ Exact long edge also checked for 4032, 3024, 2268, 2048, 1701 and 1568. (`repro.
 - A turn cancel does not stop a running conversion (no signal in `HeicConverter`); each child is bounded at 20 s, so one conversion at worst ≈ 100 s (size + 4 decodes).
 - An output over 15 MiB is refused without the ×0.75 steps (D3's stat bound).
 - Unverified: Linux (only through the injected `platform`), a real iPhone portrait HEIC (Notes). No automated test checks that the OS enforces the denials; run once by hand with the shipped `sipsSandboxProfile` (`deny.ts`): control `exit 0, output exists`; read under `/Users` `exit 0, no output`; write outside the temp dir `exit 13, no output`.
+
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-27*
+
+**Finding 1 (MEDIUM): fixed as the Review proposed.** `sipsSandboxProfile` adds `(deny process-fork)` and `(deny process-exec* (require-not (literal "/usr/bin/sips")))`. The module comment, D3, T2, T3 and Notes (what remains) are updated.
+
+- **Red** (tests first, old profile): 16 pass / 3 fail: T2 `Expected to contain: "(deny process-fork)"`; T3 «can start no other program» (`/usr/bin/true` exit 0); T3 «cannot fork» (the subshell printed).
+- **Green:** the two converter files 19/0, real conversions included; with `fs-read-image`, `image-view-region`, `attach-files` and `image-view-wiring`: 171 pass / 0 fail. `biome check` on the 3 changed files clean.
+- **12 MP** (`rv/e2e.ts`, new profile): `fs_read` 196 ms `4032×3024 · HEIC→JPEG · 2.3 MB`; edge 1568 → `1568×1176`; attach `photo.jpg image/jpeg 821832`; a 4000 B cut refused.
+
+| Mutation (applied, run, reverted) | Result |
+|---|---|
+| no `(deny process-fork)` | 17/2: T2, T3 «cannot fork» |
+| no exec deny | 17/2: T2, T3 «no other program» |
+| every exec denied (no `require-not`) | 15/4: T2, two real conversions, «cannot fork» control |
+
+**Not verified:** the escape itself. `rv/escape.sh` (`launchctl submit`) needed an approval this non-interactive run did not get, so neither the escape under the old profile nor its closing was observed; the tests prove only that the OS denies exec and fork. To verify: run `sh rv/escape.sh` with the two new denials added to its `P`; expected: no `escaped` file.
+
+**Gate:** full gate not run (the orchestrator's script).
 
 ## Review
 

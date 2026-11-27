@@ -127,6 +127,8 @@ describe("the child", () => {
         expect(profile).toContain("(deny network*)");
         expect(profile).toContain('(deny file-read* (subpath "/Users") (subpath "/Volumes"))');
         expect(profile).toContain(`(deny file-write* (require-not (subpath "${real}")))`);
+        expect(profile).toContain("(deny process-fork)");
+        expect(profile).toContain('(deny process-exec* (require-not (literal "/usr/bin/sips")))');
         expect(options.env).toEqual({});
         expect([options.stdin, options.stdout, options.stderr]).toEqual(["ignore", "pipe", "pipe"]);
         expect(argv.some((arg) => arg.startsWith(`${real}/tentacle-heic-`))).toBe(true);

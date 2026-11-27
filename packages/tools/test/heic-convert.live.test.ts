@@ -4,11 +4,11 @@
  */
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readJpegHeader, sniffImageType } from "@tentacle/core";
-import { defaultHeicConverter } from "../src/heic-convert.ts";
+import { defaultHeicConverter, sipsSandboxProfile } from "../src/heic-convert.ts";
 
 const fixture = async (name: string) =>
   new Uint8Array(
@@ -16,6 +16,18 @@ const fixture = async (name: string) =>
   );
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const LIMITS = { maxEdge: 4032, maxBytes: 1_000_000 };
+
+/** One command under a sandbox profile, as the OS enforces it. */
+async function confined(profile: string, command: string[]) {
+  const child = Bun.spawn(["/usr/bin/sandbox-exec", "-p", profile, ...command], {
+    env: {},
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const stdout = await new Response(child.stdout).text();
+  return { code: await child.exited, stdout };
+}
 
 describe("the host's HEIC decoder", () => {
   test("converts on macOS, deterministically; absent elsewhere", async () => {
@@ -65,6 +77,35 @@ describe("the host's HEIC decoder", () => {
       }
       await rm(other, { recursive: true, force: true });
     }
+  });
+
+  test("macOS: the confined process can start no other program", async () => {
+    if (process.platform !== "darwin") {
+      expect(defaultHeicConverter()).toBeUndefined();
+      return;
+    }
+    const profile = sipsSandboxProfile(await realpath(tmpdir()));
+    // A decoder taken over by its input must not get a program run for it.
+    expect((await confined(profile, ["/usr/bin/true"])).code).not.toBe(0);
+  });
+
+  test("macOS: the confined process cannot fork", async () => {
+    if (process.platform !== "darwin") {
+      expect(defaultHeicConverter()).toBeUndefined();
+      return;
+    }
+    // `sips` never forks on request, so a shell takes its place in the exec rule.
+    const profile = sipsSandboxProfile(await realpath(tmpdir())).replaceAll(
+      '"/usr/bin/sips"',
+      '"/bin/bash"',
+    );
+    // Control: the shell itself runs under it.
+    expect(await confined(profile, ["/bin/bash", "-c", "echo alive"])).toEqual({
+      code: 0,
+      stdout: "alive\n",
+    });
+    const forked = await confined(profile, ["/bin/bash", "-c", "(echo child); :"]);
+    expect(forked.stdout).toBe("");
   });
 
   test("macOS: a file cut in half is refused, never a broken picture", async () => {
