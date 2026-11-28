@@ -29,8 +29,33 @@ describe("the fan opens once per open, whatever re-renders the screen", () => {
   test("HubFan is memoized and its opening effect is keyed on stable values only", () => {
     expect(FAN).toMatch(/export const HubFan = memo\(HubFanView\)/);
     expect(FAN).toMatch(
-      /\.start\(\(\{ finished \}\) => PERF\.fanSettle\(finished\)\);\n\s*\}, \[grow, motion\]\);/,
+      /\.start\(\(\{ finished \}\) => PERF\.fanSettle\(finished\)\);\n\s*return \(\) => run\.stop\(\);\n\s*\}, \[progress, plan\]\);/,
     );
+    // The key is stable per open: one value per mount, one plan per motion and count.
+    expect(FAN).toMatch(/const progress = useRef\(new Animated\.Value\(0\)\)\.current;/);
+    expect(FAN).toMatch(
+      /useMemo\(\s*\(\) => fanOpenPlan\(motion, layout\.items\.length\),\s*\[motion, layout\.items\.length\],?\s*\)/,
+    );
+  });
+
+  // docs/feat/mobile-ui-fluidity-s5.md: `delay` is a JS `setTimeout` even on the
+  // native driver, so a busy JS thread held back every item after the first.
+  test("no item waits on a JS timer: ONE native timing, per-item ranges", () => {
+    for (const banned of [
+      "delay:",
+      "Animated.spring",
+      "Animated.parallel",
+      "Animated.stagger",
+      "Animated.delay",
+      "setTimeout",
+    ]) {
+      expect(FAN).not.toContain(banned);
+    }
+    expect(FAN.match(/Animated\.timing\(/g)?.length).toBe(1);
+    expect(FAN.match(/Animated\.timing\(progress, plan\.timing\)/g)?.length).toBe(1);
+    // The items read the one value through their own track.
+    expect(FAN).toMatch(/plan\.tracks\.map\(\(track\) => progress\.interpolate\(track\)\)/);
+    expect(FAN).toMatch(/const value[^=]*= tracks\[i\] \?\? progress;/);
   });
 
   test("the button hands the fan a stable tap handler (no inline closure)", () => {

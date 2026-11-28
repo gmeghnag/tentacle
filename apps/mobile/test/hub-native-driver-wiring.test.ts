@@ -58,12 +58,14 @@ describe("the hub button: every animation on the native driver", () => {
 });
 
 describe("the fan: open/close on the native driver", () => {
-  test("every fan item's spring/fade is native", () => {
-    const found = [...FAN.matchAll(/Animated\.(timing|spring)\(value, \{([\s\S]*?)\}\)/g)];
-    expect(found.length).toBe(2);
-    for (const m of found) {
-      expect(m[2]).toContain("useNativeDriver: true");
-    }
+  test("the fan's one animation takes its config from fanOpenPlan (native by type)", () => {
+    // docs/feat/mobile-ui-fluidity-s5.md: `FanOpenPlan.timing.useNativeDriver` is
+    // typed `true` (the plan's values are `hub-fan.test.ts`'s).
+    const found = [
+      ...FAN.matchAll(/Animated\.(timing|spring|decay|parallel|sequence|stagger|loop)\(([^)]*)\)/g),
+    ].map((m) => `${m[1]}(${m[2]})`);
+    expect(found).toEqual(["timing(progress, plan.timing)"]);
+    expect(FAN).toContain("fanOpenPlan(motion, layout.items.length)");
     expect(FAN).not.toContain("useNativeDriver: false");
   });
 });
