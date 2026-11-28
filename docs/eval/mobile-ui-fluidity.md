@@ -1,6 +1,6 @@
 # eval/mobile-ui-fluidity — one session-state firehose starves every JS-timed UI
 
-> **Status:** context · review (verdict proposed; awaiting the owner)
+> **Status:** APPROVED by the owner 2026-11-28 — slices promoted one by one as `feat/mobile-ui-fluidity-s<N>`
 > **Branch:** none (an `eval`, committed to `main`, AGENTS §10)
 > Type: eval · Size: L (split below into S/M sub-tasks, no XL) · Blast: cross-module (mobile session screen, its controller, the hub, the transcript list; no protocol, persistence or §7 trust change) · Suited: Opus plans and reviews every slice (fresh-context review for the store and list slices); simulator-measured, AI-free perf gate per slice
 > **Changelog:** none for the eval; each promoted slice names its own fragment
@@ -241,6 +241,26 @@ replay of 4 000 deltas drained in 38 ms JIT / **442 ms interp**; Noise decrypt o
 219 B frame 6 µs JIT / **70 µs interp**; live 40 deltas/s: ~10.7 notifications/s,
 a few % CPU.
 
+### Device evidence (owner's iPhone log, iOS 18.3.1, 27/11 22:32–00:09, session FINANZA on local Qwen over the relay)
+
+*— claude-opus-5-5, 2026-11-28 (read from the owner's exported `ptrace` log; 1 s windows: `lost` = JS time not given back, `renderMs` = time in session-screen renders)*
+
+The device confirms the simulator diagnosis and is worse on a real session:
+
+- **Fresh session** (right after `/clear`, 23:10:36–23:11:00): 16–28 renders/s at ≈ 13–14 ms each → 220–380 ms of renders per second, worst gap 80–210 ms. Already above the 10/s coalescer cap (the S1 feedback loop).
+- **Same session a few turns later** (23:12:29, 23:21:20–25): only 4–6 renders/s but **160–270 ms each**, `lost` ≈ 1 000 ms per ~1 150 ms window → the JS thread is **~90 % busy for whole turns**.
+- **Long session** (186–212 messages, 22:39–22:46): 12–20 renders/s at 55–65 ms each, `lost` 750–1 000 ms/s.
+- **Single stalls while streaming:** 42.0 s (23:17:21, 140 renders = 39.9 s of render), 42.0 s (23:25:46), 30.2 s (23:12:17), 29.3 s (22:47:18), 24.2 s (22:44:37) — the "frozen, then jumps" Thinking clock.
+- **Replay burst on reattach:** 23:21:19, `folds=23 932` in one 20 s window (9.4 s of renders) — slice 6 is real on device.
+- **Hub fan:** while streaming most opens never settle (`settle=-1`: 23:21:46–23:24:37, 23:33:51, 23:45:47) or settle in 2.5–4.0 s (22:46:32, 22:48:52); idle opens settle in 1.06–1.15 s. Always `starts=1` — the "only one button" screenshot.
+- **Instrumentation gap (fix in slice 0):** windows of 104–904 s with 1–2 renders (e.g. 23:44:05, 00:08:58) span the app in background; one even books 401 s as `renderMs`. The perf gate must cut windows at `app-state` changes, or it will read suspensions as jank.
+
+### Owner decisions (2026-11-28)
+
+1. **Pattern and order: APPROVED.** Slices 0 and 1 start now.
+2. **UI-thread clock: YES, now** (owner leans to it; the device evidence above supports it: with the JS thread 75–100 % busy for whole turns and replay bursts of seconds, even a lighter stream path cannot *guarantee* a ticking label — only a clock that does not run on JS can). Shape: a small native view `ClockText` in `apps/mobile/modules/` (the repo already ships local Expo modules: `tentacle-speech`, `tentacle-preview`), given the event's start timestamp and the label format; it ticks on the main thread (no new dependency — Reanimated rejected as a large dependency for one label). The pure `clock.ts` stays the source of the format and of `since` (tests, fallback); the Swift side mirrors the format, pinned by one shared table of test vectors. Folded into **slice 2** (Size S→M). Needs a dev build (not OTA).
+3. **Device log: received** (above).
+
 ## Implementation
 
 *— claude-opus-5-5, 2026-11-28* — **proposal for the verdict; not approved.**
@@ -298,7 +318,7 @@ data flow, not just to decisions:
 |---|---|---|---|---|
 | 0 | **Perf gate flow** — `90-perf-stream`: the driver above made permanent (long seeded session + `THINKHOLD FAST` + hub opens + `ptrace` read-back), a pure checker over the `ptrace` lines | M · contained (e2e + a pure checker) | `apps/mobile/e2e/flows/90-perf-stream.yaml` (new), `e2e/run.ts` (seed a long session, flow entry), `e2e/perf-budget.ts` (new, pure), `test/perf-budget.test.ts` | RED on today's `main` (S2's numbers). Budget: no 1 s window with a gap > 250 ms after the open settles; every `ev=fan` `settle` ≤ 1 500 ms; renders/s ≤ 11 |
 | 1 | **Break the thumbnail feedback loop** — `view()` commits only when the plan changed; the controller emits only on a real change | S · contained | `src/thumbnails.ts`, `src/session-screen-controller.ts`, `test/thumbnails*.test.ts`, `test/session-screen-stream-render.test.ts` (the screen's `window` effect emulated, as `feedback.ts`) | 100 deltas/1 s → ≤ 10 notifications with the effect wired (red today: 20) |
-| 2 | **Owned clocks** — `clock.ts` + `useSince`; the Thinking tail and running steps read `at` from the transcript, not mount time | S · contained | `src/clock.ts` (new), `src/tool-steps.ts` (tail `since`), `src/ui/StepNode.tsx`, `test/clock.test.ts` | pure: one ticker for N subscribers, a late tick self-corrects, a remount keeps the value; gate 0: label within 2 s of wall in screenshots |
+| 2 | **Owned clocks** — `clock.ts` + `useSince`; the Thinking tail and running steps read `at` from the transcript, not mount time; **plus a native `ClockText` view (owner 28/11) that ticks on the UI thread from that `at`** | M · contained | `src/clock.ts` (new), `src/tool-steps.ts` (tail `since`), `src/ui/StepNode.tsx`, `test/clock.test.ts` | pure: one ticker for N subscribers, a late tick self-corrects, a remount keeps the value; gate 0: label within 2 s of wall in screenshots |
 | 3 | **Session store + `useSlice`** — slices, identity-preserving publish, the coalescer moved inside; the screen subscribes per slice (header, composer, hub, sheets) | M · cross-module | `src/session-store.ts` (new), `src/use-slice.ts` (new), `src/session-screen-controller.ts` (publish through the store), `src/screens/SessionScreen.tsx` (split into slice subscribers), `test/session-store.test.ts`, a source pin test | pure: a `reasoning` delta changes ONLY `tail`; `composer`/`hub`/`header` keep identity; source pin: no child takes `SessionScreenState` |
 | 4 | **The list off the stream path** — stable `renderItem`, slim `extraData`, the streaming row + Thinking tail from the `tail` slice outside the `FlatList` data | M · cross-module | `src/screens/SessionScreen.tsx`, `src/screens/transcript/TranscriptCell.tsx`, `src/transcript-cell.ts`, `src/tool-steps.ts`, tests | gate 0: S2 `ms/render` within 2× of S1 (today 7×), renders of the list per delta = 0 while only the tail changes |
 | 5 | **Fan without JS timers** — one native progress value + per-item ranges; no full-screen work inside the opening window | S · contained | `src/hub-fan.ts`, `src/ui/HubFan.tsx`, `src/screens/SessionScreen.tsx` (`onHubFan`), `test/hub-fan.test.ts`, `test/fan-jank-wiring.test.ts` | pure: ranges monotone, last item ends at 1; source pin: no `delay:` in `HubFan.tsx`; gate 0: `settle` ≤ 1 500 ms while streaming |
