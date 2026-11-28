@@ -342,3 +342,41 @@ device/simulator (source pins and pure tests only). React may run `MascotSceneLa
 body once more after a change before it bails out (no commit); not measured.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-28* (fresh context; same model as the planner, a different
+model from the executor)
+
+**Verdict: APPROVE.** No HIGH or MEDIUM findings. This review covers `git diff main...HEAD` only.
+
+- **Gate (re-run here):** the 6 touched test files pass, `136 pass 0 fail`; `bun run lint`
+  is clean (2828 files); `bun run typecheck` is clean (all four `tsc`). The full
+  `bun run check` is the orchestrator's merge step.
+- **Mutation (§9), four applied at once, then reverted (`git status` clean):**
+  `sameFrame` → `true ||` (16 `sameFrame` cases and the 60 Hz property test fail);
+  `useWallClock` → `NEVER` always (pin fails); the edge back on the JS driver (pin
+  fails); the arm timer → `setArm(a => a)` (the "expires by state" pin fails).
+  Result: 19 fail.
+- **Premises checked (all TRUE):**
+  - `stopArmed` is `now - at < STOP_ARM_MS` (`activity-panel.ts:193-194`). A floored
+    `now` ≤ `at` therefore keeps a fresh tap armed, and the end of the window is the
+    `setArm(STOP_IDLE)` timer.
+  - The screen-read fields `badgeLabel`, `accessibilityLabel` and `nothingRunning`
+    are time-free (`activity.ts:233-248`).
+  - `sceneByKey` returns a constant (`mascot-scenes.ts:872`), so the effect deps
+    `[reduceMotion, scene, drawn.run]` do not restart the loop.
+  - `frameAt` gives `[]` at or after `durationMs` (`:892`), the same end state as before.
+  - The sampler's `now` is `Date.now()` (`use-since.ts:13`), so a closed→open sheet
+    starts with a fresh value.
+- **Attacks tried (none found a fault):**
+  1. Can a floored clock un-arm Stop right after a tap? No (the premise above).
+  2. Can a theme flip fail to reach the mascot? The ref lands on the next frame. After
+     the end the frame is `[]`, so nothing is lost.
+  3. Did the native edge run without evidence? No: the Execution's simulator spike
+     shows the dash moving, and it stays still under Reduce Motion.
+  4. Does the dev `getSnapshot`-caching warning fire at a 1 s boundary? Only if two
+     back-to-back calls straddle a boundary. That is dev-only and the same pattern as
+     `useSince`, so I did not treat it as a finding.
+- **Not verified by me:** pixels on a device; gate 0 perf figures (I relied on the
+  Execution).
+- **Executor:** the work followed the plan. Its drift (the arm disarms by state) was
+  found on its own, pinned and documented.
