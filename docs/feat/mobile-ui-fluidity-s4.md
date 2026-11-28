@@ -598,6 +598,36 @@ after that run, and `session-store.test.ts` was rerun: 58 pass.
 `biome check` on `apps/mobile/{src,test,e2e}`. The full `bun run check` is the
 orchestrator's and was not run.
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-28*
+
+**No code changed.** The latest review (round 2) has no new HIGH/MEDIUM. The one
+standing MEDIUM (round 1 #1, the `cells` margin) is **PARTIAL: recorded, not
+fixed**. Either remedy the review names changes the approved coupling rule
+(decision 4: `cells ≤ max(10, 0.1 × tail)`), and one of them also changes what
+`renderCell` counts. Round 2 says to keep it as a follow-up.
+
+The margin, measured with `checkPerf` on synthetic `panes` lines around Gate 0's
+figures (`.tentacle/tmp/mobile-ui-fluidity-s4/cells-margin.ts`):
+
+```
+tail=1218 cells=118 -> no coupling violation
+tail=1218 cells=121 -> no coupling violation
+tail=1218 cells=122 -> cells=122 > 121.80000000000001 renders over 1218 tail renders
+tail=1179 cells=118 -> cells=118 > 117.9 renders over 1179 tail renders
+tail=1170 cells=118 -> cells=118 > 117 renders over 1170 tail renders
+```
+
+So 4 more `renderItem` calls, or 39 fewer tail renders (3.2 %), turn flow 90 red.
+**Open decision (changes decision 4):** budget `cells` apart from the per-delta
+panes, for example by counting only calls made with unchanged `cellEnv` and
+`data`. A coupled list must still go red under the new rule.
+
+No fix, so no red test and no mutation. `bun test
+apps/mobile/test/perf-budget.test.ts`: 25 pass, 0 fail. The full gate was not
+run. The live→settled handoff (round 1 #2, ungraded) is still unverified.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-28* (fresh context; same model as the planner,
