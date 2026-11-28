@@ -189,6 +189,8 @@ export function historyRows(
         });
       }
     } else if (m.role === "tool") {
+      // This result's own daemon time: where a thinking period after it starts.
+      const ended = atOf(times, index).at;
       const at = m.toolCallId !== undefined ? toolAt.get(m.toolCallId) : undefined;
       const tool = at !== undefined ? rows[at] : undefined;
       if (at !== undefined && tool?.kind === "tool") {
@@ -201,6 +203,7 @@ export function historyRows(
           ...(m.spill !== undefined ? { spill: m.spill } : {}),
           ...(m.denialReply !== undefined ? { denialReply: m.denialReply } : {}),
           ...(m.durationMs !== undefined ? { durationMs: m.durationMs } : {}),
+          ...(ended === undefined ? {} : { endedAt: ended }),
         };
       } else {
         // A result with no matching call (a truncated history): shown plainly.

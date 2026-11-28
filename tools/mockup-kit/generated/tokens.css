@@ -323,6 +323,7 @@
   --sp-transcript: 14px;
   --ms-activity-clock-tick: 1000ms;
   --ms-activity-sheet-resize: 150ms;
+  --ms-clock-sample: 250ms;
   --ms-composer-halo: 1200ms;
   --ms-composer-transcribe-turn: 900ms;
   --ms-drawer: 220ms;

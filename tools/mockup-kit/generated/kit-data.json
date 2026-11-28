@@ -1,7 +1,7 @@
 {
   "source": {
     "apps/mobile/src/chat-header.ts": "9e509a71b3801a4486a838b353c31c96270fedcb",
-    "apps/mobile/src/motion.ts": "cb710fd7643e02771a98beb41cf418b3a5364155",
+    "apps/mobile/src/motion.ts": "7bb35679f8db59f5feccbc4fe5621c9c6fe0c5d5",
     "apps/mobile/src/screens/ComputersScreen.tsx": "ac1fe5dee031bc713182ae3cee279af4ebed1daf",
     "apps/mobile/src/screens/PermissionSheet.tsx": "565e96a19873db9ee89915d7666812b2d7278a1e",
     "apps/mobile/src/screens/SessionsDrawer.tsx": "32084b81ebf112ae65e1d2c347ed4feeb04e0296",
@@ -10,8 +10,8 @@
     "apps/mobile/src/step-rail.ts": "83bd11f3b10e19be6edd27a835ef90252f69f46e",
     "apps/mobile/src/theme-beta.ts": "2359c83e90604bd9bd7625702ae21337499290d2",
     "apps/mobile/src/theme.ts": "61272af6520f7f5a3e01d1844fd434fe95ef4df8",
-    "apps/mobile/src/thinking-motion.ts": "4fd5a2e149a69bb6c58326516420a74efc077eaa",
-    "apps/mobile/src/tool-steps.ts": "3d811ceff3c4892f4f9cb43831214aeba94be1c5",
+    "apps/mobile/src/thinking-motion.ts": "27506f08c10c3a33f2c94d49b67d1b4c26d8cc81",
+    "apps/mobile/src/tool-steps.ts": "e39e2bfcb5b1c0a34033b5264b760d06d76eed9a",
     "apps/mobile/src/ui/AskCard.tsx": "89e2020ac34a9defa5a731616e4eab38e8baae7e",
     "apps/mobile/src/ui/AskSlim.tsx": "c0e6dcafb1866037f5afc597564affc6d628171a",
     "apps/mobile/src/ui/BandSection.tsx": "7b65870db2faa7a51663560d2641476973ed7b2a",
@@ -24,7 +24,7 @@
     "apps/mobile/src/ui/Row.tsx": "2a7b3632a3627501f3149db48608559a27b053c3",
     "apps/mobile/src/ui/ScreenHeader.tsx": "7b42b610beaf4124fe240a609a39c4480b3f203e",
     "apps/mobile/src/ui/Sheet.tsx": "511816016f43feef1b11ce7d5d29def68fad8e22",
-    "apps/mobile/src/ui/StepNode.tsx": "0af38ff20ce44a87ea45b18148d2deade5bab82f",
+    "apps/mobile/src/ui/StepNode.tsx": "0b954afeecedfaa9598e86279abcb8ddf2ce8d9e",
     "packages/tui/src/blink.ts": "29c9f101f7942a0942e48c977a13e3759820c8e3",
     "packages/tui/src/components/Thinking.tsx": "c9f80123d32ad706b7c96d858b822d9336d15d2d",
     "packages/tui/src/shimmer.ts": "96515bf4852e36f0cf9ca27a3f665d00e37f076c",
@@ -34,6 +34,7 @@
   "timings": {
     "ACTIVITY_CLOCK_TICK": 1000,
     "ACTIVITY_SHEET_RESIZE": 150,
+    "CLOCK_SAMPLE": 250,
     "COMPOSER_HALO": 1200,
     "COMPOSER_TRANSCRIBE_TURN": 900,
     "DRAWER": 220,
@@ -802,9 +803,6 @@
         },
         "italic": {
           "fontStyle": "italic"
-        },
-        "tabular": {
-          "fontVariant": ["tabular-nums"]
         },
         "subtitle": {
           "flex": 1

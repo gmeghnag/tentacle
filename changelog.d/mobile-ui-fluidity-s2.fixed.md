@@ -1,0 +1,1 @@
+- **The Thinking counter keeps time.** On the iPhone the "Thinking · N s" label and a running step's duration count from the moment the event started and tick on the UI thread, so a busy stream or reopening the session no longer freezes them or resets them to 0 s.

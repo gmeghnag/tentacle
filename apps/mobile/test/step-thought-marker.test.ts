@@ -70,6 +70,10 @@ beforeAll(async () => {
     useSafeAreaInsets: () => ({ top: 0, bottom: 0, left: 0, right: 0 }),
   }));
   mock.module("expo-symbols", () => ({ SymbolView: "SymbolView" }));
+  mock.module("expo", () => ({
+    requireNativeView: () => null,
+    requireOptionalNativeModule: () => null,
+  }));
   // `expo-file-system` is reached through the row's imports (diagram/artifact
   // cells); without the stub this file only passed inside the full suite, where
   // an earlier file's mock leaked in (Review round 1, isolation gap from

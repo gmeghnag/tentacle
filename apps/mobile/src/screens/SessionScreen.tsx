@@ -2178,6 +2178,7 @@ export function SessionScreen({
                         palette={palette}
                         thought={layout.tail.thought}
                         up={layout.tail.up}
+                        {...(layout.tail.since === undefined ? {} : { since: layout.tail.since })}
                         reduceMotion={a11yFlags.reduceMotion}
                       />
                     )}

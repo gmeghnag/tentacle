@@ -113,6 +113,13 @@ export interface ToolRow {
    * label each time a delta of that message arrived).
    */
   readonly at?: number;
+  /**
+   * When its result arrived (docs/feat/mobile-ui-fluidity-s2.md) — where the
+   * thinking period after a finished batch starts: live, the receipt time; from
+   * history, the daemon's time of the result message. Absent when neither is
+   * known.
+   */
+  readonly endedAt?: number;
   /** The tool's name, as the model called it. */
   readonly name: string;
   /** The display label (`toolLabel`). */

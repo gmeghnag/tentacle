@@ -44,7 +44,7 @@ describe("the `$` line: the command shrinks, `exit N` never does (owner decision
 
   test("the node adds no ✓ / ✗ of its own to the trailing text", () => {
     const src = source();
-    expect(src).toMatch(/\{shown\}/);
+    expect(src).toMatch(/\{trailing\}/);
     expect(src).not.toMatch(/`\$\{[^}]*\} ✓/);
     expect(src).not.toMatch(/`✗ /);
   });

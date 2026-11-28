@@ -60,11 +60,18 @@ describe("a step row steps back by size and lightness (owner decision 3)", () =>
     const nameBlock = source.slice(nameAt, nameAt + 700);
     expect(nameBlock).toContain("color: palette.sec");
     expect(nameBlock).not.toContain("color: palette.label");
-    // The trailing duration (the live clock included) is the step's own size.
-    const trailingAt = source.indexOf("{shown}");
-    expect(trailingAt).toBeGreaterThan(0);
-    expect(source.slice(trailingAt - 400, trailingAt)).toContain("typography.stepMeta");
-    expect(source.slice(trailingAt - 400, trailingAt)).not.toContain("typography.caption");
+    // The trailing duration is the step's own size — and so is the live clock in
+    // that slot, drawn by `ClockText` (both its JS label and its native sizes).
+    for (const [text, marker] of [
+      [source, "{trailing}"],
+      [read("ui", "ClockText.tsx"), "{label}"],
+    ] as const) {
+      const at = text.indexOf(marker);
+      expect(at).toBeGreaterThan(0);
+      expect(text.slice(at - 400, at)).toContain("typography.stepMeta");
+      expect(text.slice(at - 400, at)).not.toContain("typography.caption");
+    }
+    expect(read("ui", "ClockText.tsx")).toContain("= typography.stepMeta;");
   });
 
   test("the Thought label is 14 pt `sec` — size and lightness, never a hue", () => {

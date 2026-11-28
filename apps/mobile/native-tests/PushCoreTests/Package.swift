@@ -20,9 +20,13 @@ let package = Package(
         // UIKit-free, so `swift test` runs it on macOS against the SAME vectors
         // the TypeScript spec asserts (one spec, two implementations).
         .target(name: "LACore", dependencies: ["PushCore"]),
+        // The owned clock's format (docs/feat/mobile-ui-fluidity-s2.md): Foundation
+        // only, compiled from the module's own sources through `Sources/ClockCore`,
+        // pinned to `apps/mobile/test/fixtures/clock-format-v1.json`.
+        .target(name: "ClockCore"),
         .testTarget(
             name: "PushCoreTests",
-            dependencies: ["PushCore", "LACore"],
+            dependencies: ["PushCore", "LACore", "ClockCore"],
             path: "Tests/PushCoreTests"
         ),
     ]

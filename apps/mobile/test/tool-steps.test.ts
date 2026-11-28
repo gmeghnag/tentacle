@@ -430,3 +430,64 @@ describe("toggleOpen / isOpen: the screen-owned open set", () => {
     expect(isOpen(toggleOpen(two, "a"), "a")).toBe(false);
   });
 });
+
+/** docs/feat/mobile-ui-fluidity-s2.md, decision 1: the clock counts from the period's OPENER. */
+describe("the live tail's `since`: the stamp of what opened the thinking period", () => {
+  const promptAt = (at: number): Row => ({ ...user("u"), at }) as Row;
+  const thoughtAt = (key: string, at: number): Row => ({ ...think(key), at }) as Row;
+  const since = (rows: readonly Row[]) => stepLayout(rows, true).tail?.since;
+
+  test("the prompt's stamp, and still the prompt's once reasoning starts (no jump back to 0 s)", () => {
+    expect(since([promptAt(1000)])).toBe(1000);
+    expect(since([promptAt(1000), thoughtAt("r1", 4000)])).toBe(1000);
+    expect(since([promptAt(1000), thoughtAt("r1", 4000), thoughtAt("r2", 9000)])).toBe(1000);
+  });
+
+  test("a context step's stamp", () => {
+    const rows = [promptAt(1000), context("c1", { at: 6000 })];
+    expect(since(rows)).toBe(6000);
+    expect(since([...rows, thoughtAt("r1", 8000)])).toBe(6000);
+  });
+
+  test("a finished parallel batch: the LAST of its results, whichever call it was", () => {
+    const batch = [
+      promptAt(1000),
+      tool("t1", "ok", { at: 2000, endedAt: 9000 }),
+      tool("t2", "error", { at: 2000, endedAt: 7000 }),
+    ];
+    expect(since(batch)).toBe(9000);
+    expect(since([...batch, thoughtAt("r1", 12_000)])).toBe(9000);
+  });
+
+  test("an EARLIER batch is not the opener (a thought separates the two)", () => {
+    const rows = [
+      tool("t1", "ok", { endedAt: 9000 }),
+      thoughtAt("r1", 9500),
+      tool("t2", "ok", { endedAt: 3000 }),
+    ];
+    expect(since(rows)).toBe(3000);
+  });
+
+  test("after assistant text: the first trailing reasoning row's stamp", () => {
+    const rows = [promptAt(1000), text("a1"), thoughtAt("r1", 5000), thoughtAt("r2", 8000)];
+    expect(since(rows)).toBe(5000);
+  });
+
+  test("an opener with no stamp (a history row) falls to the reasoning's stamp", () => {
+    expect(since([user("u"), thoughtAt("r1", 5000)])).toBe(5000);
+    expect(since([tool("t1", "ok", { at: 2000 }), thoughtAt("r1", 5000)])).toBe(5000);
+  });
+
+  test("nothing stamped: no `since` at all (the node shows no number)", () => {
+    for (const rows of [
+      [user("u")],
+      [user("u"), think("r1")],
+      [tool("t1", "ok", { at: 2000 })],
+      [think("r1")],
+    ]) {
+      const { tail } = stepLayout(rows, true);
+      expect(tail).not.toBeNull();
+      expect(tail).not.toHaveProperty("since");
+    }
+  });
+});

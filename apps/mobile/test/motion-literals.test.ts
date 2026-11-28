@@ -67,6 +67,7 @@ describe("motion.ts keeps the values it hoisted", () => {
     expect({ ...M }).toEqual({
       STEP_BLINK_HALF_MS: 500, // docs/fix/mobile-running-row.md: the TUI blink (was STEP_SPINNER_TURN_MS 900)
       STEP_ELAPSED_TICK_MS: 1000, // ui/StepNode.tsx:57
+      CLOCK_SAMPLE_MS: 250, // use-since.ts (docs/feat/mobile-ui-fluidity-s2.md)
       HEADER_DOT_HALF_MS: 700, // ui/HeaderDot.tsx:40
       HEADER_DOT_EASING: "inOut(ease)", // ui/HeaderDot.tsx:40 Easing.inOut(Easing.ease)
       HEADER_DOT_LOW_OPACITY: 0.3, // ui/HeaderDot.tsx:43
