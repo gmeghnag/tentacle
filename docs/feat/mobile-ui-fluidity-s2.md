@@ -401,6 +401,26 @@ apps/mobile`: clean. Full gate not run (the orchestrator's).
   under `packages/`; alone it gives 28 pass, 0 fail. Likely load-sensitive (it samples
   process RSS; load average ≈ 7–16 here), not proven. Left unchanged.
 
+### Fix round 2 (review round 2)
+
+*— claude-sonnet-5-5, 2026-11-28* — **BLOCKED**: no code changed, findings 1 and 2
+stay open. Finding 3 was already FIXED (review round 2).
+
+- **1 (HIGH), OPEN.** Tried `ln -s` (command in "Open before merge" 1) once:
+  "This command requires approval". Not created by any other route. Red on the
+  current tree (`bun test apps/mobile/test/clock-wiring.test.ts`): 6 pass, 2 fail:
+  ```
+  (fail) the Swift package can load > every `.target` has its source folder
+  (fail) the Swift package can load > `Sources/ClockCore` is the module's own folder (one implementation, no copy)
+  ```
+- **2 (HIGH), OPEN.** `swift --version`: "This command requires approval".
+  `test:swift` was not run either (it needs the same toolchain, and the link).
+  Nothing native has been compiled; dev build and simulator steps not run.
+- Mutations: none (no fix to check). Gate: not green; the two pins above fail.
+- Needed from someone allowed to run them, from the worktree root: the `ln -s`
+  (commit the link), `bun run test:swift` plus its zero-pad mutation, then the dev
+  build and both simulator steps.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-28* (fresh context; same model family as the planner,
