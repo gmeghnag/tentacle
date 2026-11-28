@@ -11,8 +11,11 @@ import { join } from "node:path";
  * a flow can make the daemon do something the phone did not.
  */
 import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
-import { type ChatMessage, PermissionBroker, type PermissionResponse } from "@tentacle/core";
+import { type ChatMessage, PermissionBroker } from "@tentacle/core";
 import type { HistoryMessage } from "./hooks.ts";
+import { type LaptopAnswer, createLaptopAnswerer } from "./laptop-answerer.ts";
+
+export type { LaptopAnswer } from "./laptop-answerer.ts";
 
 export interface SeedDeps {
   /** `serve`'s `ws:` URL (main thread, direct: the harness runs on Bun). */
@@ -311,9 +314,6 @@ export async function workflowRunsOf(deps: {
   return id;
 }
 
-/** What a laptop requester answers (`null`: it waits, so only the phone can). */
-export type LaptopAnswer = "allow" | "deny";
-
 /**
  * The LAPTOP's long-lived client for a flow's mid-run actions: it STAYS attached
  * while the flow runs (so `attached` counts it), and its broker's requester is
@@ -352,8 +352,6 @@ export async function laptopLink(deps: {
   readonly url: string;
   readonly token: string;
 }): Promise<LaptopLink> {
-  /** Pending requests by session: the laptop may answer one from a hook. */
-  const pending = new Map<string, (response: PermissionResponse) => void>();
   const broker = new PermissionBroker(undefined, { holdUntilSet: true });
   const factory = webSocketChannelFactory(deps.url, { token: deps.token });
   const client = new RemoteClient(await factory(), broker, undefined, {
@@ -361,13 +359,8 @@ export async function laptopLink(deps: {
   });
   await client.initialize();
   // One requester for the whole run: it holds every ask until a hook answers it.
-  broker.setRequester(
-    (request) =>
-      new Promise<PermissionResponse>((resolve) => {
-        const key = `${request.tool}\u0000${request.title}\u0000${request.detail ?? ""}`;
-        pending.set(key, resolve);
-      }),
-  );
+  const answerer = createLaptopAnswerer();
+  broker.setRequester(answerer.requester);
   const sessions = new Map<string, ReturnType<RemoteClient["newSession"]>>();
   /**
    * The turn running on each session, as this peer SEES it (its own `turn`
@@ -423,6 +416,9 @@ export async function laptopLink(deps: {
       // here — otherwise a later `laptop-enqueue`/`laptop-cancel` on this session
       // would answer "no turn is running" (the first flow-15 run's failure).
       runningTurnOf.set(sessionId, turnId);
+      // The laptop answers this turn's own asks (flow 09's variant), whenever they
+      // arrive: registered BEFORE the send, released when the turn ends.
+      const release = answer === null ? undefined : answerer.answerTurn(turnId, answer);
       // Started, NOT awaited: the turn must still be running when a flow asserts.
       void (async () => {
         try {
@@ -432,26 +428,16 @@ export async function laptopLink(deps: {
         } catch {
           // the flow's own stop: nothing to report
         } finally {
+          release?.();
           if (runningTurnOf.get(sessionId) === turnId) {
             runningTurnOf.delete(sessionId);
           }
         }
       })();
-      if (answer !== null) {
-        // The laptop answers its own ask once one is offered (flow 09's variant).
-        for (
-          let i = 0;
-          i < 400 && ![...pending.keys()].some((k) => k.startsWith("fs_write"));
-          i += 1
-        ) {
-          await Bun.sleep(25);
-        }
-        await answerAll(answer);
-      }
       return { turnId };
     },
     async answer(_sessionId, answer) {
-      await answerAll(answer);
+      answerer.answerAll(answer);
     },
     async enqueue(sessionId, text) {
       // A steer must name the TURN it binds to (`hosted-session.ts`'s check):
@@ -494,14 +480,6 @@ export async function laptopLink(deps: {
       client.close();
     },
   };
-
-  /** Resolve every pending ask this peer holds (the first answer wins daemon-side). */
-  async function answerAll(answer: LaptopAnswer): Promise<void> {
-    for (const [key, resolve] of [...pending.entries()]) {
-      pending.delete(key);
-      resolve(answer === "allow" ? { allowed: true, scope: "once" } : { allowed: false });
-    }
-  }
 }
 
 /** `session/list`'s entry for `sessionId`, as a flow's `session-state` reads it. */

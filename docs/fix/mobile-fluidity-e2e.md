@@ -239,4 +239,83 @@ during the first run, removed after).
 
 ## Execution
 
+*— claude-sonnet-5-5, 2026-11-28*
+
+**Result: 34 DONE. 44 PARTIAL — still RED on the simulator. The plan's 44 design
+is necessary-looking but NOT sufficient; do not merge as "44 fixed".**
+
+- **Load-bearing check: holds.** Installed `useNavigationState.tsx` (core 7.24.0)
+  has no focus check; `forceUpdate` on an `Object.is` change (lines 51-67, 91-94).
+  The live log below also shows Session re-rendering while blurred.
+- **Drift:** the Repro was not re-run on main before editing (I relied on the
+  Context's run of the same day).
+
+### 34 (harness) — DONE
+- Step A (old logic moved verbatim): 5 fail / 3 pass, on assertions — both (a),
+  (b), "every later ask of that turn", (d). Step B: 8/8.
+- `e2e/laptop-answerer.ts` (new), `e2e/seed.ts` uses it. Drift: `pending` is a
+  Set (two identical asks no longer overwrite each other); `answerAll` and
+  `answerTurn` are synchronous; the final module needs no `sleep` seam.
+- The unverified `options.turnId` point is settled: flow 34 passes, and the new
+  code answers nothing without it (no temporary requester log was needed).
+
+### 44 (app) — PARTIAL
+- `SessionScreen.tsx`: `topRunId` / `workflowsTop` are `useNavigationState`
+  selectors; comment fixed. `session-front-wiring.test.ts` was RED on the old
+  code (2/2, received `…ownRunTopId(rootRoutes, owner)`), then green. The
+  `sheet-plan.test.ts` 44-sequence cases pin pure behaviour (green on main too).
+- **E2E still fails** at step 96 `perm-sheet`, same screen as the report (slim
+  ask row, no sheet).
+- **Temporary logging** (removed; `git diff` holds only the approved change).
+  With the run on top the render has `topRunId:"wf-1"`, `workflowsTop:false`,
+  `inFront:true`, `hidden:false`, `parked:false`, `actual:[]`,
+  `wanted:["permission"]`. The loop effect never runs with those values, so
+  `openSheet` is never reached. Numbered run `1795858513010` (no gaps, so no
+  dropped log lines):
+
+```
+#61 render-body wanted= actual=0
+#62 render-effect {"topRunId":null,"workflowsTop":true,…}
+#63 loop{…"wanted":[]…}
+#64 render-body wanted=permission actual=0
+#65 render-body wanted=permission actual=0
+#66 render-effect {"topRunId":"wf-1",…}     ← only the NO-DEPS effect
+#67 render-body … #68 render-effect … #69 render-body … #70 render-effect
+```
+
+  Probes, in declaration order: `useEffect([wantedKey])`, the no-deps
+  render-effect, the loop, `useEffect([wanted])`. After #63 none of the three
+  dep-keyed ones logs again (the lines after #70 were not paged; the run before,
+  `1795857974640`, searched whole, has no later `loop` line). So the cause is not
+  in `sheet-plan` or the loop's gates: React skips dep-keyed effects whose deps
+  changed. The plan's premise "a render with the right values presents the sheet"
+  is false.
+- **Not established:** why. Unproven hypothesis: the #64 render commits with its
+  passive effects never run, so #65 compares against deps already
+  `permission`. No JS exception was found by a log search; no `Activity`,
+  `freezeOnBlur`, `enableFreeze` or React Compiler setting matched in
+  `apps/mobile`, nor `Activity`/`Freeze` wrappers in native-stack/elements.
+  This also puts the Context's s3 attribution in doubt (never bisected).
+- **Stopped here** (§0, and "no production code outside the approved
+  Implementation"). Needs a new plan. Cheapest next test: log a per-instance id
+  plus `useLayoutEffect([wantedKey])` beside `useEffect([wantedKey])`, to tell
+  whether #64 committed.
+
+### Evidence
+- Unit: 262 pass / 0 fail over the 9 touched/covering files; `tsc -p
+  apps/mobile` clean; `biome check` on the 6 changed code files clean.
+- Mutations (`.tentacle/tmp/mobile-fluidity-e2e/mutate.ts`, each restored):
+  - M1 `topRunId` back to `rootRoutes` → wiring `topRunId` case red (1/1).
+  - M2 no `signal` listener → (a), (b), (d) red (5 pass, 3 fail).
+  - M3 release does nothing → "released registration" red (7/1).
+  - M4 registration answers any turn → (c) red (7/1).
+- E2E (iOS 26 `0B43D716…`, under `sim.lock`, released), branch build:
+  `10,34` PASS 2/2 (run `1795856329899`; the minimal pair, RED on main);
+  `44` FAIL (`1795856852910`). Final clean tree, run `1795859027849`: 10, 34, 35,
+  36-preview, 36-theme PASS; **44 FAIL**; 90-perf-stream FAIL (known-bug, not
+  counted). No second simulator and no full 2-sim gate.
+- Full `bun run check`: not run (the orchestrator's script runs it).
+- No changelog fragment, per orchestrator decision 4. The spawn brief's generic
+  line asks for one; the orchestrator decides.
+
 ## Review

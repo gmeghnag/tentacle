@@ -633,6 +633,35 @@ describe("the Workflows landing over a session (docs/fix/mobile-workflows-landin
   });
 });
 
+describe("the 44 sequence — what Session's top-screen selectors see (docs/fix/mobile-fluidity-e2e.md)", () => {
+  const owner = { computerId: "c", sessionId: "s" };
+  const session = { key: "k0", name: "Session", params: owner };
+  const landing = { key: "k1", name: "WorkflowStart", params: owner };
+  const run = { key: "k2", name: "WorkflowRun", params: { ...owner, runId: "wf-1" } };
+  const ask = { key: "k3", name: SHEET_ROUTE, params: { kind: "permission", ...owner } };
+  // [Session, landing] → the run PUSHED over it → the ask's Sheet over the run.
+  const before = [session, landing];
+  const pushed = [session, landing, run];
+  const sheeted = [session, landing, run, ask];
+  const selected = (routes: Parameters<typeof ownRunTopId>[0]) =>
+    [ownRunTopId(routes, owner), ownWorkflowsTop(routes, owner)] as const;
+
+  test("both selections change by Object.is at the push, and neither at the Sheet", () => {
+    expect(selected(before)).toEqual([null, true]);
+    expect(selected(pushed)).toEqual(["wf-1", false]);
+    for (const i of [0, 1] as const) {
+      expect(Object.is(selected(before)[i], selected(pushed)[i])).toBe(false);
+      expect(Object.is(selected(pushed)[i], selected(sheeted)[i])).toBe(true);
+    }
+    // Popped back to the landing: it flips back (the ask is a banner again).
+    expect(selected(before)).toEqual([null, true]);
+  });
+
+  test("the sheet stack's signature cannot see the push: `stackKey` never could", () => {
+    expect(stackSignature(pushed)).toBe(stackSignature(before));
+  });
+});
+
 describe("sheetHidden — the drain's trigger, both legs", () => {
   test("locked is hidden, whatever the app state", () => {
     expect(sheetHidden(true, "active")).toBe(true);

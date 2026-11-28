@@ -356,10 +356,10 @@ export function SessionScreen({
   const stackKey = useNavigationState((state) =>
     stackSignature(state.routes as readonly SheetRouteLike[]),
   );
-  // Read FRESH at every render, then memoized on ALL the routes' keys: `stackKey`
-  // covers only the Sheet routes, so a screen pushed over Session (the run) never
-  // changed it, the memo kept the routes from before, and `ownRunTopId` never saw
-  // the run (e2e 44, docs/fix/mobile-ask-surfaces.md S8 gate fix).
+  // Read FRESH at every render, then memoized on ALL the routes' keys, for the
+  // sheet stack below. It re-renders nothing: `stackKey` covers only the Sheet
+  // routes, and whether the run or the landing is on top comes from their own
+  // selectors further down (docs/fix/mobile-fluidity-e2e.md).
   const freshRoutes = navigation.getState()?.routes ?? [];
   const freshKey = freshRoutes.map((route) => route.key).join("|");
   // biome-ignore lint/correctness/useExhaustiveDependencies: `freshKey` IS `freshRoutes`' content.
@@ -477,10 +477,16 @@ export function SessionScreen({
   const focused = useIsFocused();
   // This session's OWN run on top keeps it in front too (docs/fix/mobile-ask-surfaces.md D6):
   // its ask is then presented as a sheet over the run, and only that run's (Q1).
-  const topRunId = owner === null ? null : ownRunTopId(rootRoutes, owner);
+  // A SELECTOR, not a read at render: pushing the run over the landing publishes
+  // no slice and leaves Session blurred, so only the navigator can re-render it.
+  const topRunId = useNavigationState((state) =>
+    owner === null ? null : ownRunTopId(state.routes as readonly SheetRouteLike[], owner),
+  );
   // This session's Workflows landing too (mobile-workflows-landing D8): the
   // approval its Approve raises is a sheet over it, and only that kind of ask.
-  const workflowsTop = owner !== null && ownWorkflowsTop(rootRoutes, owner);
+  const workflowsTop = useNavigationState(
+    (state) => owner !== null && ownWorkflowsTop(state.routes as readonly SheetRouteLike[], owner),
+  );
   const inFront = sessionInFront(focused, sheetStack, topRunId !== null || workflowsTop);
   const lastTurn = useRef(rowsSlice.view.turn);
   useEffect(() => {
