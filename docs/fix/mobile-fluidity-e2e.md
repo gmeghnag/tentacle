@@ -433,3 +433,44 @@ None found a defect beyond 1–2.
 Executor behaviour: honest. It stopped per §0 when the premise failed, kept
 debugging logs out of the diff, and reported 44 FAIL and 90 FAIL plainly instead
 of claiming done.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-28* (fresh context; reviewed `git diff HEAD~1`)
+
+**Verdict: APPROVE.** Both round-1 findings are fixed. No new HIGH or MEDIUM.
+
+- **Finding 1 (44 not fixed) → fixed.** The new root cause (a bailed-out render
+  that reads navigator state live keeps its effects' new deps, and the effects
+  never run) is reproduced in real React by `use-nav-fact.test.ts`. The fix is
+  `apps/mobile/src/use-nav-fact.ts` (`useSyncExternalStore` over the navigator's
+  `state` event). Checked in core 7.24.0: `useNavigationBuilder.tsx:929` emits
+  `state` with no target after commit, and `useEventEmitter.tsx:87-92` then
+  reaches every target's listeners, so a blurred Session is notified. Per the
+  executor, the 44 e2e is green (runs `1795860824829` and `1795861320491`). Not
+  re-run here.
+- **Finding 2 (vacuous 44 tests) → fixed.** My mutations, each reverted, tree
+  byte-identical after (`git status` clean):
+  - R1, the hook keeps the subscription (a version counter) but returns a live
+    read, i.e. the `useNavigationState` pattern: test 1 goes RED on the effects
+    assertion (`["landing"]`, not `["landing","run"]`). This is the exact
+    property.
+  - R0, a plain live read with no subscription: 2/2 RED. They fail on the
+    subscribe and mount waits, which is weaker but still red.
+  - R2, `workflowsTop` back to `useNavigationState`: the wiring test is RED (1/3).
+- **Regressions:** `rootRoutes` is still memoized on all the route keys
+  (`SessionScreen.tsx:369`). The only other `getState()` read is in a handler
+  (`:1762`). `stackKey` is unchanged and only triggers re-renders.
+  The selectors return primitives, so `Object.is` snapshots are stable. The
+  `native-sheets-wiring` case was re-pinned to the new form.
+- **Gate:** the 5 touched/covering test files give 169 pass / 0 fail;
+  `bun run lint` is clean (2833 files); `bun run typecheck` is clean. Full
+  `bun run check` and the 2-sim gate were not run (the orchestrator does that at
+  merge).
+- **Open, not blocking:** 90-perf-stream is still FAIL (known-bug,
+  `cells=126 > 125.9`) and was not compared with `main`. The orchestrator should
+  confirm it is not worse than `main`. The drift from the approved Design (a new
+  production file) needs the orchestrator's OK, as the executor flagged.
+
+Executor behaviour: found and reproduced the real cause, gave red→green with
+mutations, and flagged the drift and the unmet "90 must pass" honestly.
