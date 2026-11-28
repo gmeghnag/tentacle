@@ -24,8 +24,8 @@ import Svg, {
   Stop,
   Text as SvgText,
 } from "react-native-svg";
+import type { ClockFormat } from "../clock.ts";
 import type { SlotView } from "../compact-slot.ts";
-import { STEP_ELAPSED_TICK_MS } from "../motion.ts";
 import {
   STEP_BLINK_CURVE,
   STEP_BLINK_LOOP_MS,
@@ -46,7 +46,9 @@ import {
   thinkingLook,
 } from "../thinking-motion.ts";
 import { type StepDot, type ThreadPos, thinkingA11yLabel } from "../tool-steps.ts";
-import { type ToolNameParts, liveElapsed } from "../tool-summary.ts";
+import type { ToolNameParts } from "../tool-summary.ts";
+import { useSince } from "../use-since.ts";
+import { ClockText } from "./ClockText.tsx";
 import { Icon } from "./Icon.tsx";
 import { OutputBlock } from "./OutputBlock.tsx";
 import { Text } from "./Text.tsx";
@@ -66,20 +68,6 @@ const THEREFORE_SIZE = 13;
 
 /** A context node's SF Symbol box: the `◷`'s own (13 pt glyph in the 14 pt node box). */
 const CONTEXT_NODE_SIZE = 14;
-
-/** Milliseconds since `from`, re-read once a second; null when there is no `from`. */
-function useElapsed(from: number | undefined): number | null {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (from === undefined) {
-      return;
-    }
-    setNow(Date.now());
-    const id = setInterval(() => setNow(Date.now()), STEP_ELAPSED_TICK_MS);
-    return () => clearInterval(id);
-  }, [from]);
-  return from === undefined ? null : Math.max(0, now - from);
-}
 
 /**
  * The ONE blink clock every running step shares (like the TUI's one phase): a
@@ -433,8 +421,14 @@ export interface StepNodeProps {
   readonly shimmer?: boolean;
   readonly trailing: string;
   readonly trailingRed: boolean;
-  /** A running step's start (`row.at`): the trailing text is its live clock. */
+  /**
+   * A running step's start (`row.at`, or the thinking period's): the trailing
+   * slot is its live clock (`ClockText`), in place of `trailing`.
+   */
   readonly liveFrom?: number;
+  /** How the live clock writes it; default `"step"`. */
+  readonly clock?: ClockFormat;
+  readonly clockTestID?: string;
   readonly thread: ThreadPos;
   readonly open: boolean;
   /** Absent: the body would be empty, so the line is not tappable. */
@@ -462,6 +456,8 @@ export function StepNode({
   trailing,
   trailingRed,
   liveFrom,
+  clock = "step",
+  clockTestID,
   thread,
   open,
   onToggle,
@@ -470,8 +466,6 @@ export function StepNode({
   body,
   below,
 }: StepNodeProps): JSX.Element {
-  const elapsed = useElapsed(liveFrom);
-  const shown = elapsed === null ? trailing : liveElapsed(elapsed);
   const tappable = onToggle !== undefined;
   const { fontScale } = useWindowDimensions();
   const branch = branchGeometry(fontScale);
@@ -565,7 +559,16 @@ export function StepNode({
             >
               {subtitle}
             </Text>
-            {shown === "" ? null : (
+            {liveFrom !== undefined ? (
+              <ClockText
+                since={liveFrom}
+                format={clock}
+                color={trailingRed ? palette.red : palette.sec}
+                // The live clock's figures hold one width as they count (S2).
+                tabular={node === "thinking"}
+                {...(clockTestID === undefined ? {} : { testID: clockTestID })}
+              />
+            ) : trailing === "" ? null : (
               <Text
                 numberOfLines={1}
                 maxFontSizeMultiplier={DENSE_FONT_SCALE}
@@ -574,11 +577,9 @@ export function StepNode({
                   // is the quietest thing on the line (owner decision 3).
                   typography.stepMeta,
                   { color: trailingRed ? palette.red : palette.sec },
-                  // The live clock's figures hold one width as they count (S2).
-                  node === "thinking" ? styles.tabular : undefined,
                 ]}
               >
-                {shown}
+                {trailing}
               </Text>
             )}
           </View>
@@ -682,23 +683,24 @@ export function StepBody({
  * The live "Thinking…" node, the list's footer (Owner Q2): the accent dot a
  * running step draws (blinking, docs/fix/mobile-step-rail.md decision 4) and a
  * shimmering word (mockup B + D, `thinking-motion.ts`; static under Reduce Motion), the
- * seconds since it appeared (its mount is the tail's identity: a tool or text in
- * between unmounts it), and a tap that opens the live thought.
+ * seconds since the period began (`since`, the tail's: from the rows, so a remount
+ * reads the same figure; absent → no number), and a tap that opens the live
+ * thought. The figures are `ClockText`'s; the spoken label counts here.
  */
 export function ThinkingNode({
   palette,
   thought,
   up,
+  since,
   reduceMotion,
 }: {
   readonly palette: Palette;
   readonly thought: string;
   readonly up: boolean;
+  readonly since?: number;
   readonly reduceMotion: boolean;
 }): JSX.Element {
-  const start = useRef(Date.now()).current;
-  const ms = useElapsed(start) ?? 0;
-  const label = thinkingLabel(ms);
+  const spoken = useSince(since, (ms) => thinkingA11yLabel(ms ?? 0));
   const [open, setOpen] = useState(false);
   return (
     <View testID="thinking-footer" style={[styles.footer, up ? undefined : styles.runStart]}>
@@ -706,11 +708,14 @@ export function ThinkingNode({
         palette={palette}
         node="thinking"
         reduceMotion={reduceMotion}
-        name={{ tool: label.word }}
+        name={{ tool: thinkingLabel(0).word }}
         nameItalic
         subtitle=""
-        trailing={label.seconds}
+        trailing=""
         trailingRed={false}
+        {...(since === undefined ? {} : { liveFrom: since })}
+        clock="thinking"
+        clockTestID="thinking-clock"
         thread={{ up, down: false }}
         open={open}
         {...(thought === ""
@@ -721,7 +726,7 @@ export function ThinkingNode({
                 setOpen((was) => !was);
               },
             })}
-        a11yLabel={thinkingA11yLabel(ms)}
+        a11yLabel={spoken}
         body={<StepBody palette={palette} thought={thought} command={[]} output={null} />}
       />
     </View>
@@ -829,7 +834,6 @@ const styles = StyleSheet.create({
   nameWide: { flexShrink: 1, maxWidth: "100%" },
   server: { fontWeight: "400" },
   italic: { fontStyle: "italic" },
-  tabular: { fontVariant: ["tabular-nums"] },
   subtitle: { flex: 1 },
   thoughtLine: { fontStyle: "italic", fontWeight: "400" },
   body: { borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 8, paddingBottom: 10, gap: 8 },

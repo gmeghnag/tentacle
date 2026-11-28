@@ -62,9 +62,15 @@ export interface StepLayout {
   readonly cells: ReadonlyMap<string, StepCell>;
   /**
    * The live "Thinking…" footer node (Owner Q2), or null. `thought` is the live
-   * reasoning ("" before any); `up` = it continues the thread of the node above.
+   * reasoning ("" before any); `up` = it continues the thread of the node above;
+   * `since` = when this thinking period began (epoch ms, `thinkingSince`), absent
+   * when no row says.
    */
-  readonly tail: { readonly thought: string; readonly up: boolean } | null;
+  readonly tail: {
+    readonly thought: string;
+    readonly up: boolean;
+    readonly since?: number;
+  } | null;
 }
 
 const FINISHED: ReadonlySet<ToolStatus> = new Set(["ok", "error", "denied"]);
@@ -116,6 +122,33 @@ function isThinking(rows: readonly Row[], running: boolean): boolean {
     }
   }
   return true;
+}
+
+/**
+ * When the current thinking period began (docs/feat/mobile-ui-fluidity-s2.md,
+ * decision 1), from the ROWS so a remount reads the same origin: the stamp of the
+ * row that opened it — the prompt, a context step, or the finished tool batch (its
+ * last result) above the trailing reasoning. Any other opener, or one with no
+ * stamp → the first trailing reasoning row's; else undefined (no number: never
+ * the time something mounted).
+ */
+function thinkingSince(rows: readonly Row[]): number | undefined {
+  let i = rows.length - 1;
+  let reasoningAt: number | undefined;
+  for (let row = rows[i]; row?.kind === "reasoning"; row = rows[--i]) {
+    reasoningAt = row.at;
+  }
+  const opener = rows[i];
+  if (opener?.kind === "user" || opener?.kind === "context") {
+    return opener.at ?? reasoningAt;
+  }
+  let batchEnd: number | undefined;
+  for (let row: Row | undefined = opener; row?.kind === "tool"; row = rows[--i]) {
+    if (row.endedAt !== undefined) {
+      batchEnd = Math.max(batchEnd ?? row.endedAt, row.endedAt);
+    }
+  }
+  return batchEnd ?? reasoningAt;
 }
 
 type Node = { key: string } & (
@@ -285,7 +318,14 @@ export function stepLayout(
     });
   }
 
-  return { cells, tail: thinking ? { thought: tailThought, up: tailJoins } : null };
+  if (!thinking) {
+    return { cells, tail: null };
+  }
+  const since = thinkingSince(rows);
+  return {
+    cells,
+    tail: { thought: tailThought, up: tailJoins, ...(since === undefined ? {} : { since }) },
+  };
 }
 
 const STATUS_WORD: Readonly<Record<ToolStatus, string>> = {

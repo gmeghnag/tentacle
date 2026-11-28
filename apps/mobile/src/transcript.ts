@@ -853,6 +853,7 @@ function applyToolResult(
     ...(event.result.hook !== undefined ? { hook: event.result.hook } : {}),
     ...(event.result.spill !== undefined ? { spill: event.result.spill } : {}),
     ...(event.result.denialReply !== undefined ? { denialReply: event.result.denialReply } : {}),
+    ...(when.at === undefined ? {} : { endedAt: when.at }),
   });
   if (at >= 0) {
     const row = state.rows[at] as ToolRow;

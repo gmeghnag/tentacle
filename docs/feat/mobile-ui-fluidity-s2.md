@@ -137,6 +137,9 @@ the simulator before anything else is built on it.
    (`"thinking" | "step"`), resolved `fontSize`/`lineHeight` (the JS side applies
    `min(fontScale, DENSE_FONT_SCALE)`, `theme.ts:395`, as the RN `Text` does
    today), `color`, `tabular`. iOS only, like the other two modules.
+   *Amended in Execution (claude-sonnet-5-5):* plus an optional `fontFamily` —
+   every RN text goes through the app-font seam (`ui/Text.tsx`, the Figtree beta
+   theme), which a native `UILabel` would otherwise bypass.
 5. **Swift format pinned by vectors through the existing SwiftPM package** (a new
    `ClockCore` target symlinked like `LACore`), vectors in
    `apps/mobile/test/fixtures/clock-format-v1.json`, read by the TS test and the
@@ -268,7 +271,81 @@ Red first on the assertion (stubs/empty bodies, never an import error), then gre
 
 ## Execution
 
-*(pending)*
+*— claude-sonnet-5-5, 2026-11-28* — **PARTIAL**: JS/TS done and green; the native
+half is written but never compiled or run.
+
+### Open before merge (this session's permissions denied `ln`, `swift`)
+
+1. Create the symlink of file 7, from the worktree root:
+   `ln -s ../../../modules/tentacle-clock/ios/ClockCore apps/mobile/native-tests/PushCoreTests/Sources/ClockCore`
+   Until then `bun run test:swift` (and so the `e2e:mobile` preflight) fails for
+   the WHOLE package: `Package.swift` already declares the `ClockCore` target.
+2. `bun run test:swift`, plus its red/mutation proof (stub `formatClock` → `""`,
+   or drop the zero-pad). Neither was run.
+3. Dev build + both simulator steps (load-bearing resize check; `90-perf-stream`
+   on `main` and branch). Not run. Watch two things: (a) whether Maestro can
+   `copyTextFrom` `thinking-clock`, which sits inside the row's accessible
+   `Pressable` — if not, STOP per decision 7; (b) `main` has no `thinking-clock`
+   id, so its baseline fails on the missing element, not on a frozen figure.
+
+### Checks before editing
+
+- Load-bearing, by source: holds (`ExpoView.swift:3`,
+  `ExpoFabricView.swift:46-48`, `ExpoFabricViewObjC.mm` `setShadowNodeSize` →
+  `submitSizePatch`, `RCTAssertMainQueue`; RN 0.88.0). `setShadowNodeSize` is
+  dropped while `_state` is nil. On-device half: open item 3.
+- Repro (`.tentacle/tmp/mobile-ui-fluidity-s2/repro.ts`): before
+  `tail: {"thought":"hmm","up":false}`; after
+  `tail: {"thought":"hmm","up":false,"since":1800000000000}`.
+
+### As built, per slice
+
+| Slice (files) | State | Red first |
+|---|---|---|
+| vectors, `clock.ts`, `motion.ts`, old formatters delegate (1–2) | DONE | stub: 8 of 9 `clock.test.ts` fail |
+| `use-since.ts` (3) | DONE | covered by sampler tests + source pins |
+| `endedAt`, `thinkingSince`, `tail.since` (4–5) | DONE | 8 new tests fail |
+| native module (6) | WRITTEN, not compiled | — |
+| SwiftPM target + `ClockCoreTests` (7) | PARTIAL: no symlink, not run | — |
+| `ClockText.tsx`, `StepNode.tsx`, `SessionScreen.tsx` (8) | DONE (JS) | 3 JS wiring pins fail; the 3 Swift source pins were written after the Swift, never red |
+| flow 90 + two scripts (9) | WRITTEN, not driven | 2 new tests fail (order; scripts absent) |
+| changelog fragment (10) | DONE | — |
+
+### Drift from Implementation
+
+- `fontFamily` prop (decision 4, amended above).
+- `ClockText` measures on the next main-loop turn after props / layout / window,
+  not inside the prop set: a first mount's props land before the shadow state.
+  It compares with `bounds`, so a dropped request is retried at the next layout.
+- `StepNode` also takes `clockTestID` (the compaction slot shares
+  `node="thinking"`, so the id cannot follow the node kind).
+- `thinkingElapsed` / `liveElapsed` stay as declared functions calling
+  `formatClock` (the export allowlist reads declarations).
+- Test-only, not in the file list: seven render tests now stub `expo`
+  (`ClockText` imports it); `step-rail-render` and `transcript-type` pinned the
+  removed `{shown}` and now pin `{trailing}` / `ClockText`'s `{label}`.
+- `tools/mockup-kit/generated/` regenerated (`bun run mockup-kit`): the new
+  constant, the removed `tabular` style, source hashes.
+- No protocol or schema change.
+
+### Mutations (each reverted)
+
+```
+thinkingSince returns the first reasoning `at`  tool-steps.test.ts 49 pass 3 fail
+  (fail) … the prompt's stamp, and still the prompt's once reasoning starts (no jump back to 0 s)
+sampler without re-aim (delay = periodMs)       clock.test.ts 8 pass 1 fail
+  (fail) … a late wake is re-aimed at the next boundary, not carried forward
+TS format without zero-pad                      clock.test.ts 8 pass 1 fail
+  (fail) formatClock: the shared vector table > thinking: every vector
+flow check one-sided (no Math.abs)              e2e-flows -t s2 1 pass 1 fail
+Swift rule changed → test:swift red             NOT RUN
+```
+
+### Checks run
+
+`bun test apps/mobile/test/` + the three mockup-kit files: 5926 pass, 0 fail
+(363 files). Changelog tests: pass. `biome check` on the changed folders: clean.
+`tsc -p apps/mobile`: clean. The full gate was not run (the orchestrator's).
 
 ## Review
 

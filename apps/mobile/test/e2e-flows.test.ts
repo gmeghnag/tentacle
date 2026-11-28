@@ -1224,6 +1224,48 @@ describe("flow 90: the perf gate (docs/feat/mobile-ui-fluidity-s0.md)", () => {
     expect(scriptBody("90-laptop-cancel.js")).toContain("laptop-cancel?session=${PERF_ID}");
   });
 
+  test("the Thinking clock is read before and after the opens (s2)", () => {
+    const body = flow();
+    const read = '- copyTextFrom:\n    id: "thinking-clock"';
+    expect(body.split(read).length - 1).toBe(2);
+    const order = [
+      at(body, 'file: "90-laptop-think.js"'),
+      at(body, read),
+      at(body, 'file: "90-clock-mark.js"'),
+      at(body, "- repeat:"),
+      body.lastIndexOf(read),
+      at(body, 'file: "90-clock-check.js"'),
+      at(body, 'file: "90-laptop-cancel.js"'),
+    ];
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  test("the clock check holds the label to wall time within 2 s (s2)", () => {
+    /** Run the two flow scripts with Maestro's globals, `wallMs` apart. */
+    const run = (first: string, second: string, wallMs: number): void => {
+      const output: Record<string, string> = {};
+      let now = 1_800_000_000_000;
+      const script = (file: string, copiedText: string): void => {
+        new Function("maestro", "output", "Date", scriptBody(file))({ copiedText }, output, {
+          now: () => now,
+        });
+      };
+      script("90-clock-mark.js", first);
+      now += wallMs;
+      script("90-clock-check.js", second);
+    };
+    expect(() => run("5 s", "17 s", 12_000)).not.toThrow();
+    expect(() => run("5 s", "19 s", 12_000)).not.toThrow();
+    expect(() => run("55 s", "1 min 07 s", 12_000)).not.toThrow();
+    // A frozen label, one that jumped back to 0 s, and one running ahead.
+    expect(() => run("1 s", "1 s", 12_000)).toThrow("off wall time");
+    expect(() => run("40 s", "0 s", 12_000)).toThrow("off wall time");
+    expect(() => run("5 s", "20 s", 12_000)).toThrow("off wall time");
+    // Nothing readable is a failure, never a silent pass.
+    expect(() => run("", "12 s", 12_000)).toThrow("unreadable thinking clock");
+    expect(() => run("5 s", "Thinking", 12_000)).toThrow("unreadable thinking clock");
+  });
+
   test("the load outlasts every wait the flow can spend before its last assert", () => {
     const body = flow();
     const under = body.slice(

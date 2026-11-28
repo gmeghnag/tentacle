@@ -176,12 +176,16 @@ describe("StepNode replaces ToolRow", () => {
   test("the live node says “Thinking” and its seconds in tabular figures (S2)", () => {
     const node = read("ui", "StepNode.tsx");
     const live = fnBody(node, "ThinkingNode");
-    expect(live).toContain("thinkingLabel(ms)");
-    expect(live).toContain("name={{ tool: label.word }}");
-    expect(live).toContain("trailing={label.seconds}");
+    expect(live).toContain("name={{ tool: thinkingLabel(0).word }}");
+    // The seconds are the owned clock counting from the tail's `since`
+    // (docs/feat/mobile-ui-fluidity-s2.md), in the `thinking` format.
+    expect(live).toContain("{...(since === undefined ? {} : { liveFrom: since })}");
+    expect(live).toContain('clock="thinking"');
     expect(live).not.toContain("Thinking…");
-    expect(node).toMatch(/node === "thinking" \? styles\.tabular : undefined/);
-    expect(node).toContain('tabular: { fontVariant: ["tabular-nums"] }');
+    expect(node).toContain('tabular={node === "thinking"}');
+    const clock = read("ui", "ClockText.tsx");
+    expect(clock).toContain("tabular ? styles.tabular : undefined");
+    expect(clock).toContain('tabular: { fontVariant: ["tabular-nums"] }');
   });
 
   test("the Thinking motion runs on the native driver, never a JS timer per frame", () => {

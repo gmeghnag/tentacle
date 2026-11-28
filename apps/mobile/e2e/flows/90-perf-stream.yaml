@@ -46,6 +46,12 @@ tags:
       id: "never-there"
     timeout: 4000
     optional: true
+# docs/feat/mobile-ui-fluidity-s2.md: the Thinking clock keeps wall time under
+# this load — read here and after the opens, compared by `90-clock-check.js`.
+- copyTextFrom:
+    id: "thinking-clock"
+- runScript:
+    file: "90-clock-mark.js"
 # 4 = `PERF_BUDGET.minStreamingFans`.
 - repeat:
     times: 4
@@ -72,6 +78,10 @@ tags:
 # The stream covered every open.
 - assertVisible:
     id: "turn-running"
+- copyTextFrom:
+    id: "thinking-clock"
+- runScript:
+    file: "90-clock-check.js"
 - runScript:
     file: "90-laptop-cancel.js"
 - extendedWaitUntil:

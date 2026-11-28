@@ -897,3 +897,46 @@ describe("a server-side model error (docs/fix/model-stream-error.md)", () => {
     expect(last?.kind === "notice" ? last.level : undefined).toBe("warn");
   });
 });
+
+/** docs/feat/mobile-ui-fluidity-s2.md, decision 2: the result's receipt is the call's end. */
+describe("a tool result stamps `endedAt`", () => {
+  const call = { type: "tool_start" as const, id: "c1", name: "shell", arguments: "{}" };
+  const result = {
+    type: "tool_result" as const,
+    id: "c1",
+    name: "shell",
+    result: { content: "x" },
+  };
+  const row = (state: State) => state.rows.find((r) => r.kind === "tool") as ToolRow;
+
+  test("live: the receipt time, and the call's own `at` is untouched", () => {
+    const state = apply(apply(initialState, call, 2000), result, 7000);
+    expect(row(state).endedAt).toBe(7000);
+    expect(row(state).at).toBe(2000);
+  });
+
+  test("a result with no call row is stamped too", () => {
+    expect(row(apply(initialState, result, 7000)).endedAt).toBe(7000);
+  });
+
+  test("a fold with no clock, and a history, carry none", () => {
+    expect(row(fold([call, result]))).not.toHaveProperty("endedAt");
+    const history = fold([
+      {
+        type: "history",
+        messages: [
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: "c1", name: "shell", arguments: "{}" }],
+          },
+          { role: "tool", toolCallId: "c1", content: "x" },
+        ],
+        times: [1000, 2000],
+        reason: null,
+      },
+    ]);
+    expect(row(history).status).toBe("ok");
+    expect(row(history)).not.toHaveProperty("endedAt");
+  });
+});

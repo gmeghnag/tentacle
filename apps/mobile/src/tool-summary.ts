@@ -9,6 +9,7 @@
  * pinned to the TUI's by `test/tool-summary.test.ts`'s parity cases.
  */
 import { stripAnsi } from "./ansi.ts";
+import { formatClock } from "./clock.ts";
 import type { SubProgress, ToolRow } from "./transcript-rows.ts";
 
 export interface ToolSummary {
@@ -502,9 +503,5 @@ export function spokenDuration(ms: number): string {
  * shape without its tenths, which would flicker on a 1 s tick.
  */
 export function liveElapsed(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  if (seconds < 1) {
-    return "";
-  }
-  return seconds < 60 ? `${seconds} s` : `${Math.floor(seconds / 60)} min ${seconds % 60} s`;
+  return formatClock("step", ms);
 }

@@ -18,8 +18,18 @@
  * pinned equal by `test/step-blink.test.ts` (docs/fix/mobile-running-row.md).
  */
 export const STEP_BLINK_HALF_MS = 500;
-/** The tick of a running step's elapsed clock (`ui/StepNode.tsx` `useElapsed`). */
+/**
+ * The tick of a running step's elapsed clock: the native view ticks once a second
+ * (`modules/tentacle-clock/ios/ClockTextView.swift`), and so does the workflow
+ * run's (`run-clock.ts`).
+ */
 export const STEP_ELAPSED_TICK_MS = 1000;
+/**
+ * How often the JS clocks look at the time (`use-since.ts`: the fallback label and
+ * the Thinking row's spoken one). A row re-renders only when its label changes;
+ * 4× a second, so no second is skipped or shown twice whatever its origin's phase.
+ */
+export const CLOCK_SAMPLE_MS = 250;
 /** Half of the header dot's pulse, 1 → 0.3 or back (`ui/HeaderDot.tsx`): 1.4 s a cycle. */
 export const HEADER_DOT_HALF_MS = 700;
 /** The header dot pulse's easing, named for the kit (`Easing.inOut(Easing.ease)`). */

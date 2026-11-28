@@ -8,6 +8,7 @@
  * Pure, React-free (AGENTS §7): the curves are numbers `ui/StepNode.tsx` hands
  * to `Animated.Value.interpolate` on the native driver (no JS timer per frame).
  */
+import { formatClock } from "./clock.ts";
 import { type AppFont, textFont } from "./theme-beta.ts";
 
 /** One breath of the ∴, all three dots. */
@@ -90,23 +91,15 @@ export function shimmerSweep(width: number): {
  * The elapsed clock beside the word, written with a STEADY width so the row does
  * not jump as it counts: `0 s` … `59 s`, then `1 min 05 s` (the seconds
  * zero-padded), then `1 h 02 min` from the first hour. `ui/StepNode.tsx`
- * (`ThinkingNode`) draws it in `palette.sec` with tabular figures.
+ * (`ThinkingNode`) draws it in `palette.sec` with tabular figures; the format
+ * itself is `clock.ts`'s `thinking` one.
  *
- * `liveElapsed` (`tool-summary.ts`) stays as it is for a tool row's duration —
- * that one is NOT tabular, does not pad, and reads `120 min` after two hours;
- * the live Thinking row is the one place the width has to hold.
+ * `liveElapsed` (`tool-summary.ts`) is a tool row's duration — that one is NOT
+ * tabular, does not pad, and reads `120 min` after two hours; the live Thinking
+ * row is the one place the width has to hold.
  */
 export function thinkingElapsed(ms: number): string {
-  const seconds = Math.max(0, Math.floor(ms / 1000));
-  if (seconds < 60) {
-    return `${seconds} s`;
-  }
-  if (seconds < 3600) {
-    const sec = seconds % 60;
-    return `${Math.floor(seconds / 60)} min ${sec < 10 ? `0${sec}` : `${sec}`} s`;
-  }
-  const min = Math.floor((seconds % 3600) / 60);
-  return `${Math.floor(seconds / 3600)} h ${min < 10 ? `0${min}` : `${min}`} min`;
+  return formatClock("thinking", ms);
 }
 
 /**
