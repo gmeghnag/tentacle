@@ -447,6 +447,49 @@ finding 1 FIXED, finding 2 PARTIAL.
   Finding 1's red is the missing link itself (the 2 pins above).
 - No production code changed. Gate: run by the orchestrator's script.
 
+### Fix round 2
+
+*— claude-sonnet-5-5, 2026-11-28* (after review "Round 2"; finding 1 was already
+FIXED) — **finding 2 (HIGH): FIXED.** `e2e:mobile` was permitted this session.
+iPhone 17 Pro, iOS 26.5, under `sim.lock` (released). No code change.
+
+- **Compiles.** A Release build of this tree succeeded (run `1795833911065`; its
+  starter is not this session; the content-keyed cache `8aa33780fcda` matched).
+  The Pods target lists `ClockCore`, `ClockTextView` and `TentacleClockModule.swift`
+  (the log prints no `.swift` line for any pod), `ExpoModulesProvider.swift`
+  registers the module, and the binary contains `ClockTextView`.
+- **Unmodified flow 90** (run `1795834634143`; preflight `test:swift` 18 pass, 0
+  fail): PASS, and so did the earlier run. `copyTextFrom thinking-clock` works
+  (decision 7); `90-clock-check.js` passed over ≈ 126 s. `perf.txt`: PERF PASS,
+  0 jank lines, fan settle 1068, 1064, 1068, 1084 ms. Zero violations. The runner
+  says to drop the `known-bug` tag (left as is: not in this plan).
+- **Native resize** (accessibility bounds, right edge fixed at 386): `4 s`
+  367–386, `26 s` 359–386, `1 min 28 s` 322–386. JS sets only the height.
+- **Load-bearing: JS blocked.** TEMPORARY probe, then restored byte for byte from
+  copies (`git status` clean before this doc edit): `ClockText.tsx` busy-waited at
+  elapsed 7–17 s and 52–66 s and drew `JsClock` beside the native label; flow 90
+  was replaced by timed screenshots (run `1795835374418`).
+  ```
+  probe-4 / probe-5   JS "6 s" (frozen)    native "10 s" → "13 s"
+  probe-20            JS "51 s" (frozen)   native "1 min 01 s"
+  ```
+  The native label ends at the row margin, unclipped, and in probe-20 the frozen
+  JS sibling has moved left: `setViewSize` re-laid the row out with JS blocked.
+  PNGs: `.tentacle/tmp/mobile-ui-fluidity-s2/`.
+- **Tracer control** (same run, expected `PERF FAIL`): 2 jank lines,
+  `worst=10184` and `worst=14247`. So the 0 jank lines above are not a dead tracer.
+- Probe diff (the effect in `ClockText`, for `testID === "thinking-clock"`):
+  `setTimeout(() => { while (Date.now() < since + to) {} }, since + from - Date.now())`
+  for `[7000, 17000]` and `[52000, 66000]`.
+- **Not run:** flow 90 on `main`. Its clock check would fail only on the missing
+  `thinking-clock` id, so it proves nothing about a frozen figure. The branch has
+  0 violations, so by violation count it cannot be worse than any baseline; no
+  same-day numeric comparison exists. iOS 18 not run.
+- Mutations: no code fix this round, so none new; the two controls above are the
+  non-vacuity evidence (`test:swift` mutations: fix round 1).
+- Checks: `clock`, `clock-wiring`, `perf-trace`, `e2e-flows` tests (restored
+  tree). Gate: run by the orchestrator's script.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-28* (fresh context; same model family as the planner,
