@@ -262,7 +262,71 @@ while iterating; then `bun run check` against the clean baseline (AGENTS §6).
 
 ## Execution
 
-*(empty — executor)*
+*— deepseek (V4.1 Flash), 2026-11-28*
+
+### Preconditions, re-run on this worktree (branch HEAD `3239b1f4`)
+
+`bun install --frozen-lockfile` first, as Context warned (the worktree had only
+root dev deps). Then the Context's own Repro, `.tentacle/tmp/mobile-ui-fluidity-s1/`:
+
+```
+branch source (HEAD, no guard):  wired: 20 screen notifications / 100 deltas over 1 s
+copy with the guard:             wired: 10
+```
+
+Load-bearing check holds: the guard alone takes 20 → 10. Nothing contradicts the
+Implementation, so no plan step was stopped.
+
+### As built, in order
+
+1. **Tests first (red).** Added exactly the two tests of **Tests** A/B (B plus the
+   queue case), using the files' existing helpers (`harness`/`pushedTurn`/`settle`;
+   `ref`/`userRow`/`NOTICE`/`settle`/`createThumbnailDriver`/`MAX_IN_FLIGHT`):
+   - `apps/mobile/test/session-screen-stream-render.test.ts:180-218`
+   - `apps/mobile/test/thumbnails.test.ts:434-508`
+   Red on the assertion, production code untouched:
+   ```
+   session-screen-stream-render: during = 20, expect(during).toBeLessThanOrEqual(10)   (fail)
+   thumbnails:                   commit on the FIRST no-op window: expected 0, received 1 (fail)
+   28 pass, 2 fail
+   ```
+2. **The fix.** `apps/mobile/src/thumbnails.ts:312-317`: `view()` commits only when
+   `step.start.length > 0 || step.abort.length > 0`; the abort loop, the pending map
+   and the start loop stay unconditional. Same two test files:
+   ```
+   30 pass, 0 fail
+   ```
+3. **Repro re-run against this worktree's fixed source** (a `feedback-worktree.ts`
+   pointing at `apps/mobile/src/`): `wired: 10` (was 20), `absent: 10` — matches the
+   designed figure.
+4. **Changelog:** `changelog.d/mobile-ui-fluidity-s1.fixed.md`, the plan's one bullet.
+5. **Narrow verification:** `bunx biome check` on the three changed files (clean),
+   `bunx tsc -p apps/mobile --noEmit` (clean), `bun test ./apps/mobile/test`
+   (5789 pass, 0 fail, 357 files). The full `bun run check` is the orchestrator's.
+
+### Mutations (applied, seen red, reverted)
+
+| Mutation | Red |
+|---|---|
+| `if (step.start.length > 0)` only | `thumbnails.test.ts` B: abort-only step — `Expected: 4, Received: 3` |
+| `if (step.abort.length > 0)` only | B both cases: first start — `Expected: 1, Received: 0`; plus the pre-existing `a window change ABANDONS the fetches it scrolled away from` (`Expected length: 4, Received length: 12`) |
+
+The queue case stays green under both mutants and on the old code, as designed
+(it guards the skip, it is not a red test).
+
+### Drift from Implementation
+
+- **Test B's red lands one assertion earlier than the plan predicted.** The plan
+  said B fails at the *second* unchanged view (`expect(commits).toBe(1)`); in fact
+  the old code committed even the first `view([NOTICE], 0, 0)`, an empty step, so
+  `expect(commits).toBe(0)` already fails. Same property (a commit per ask,
+  changed or not); the assertion was left as planned because it reads as the
+  contract. No code/design divergence.
+- No other file touched: no controller edit (orchestrator decision 1), no protocol,
+  schema or persisted-format change — so no `protocol.d/` note and no
+  `protocol.json` regeneration.
+- `changelog.d/mobile-ui-fluidity-s1.fixed.md` is new; `TODO.md` untouched (as
+  instructed).
 
 ## Review
 

@@ -430,3 +430,80 @@ describe("the driver: one state and one controller table per screen", () => {
     expect(state().failed).toEqual([ref("9").id]);
   });
 });
+
+describe("the driver notifies only on a changed plan", () => {
+  // The screen asks for its window on every new `rows` (the FlatList effect).
+  // An unchanged window must be silent: a commit per ask rendered the screen
+  // twice for each streamed update (docs/feat/mobile-ui-fluidity-s1.md).
+  function counting(): {
+    readonly source: ThumbnailSource;
+    /** The requests the driver started, each answerable by index. */
+    readonly answers: ((thumb: { id: string; uri: string }) => void)[];
+  } {
+    const answers: ((thumb: { id: string; uri: string }) => void)[] = [];
+    return {
+      source: {
+        fetch: () =>
+          new Promise((resolve) => {
+            answers.push(resolve);
+          }),
+      },
+      answers,
+    };
+  }
+
+  test("an unchanged window is silent; a start, a settle and an abort-only step each commit once", async () => {
+    let commits = 0;
+    const counted = counting();
+    const driver = createThumbnailDriver(
+      counted.source,
+      () => {
+        commits += 1;
+      },
+      new AbortController().signal,
+    );
+    const rows = [
+      userRow([ref("a")]),
+      ...Array.from({ length: 40 }, () => NOTICE),
+      userRow([ref("b")]),
+    ];
+    driver.view([NOTICE], 0, 0);
+    expect(commits).toBe(0);
+    driver.view(rows, 0, 0); // start a
+    driver.view(rows, 0, 0); // unchanged, a in flight: nothing to notify
+    expect(commits).toBe(1);
+    counted.answers[0]?.({ id: ref("a").id, uri: "file:a" });
+    await settle();
+    driver.view(rows, 0, 0); // unchanged, a loaded: nothing to notify
+    expect(commits).toBe(2);
+    driver.view(rows, 41, 41); // start b
+    expect(commits).toBe(3);
+    driver.view([NOTICE], 0, 0); // abort b only
+    expect(commits).toBe(4);
+    expect(driver.state().inFlight).toEqual([]);
+  });
+
+  test("a queued image still starts at the next unchanged window, and that commits", async () => {
+    let commits = 0;
+    const counted = counting();
+    const driver = createThumbnailDriver(
+      counted.source,
+      () => {
+        commits += 1;
+      },
+      new AbortController().signal,
+    );
+    // One row more images than the in-flight bound: the rest queue, and the next
+    // ask for the same window starts one — a real change, so it commits (the
+    // guard must skip the notification, never the step).
+    const many = userRow(Array.from({ length: MAX_IN_FLIGHT + 1 }, (_, i) => ref(String(i))));
+    driver.view([many], 0, 0);
+    expect(commits).toBe(1);
+    counted.answers[0]?.({ id: ref("0").id, uri: "file:0" });
+    await settle();
+    expect(commits).toBe(2);
+    driver.view([many], 0, 0);
+    expect(commits).toBe(3);
+    expect(driver.state().inFlight).toHaveLength(MAX_IN_FLIGHT);
+  });
+});

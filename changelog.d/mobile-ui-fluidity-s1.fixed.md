@@ -1,0 +1,1 @@
+- **The phone app redraws less while a reply streams.** A session screen no longer renders twice for each streamed update, which leaves more time for taps and animations.

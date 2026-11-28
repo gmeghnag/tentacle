@@ -176,3 +176,44 @@ describe("streamed deltas re-render the screen at most once per window", () => {
     expect(h.live()).toBe(0);
   });
 });
+
+describe("the screen's rows-keyed window effect does not double the renders", () => {
+  test("100 deltas in 1 s with the effect wired: at most 10 notifications", async () => {
+    // The screen's effect (`SessionScreen.tsx`, keyed on `rows`) calls
+    // `controller.window(...)` on every new row array. That call must not notify
+    // the screen again by itself: a commit per ask re-rendered it twice for each
+    // streamed update (100 ms coalescer, so ~20 notifications per 1 s of stream).
+    const h = harness();
+    await h.screen.open();
+    await settle();
+    let rows: unknown = null;
+    let asked = 0;
+    h.screen.subscribe((s) => {
+      if (s.view.rows !== rows) {
+        rows = s.view.rows;
+        const next = s.view.rows;
+        queueMicrotask(() => {
+          asked += 1;
+          h.screen.window(0, next.length - 1, next);
+        });
+      }
+    });
+    const turn = pushedTurn();
+    h.emit(turn.activity);
+    await settle();
+    const before = h.states.length;
+    for (let i = 0; i < 100; i += 1) {
+      turn.push({ type: "reasoning", delta: `w${i} ` } as SessionEvent);
+      await settle();
+      h.advance(10);
+      await settle();
+    }
+    const during = h.states.length - before;
+    expect(during).toBeLessThanOrEqual(10);
+    // Non-vacuity: the stream still renders, and the effect really ran.
+    expect(during).toBeGreaterThanOrEqual(9);
+    expect(asked).toBeGreaterThanOrEqual(9);
+    h.advance(STREAM_RENDER_MS);
+    expect(JSON.stringify(h.states[h.states.length - 1]?.view.rows)).toContain("w99");
+  });
+});

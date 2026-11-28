@@ -309,7 +309,11 @@ export function createThumbnailDriver(
         pending.get(id)?.abort();
       }
       pending = new Map(step.pending);
-      commit(step.state);
+      // An unchanged plan commits nothing: the screen asks on every new `rows`,
+      // and a commit per ask re-rendered it twice per streamed update.
+      if (step.start.length > 0 || step.abort.length > 0) {
+        commit(step.state);
+      }
       for (const request of step.start) {
         const id = request.ref.id;
         const settle = (next: ThumbnailState): void => {
