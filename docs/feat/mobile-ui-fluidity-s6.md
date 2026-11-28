@@ -635,3 +635,22 @@ orchestrator's script. Gate 0 (simulator) not re-run after this change.
 **Attacks tried:** a deferred flush firing mid-drain: no, because `release()` cancels it before every yield. Held prose surviving the end or the throw of a stream: no (`:372`, `:378`). A fast live stream (< 2 ms gaps) tripping the budget: yes, but it only merges deltas and adds one timer hop, so it is harmless. Interleave with a later activity: **this is finding 1.**
 
 **Executor:** honest. It found and documented finding 1 itself instead of hiding it or forcing a fix outside the plan.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-28* (same fresh-context reviewer as round 1; a different model from the executor, DeepSeek)
+
+**Verdict: PASS**
+
+- **Finding 1 is fixed** (`session-feed.ts` `createGate`). An activity, own turn or successor that arrives while a stream is behind waits. Waiting inputs are let through in arrival order, one per task. A stream is no longer behind once its armed flush runs (the loop is parked) or once it ends, whether it ended normally or threw. The round-1 repro `interleave.ts` now gives the same trace, bracket, Stop and rows as the unsliced run, in both scenarios.
+- **Mutations, each red then reverted** (`git status` clean afterwards):
+  - gate bypassed: 9 O-tests red;
+  - no flush armed at the yield: O8 red;
+  - no `caughtUp` on end or throw: 11 red;
+  - successor not gated: O11 red.
+- **Regressions:** `bun test apps/mobile/test` 5 999 pass / 0 fail; lint clean (2 827 files); typecheck clean. I did not run the full `bun run test`.
+- **Attacks that found nothing:**
+  - An ungated feed (no `slice`) still runs every input synchronously, as before.
+  - The pump lets a new stream fall behind (in microtasks) before it releases the next input.
+  - A stream that is behind and then idle catches up through its armed flush, so nothing hangs.
+- **Residual cost, accepted:** a foreign turn's Stop and an own prompt row appear only after the older backlog catches up (at most a few slices).
