@@ -456,3 +456,22 @@ Attacks tried:
 
 Executor: honest. It marked itself PARTIAL and listed every open item. It never claimed
 the Swift side was green.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-28* — **Verdict: REQUEST-CHANGES.** Reviewed
+`0cf12b3e..HEAD` (the fix is `a4e27574`; HEAD itself is docs only).
+
+- **Finding 3 (MEDIUM): FIXED.** `transcript-history.ts:192,206` stamps `endedAt`
+  from `atOf(times, index)`. Mutation (spread removed) → 2 new `transcript.test.ts`
+  fail; reverted, `git status` clean. Unknown times (none, short, `0`) stamp nothing
+  (tested). No regression in `apps/mobile/test/` apart from the 2 below.
+- **Finding 1 (HIGH): OPEN.** `Sources/ClockCore` is still absent (the `ln -s` was
+  refused again). The new pins `clock-wiring.test.ts` "the Swift package can load"
+  fail (2 fails), so `bun run test` is red on this branch and `test:swift` is still
+  broken. The pins themselves are correct: they fail on exactly this state.
+- **Finding 2 (HIGH): OPEN.** Native code is still uncompiled. `test:swift` and both
+  simulator steps have not run.
+- Gate: `apps/mobile/test/` 5848 pass / 2 fail (the two above). Lint clean. Typecheck clean.
+- Needed: someone with permission runs the `ln -s` (Execution item 1), then
+  `bun run test:swift` + its zero-pad mutation, then a dev build + the simulator steps.
