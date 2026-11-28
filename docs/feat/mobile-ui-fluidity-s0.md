@@ -379,7 +379,49 @@ pass / 0 fail; `biome check` on the changed files clean (after one format of
 
 ## Review
 
-*(empty)*
+**Verdict: REQUEST-CHANGES** (1 HIGH).
+
+1. **HIGH — hub opens with no stream load count as evidence.**
+   `apps/mobile/e2e/mock-model.ts:727-767` (not in the diff), used by
+   `apps/mobile/e2e/flows/90-perf-stream.yaml:76-78` and `e2e/run.ts:548`.
+   A `THINKHOLD FAST` turn does not end at `holdMs`: the fast phase stops, then
+   the `hold` branch trickles the 5 `DELTAS`, `holdMs/5` apart. The turn lasts
+   about 240 s, with load only for the first 120 s. So the planned failure mode
+   "stream ends before the 4th open → `turn-running` fails, fans are
+   `stream=false`" is **false**, and so is "ends by itself within 120 s".
+   - Scaled probe (`holdMs=2000`): last reasoning delta +1998 ms, turn end
+     +4017 ms.
+   - Saved run `1795825265656`: think 00:29:04.1; the last window has `folds=0`
+     at 00:31:05.2; `turn-running` still passes at about +131 s; cancel at +131.6 s.
+   - Margin: the 4th fan settles 5–7 s before the load ends (runs …265656,
+     …900647, …382110), at about 31.6 s per open.
+   - Scenario: Maestro or a shared-CPU gate about 6 % slower puts open 4 (then 3)
+     in the trickle. It logs `stream=true`, settles unloaded, meets
+     `minStreamingFans` and `turn-running` passes. A slice whose app is still slow
+     under load in the later opens can read `PASS (known-bug)`.
+   - Needed: the load must cover every open, and its end must be loud (e.g. a
+     longer fast phase for this flow, with the turn ending when it ends), pinned
+     by a red-first test.
+
+**Holds:** 6 touched/guard test files 221 pass / 0 fail; `bun run lint` clean
+(2807 files); `bun run typecheck` clean. §7: no invariant touched (pure checker
+and probe, one listener, seeding through `openSession`). Probe suspend/resume
+orders hold; the uncovered one is already declared. Replaying `checkPerf` on the
+4 saved `ptrace.txt` gives the table's numbers; the fourth run (…382110, not in
+Execution) is red too.
+
+**Mutations** (15, restored byte-for-byte): 13 killed. Survivors, below
+MEDIUM: inverting `flow === PERF_FLOW` (`run.ts`), and `longHistory(2)` inside
+`longSessionOf`; both are covered only by the simulator runs.
+
+**Not run:** full `bun run check`, the simulator, the Context repro on `main`.
+
+**Note:** commit `601dfd5f` says `exec (deepseek)`, but Execution is signed
+`claude-sonnet-5-5`. The brief asked for an opus signature; the model that ran
+this review is Sonnet 5.5, so it is signed as such. If the executor was also
+Sonnet, only the context was fresh.
+
+*— claude-sonnet-5-5, 2026-11-28*
 
 ## Appendix — history
 
