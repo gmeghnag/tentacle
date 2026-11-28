@@ -1,0 +1,1 @@
+- **The hub fan opens whole while a reply streams.** Every item now starts from one native animation, so a busy phone can no longer leave only the first button showing.

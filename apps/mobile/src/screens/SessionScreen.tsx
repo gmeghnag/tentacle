@@ -1763,8 +1763,11 @@ export function SessionScreen({
     hubFanOpen.current = open;
     if (open) {
       hubOpenAt.current = hubOpen(hubCtx);
+    } else {
       // The Workflows item is dimmed by the catalogue it last SAW (fix/workflows-ux
-      // fix round 1): re-read it at each open, so a file added since un-dims it.
+      // fix round 1): re-read it, so a file added since un-dims it. At the CLOSE,
+      // for the next open (this fan is a snapshot), so no RPC, emit or hub render
+      // lands inside the opening window (docs/feat/mobile-ui-fluidity-s5.md D3).
       void controller.refreshCatalogue();
     }
     // M2: no native back-swipe under the scrim; restored on every close path.

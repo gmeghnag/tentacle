@@ -3,7 +3,7 @@
  * the items and the highlighted item's label. Render only — where each item
  * sits is `hub-fan.ts`'s `fanLayout` (solved once, at the open), which item is
  * highlighted is the gesture machine's, the label's spot is `labelPlacement`,
- * and how it moves is `fanMotion`. Coordinates are the band's: this view fills
+ * and how it moves is `fanMotion` / `fanOpenPlan`. Coordinates are the band's: this view fills
  * the band, so a tap's local point IS a band point.
  *
  * Touch: during a press the BUTTON's responder owns the finger (the items have
@@ -11,7 +11,7 @@
  * the scrim, which hands its point to the machine (`tapOverlay`): an item within
  * reach commits, anywhere else closes.
  */
-import { type JSX, memo, useEffect, useRef, useState } from "react";
+import { type JSX, memo, useEffect, useMemo, useRef, useState } from "react";
 import { Animated, StyleSheet, View } from "react-native";
 import { Path, Svg } from "react-native-svg";
 import { type HubActionId, type HubItem, itemA11yLabel } from "../hub-actions.ts";
@@ -21,6 +21,7 @@ import {
   ITEM_SIZE,
   type Point,
   fanItemLook,
+  fanOpenPlan,
   labelPlacement,
 } from "../hub-fan.ts";
 import { type Flash, pillIndex, pillText } from "../hub-flash.ts";
@@ -85,27 +86,28 @@ export const HubFan = memo(HubFanView);
 
 function HubFanView(props: HubFanProps): JSX.Element {
   const { palette, layout, items, hi, motion, band, flash, now } = props;
-  // One value per item, created at the open (this view mounts with the fan).
-  const grow = useRef(layout.items.map(() => new Animated.Value(0))).current;
-  // Started ONCE per open: `grow` is per mount and `motion` is one object per
-  // mode (`fanMotion`), so a re-render never restarts the springs mid-flight
+  // ONE progress value for the whole fan, created at the open (this view mounts
+  // with the fan); each item reads it through its own track (`fanOpenPlan`), so
+  // no item's start waits on a JS timer (docs/feat/mobile-ui-fluidity-s5.md).
+  const progress = useRef(new Animated.Value(0)).current;
+  const plan = useMemo(
+    () => fanOpenPlan(motion, layout.items.length),
+    [motion, layout.items.length],
+  );
+  const tracks = useMemo(
+    () => plan.tracks.map((track) => progress.interpolate(track)),
+    [progress, plan],
+  );
+  // Started ONCE per open: `progress` is per mount and `motion` is one object per
+  // mode (`fanMotion`), so a re-render never restarts the opening mid-flight
   // (the device jank: a restart per streamed delta also re-ran the stagger).
   useEffect(() => {
-    const anims = grow.map((value, i) =>
-      motion.spring
-        ? Animated.spring(value, {
-            toValue: 1,
-            damping: motion.damping,
-            stiffness: motion.stiffness,
-            delay: i * motion.staggerMs,
-            useNativeDriver: true,
-          })
-        : Animated.timing(value, { toValue: 1, duration: motion.fadeMs, useNativeDriver: true }),
-    );
+    const run = Animated.timing(progress, plan.timing);
     // The perf trace (docs/fix/mobile-fan-jank-device.md): each start, and the end.
     PERF.fanStart();
-    Animated.parallel(anims).start(({ finished }) => PERF.fanSettle(finished));
-  }, [grow, motion]);
+    run.start(({ finished }) => PERF.fanSettle(finished));
+    return () => run.stop();
+  }, [progress, plan]);
 
   const [labelSize, setLabelSize] = useState<{ width: number; height: number } | null>(null);
   // ONE pill: the finger's highlight, or the item that is flashing its reason
@@ -139,14 +141,14 @@ function HubFanView(props: HubFanProps): JSX.Element {
           return null;
         }
         const lit = hi === i;
-        const value = grow[i] ?? new Animated.Value(1);
+        const value: Animated.AnimatedInterpolation<number> = tracks[i] ?? progress;
         const scale = value.interpolate({
           inputRange: [0, 1],
           outputRange: [motion.fromScale, lit ? motion.highlightScale : 1],
         });
         // What this disc and its rim LOOK like is `fanItemLook`'s (Design 7); a
         // dimmed item is a `fill` disc with a `sec` glyph — faintness is a colour,
-        // so the item's opacity stays purely its own spring/fade/highlight motion
+        // so the item's opacity stays purely its own track/highlight motion
         // (a second `opacity` style would win over the animation and draw the disc
         // before the fan opens and behind it after it closes).
         const look = fanItemLook(item, lit);

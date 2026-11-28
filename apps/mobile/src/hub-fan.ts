@@ -379,6 +379,10 @@ export interface FanMotion {
   readonly dimOpacity: number;
   readonly fadeMs: number;
   readonly collapseMs: number;
+  /** How long one item's opening track lasts (`fanOpenPlan`). */
+  readonly trackMs: number;
+  /** How many straight segments that track is sampled into. */
+  readonly trackSamples: number;
 }
 
 /**
@@ -400,6 +404,9 @@ const STILL_MOTION: FanMotion = Object.freeze({
   staggerMs: 0,
   fromScale: 1,
   highlightScale: 1,
+  // The fade is linear: one segment.
+  trackMs: SHARED_MOTION.fadeMs,
+  trackSamples: 1,
 });
 const SPRING_MOTION: FanMotion = Object.freeze({
   ...SHARED_MOTION,
@@ -407,14 +414,85 @@ const SPRING_MOTION: FanMotion = Object.freeze({
   staggerMs: 18,
   fromScale: 0.4,
   highlightScale: 1.3,
+  // At 600 ms the spring is within 0.0023 of 1; 24 segments stay within 0.016 of it.
+  trackMs: 600,
+  trackSamples: 24,
 });
 
 /**
  * ONE object per mode, never a fresh one (docs/fix/mobile-fan-jank-device.md):
- * the fan starts its opening animation from an effect keyed on this value, so a
- * fresh object per render restarted every item's spring — and its stagger
- * delay — on every re-render of the screen, i.e. on every streamed delta.
+ * the fan's opening plan is memoized on this value and its animation starts from
+ * an effect keyed on that plan, so a fresh object per render restarts the whole
+ * opening on every re-render of the screen, i.e. on every streamed delta.
  */
 export function fanMotion(reduceMotion: boolean): FanMotion {
   return reduceMotion ? STILL_MOTION : SPRING_MOTION;
+}
+
+/** The opening timing's easing: the native driver samples it once, in JS, at the start. */
+export const linear = (t: number): number => t;
+
+/** One item's view of the fan's shared 0 → 1 progress (an `interpolate` config). */
+export interface FanTrack {
+  readonly inputRange: number[];
+  readonly outputRange: number[];
+  readonly extrapolate: "clamp";
+}
+
+export interface FanOpenPlan {
+  readonly timing: {
+    readonly toValue: 1;
+    readonly duration: number;
+    readonly easing: (t: number) => number;
+    readonly useNativeDriver: true;
+  };
+  /** In the layout's order. */
+  readonly tracks: readonly FanTrack[];
+}
+
+/**
+ * React Native's spring (`SpringAnimation.js` `onUpdate`, its closed form) from
+ * 0 to 1, starting at rest, mass 1: where it is `tMs` after the start.
+ */
+export function springAt(tMs: number, damping: number, stiffness: number): number {
+  const t = tMs / 1000;
+  const zeta = damping / (2 * Math.sqrt(stiffness));
+  const omega0 = Math.sqrt(stiffness);
+  if (zeta >= 1) {
+    return 1 - Math.exp(-omega0 * t) * (1 + omega0 * t);
+  }
+  const omega1 = omega0 * Math.sqrt(1 - zeta * zeta);
+  return (
+    1 -
+    Math.exp(-zeta * omega0 * t) *
+      (((zeta * omega0) / omega1) * Math.sin(omega1 * t) + Math.cos(omega1 * t))
+  );
+}
+
+/**
+ * The fan's whole opening as ONE native timing (docs/feat/mobile-ui-fluidity-s5.md).
+ * React Native implements an animation's `delay` as a JS `setTimeout`, so the
+ * stagger lives in the tracks instead: item `i`'s track is the spring sampled
+ * over `trackMs` (Reduce Motion: one straight fade), shifted by `i · staggerMs`,
+ * and its last sample is exactly 1.
+ */
+export function fanOpenPlan(motion: FanMotion, count: number): FanOpenPlan {
+  const { staggerMs, trackMs, trackSamples } = motion;
+  const duration = Math.max(0, count - 1) * staggerMs + trackMs;
+  const times = Array.from({ length: trackSamples + 1 }, (_, k) => (trackMs * k) / trackSamples);
+  const values = times.map((t, k) => {
+    if (k === 0) {
+      return 0;
+    }
+    return k === trackSamples ? 1 : springAt(t, motion.damping, motion.stiffness);
+  });
+  const tracks = Array.from(
+    { length: count },
+    (_, i): FanTrack => ({
+      inputRange: times.map((t) => (i * staggerMs + t) / duration),
+      outputRange: [...values],
+      extrapolate: "clamp",
+    }),
+  );
+  return { timing: { toValue: 1, duration, easing: linear, useNativeDriver: true }, tracks };
 }

@@ -20,9 +20,11 @@ import {
   fanItemLook,
   fanLayout,
   fanMotion,
+  fanOpenPlan,
   labelPlacement,
   pickItem,
   rimFraction,
+  springAt,
 } from "../src/hub-fan.ts";
 import { darkPalette, lightPalette } from "../src/theme.ts";
 
@@ -440,6 +442,8 @@ describe("fanMotion (Design 4; Reduce Motion is read per open, M11)", () => {
       dimOpacity: 0.55,
       fadeMs: 120,
       collapseMs: 120,
+      trackMs: 600,
+      trackSamples: 24,
     });
   });
 
@@ -459,6 +463,125 @@ describe("fanMotion (Design 4; Reduce Motion is read per open, M11)", () => {
     expect(fanMotion(false)).toBe(fanMotion(false));
     expect(fanMotion(true)).toBe(fanMotion(true));
     expect(fanMotion(true)).not.toBe(fanMotion(false));
+  });
+});
+
+describe("fanOpenPlan + springAt: one native timing, sampled tracks (fluidity s5)", () => {
+  const COUNTS = [0, 1, 8, 13];
+  /** What the native interpolation node reads at `p`: piecewise linear, clamped. */
+  const read = (track: { inputRange: number[]; outputRange: number[] }, p: number): number => {
+    const { inputRange: x, outputRange: y } = track;
+    if (p <= (x[0] ?? 0)) {
+      return y[0] ?? Number.NaN;
+    }
+    for (let k = 1; k < x.length; k++) {
+      const [x0 = 0, x1 = 0, y0 = 0, y1 = 0] = [x[k - 1], x[k], y[k - 1], y[k]];
+      if (p <= x1) {
+        return y0 + ((y1 - y0) * (p - x0)) / (x1 - x0);
+      }
+    }
+    return y[y.length - 1] ?? Number.NaN;
+  };
+
+  test("A1: one linear native timing, no delay, long enough for the last item", () => {
+    for (const reduce of [false, true]) {
+      for (const n of COUNTS) {
+        const { timing } = fanOpenPlan(fanMotion(reduce), n);
+        expect(timing.toValue).toBe(1);
+        expect(timing.useNativeDriver).toBe(true);
+        expect("delay" in timing).toBe(false);
+        expect(timing.easing(0.37)).toBe(0.37);
+        expect(timing.duration).toBe(reduce ? 120 : Math.max(0, n - 1) * 18 + 600);
+      }
+    }
+  });
+
+  test("A2: one strictly increasing, clamped track per item; the last ends at exactly 1", () => {
+    for (const n of COUNTS) {
+      const { timing, tracks } = fanOpenPlan(fanMotion(false), n);
+      expect(tracks.length).toBe(n);
+      tracks.forEach((track, i) => {
+        expect(track.extrapolate).toBe("clamp");
+        expect(track.inputRange.length).toBe(track.outputRange.length);
+        for (const [k, input] of track.inputRange.entries()) {
+          expect(input).toBeGreaterThanOrEqual(0);
+          expect(input).toBeLessThanOrEqual(1);
+          if (k > 0) {
+            expect(input).toBeGreaterThan(track.inputRange[k - 1] ?? Number.NaN);
+          }
+        }
+        expect(track.inputRange[0]).toBe((i * 18) / timing.duration);
+        expect(track.outputRange[0]).toBe(0);
+        expect(track.outputRange.at(-1)).toBe(1);
+      });
+      if (n > 0) {
+        expect(tracks[n - 1]?.inputRange.at(-1)).toBe(1);
+      }
+      if (n === 1) {
+        expect(tracks[0]?.inputRange[0]).toBe(0);
+      }
+    }
+  });
+
+  test("A3: springAt is React Native's closed form, under- and over-damped", () => {
+    // SpringAnimation.js:291-324, damping 18, stiffness 260, mass 1, 0 → 1, v0 = 0.
+    expect(springAt(0, 18, 260)).toBeCloseTo(0, 10);
+    expect(springAt(50, 18, 260)).toBeCloseTo(0.2337934656, 8);
+    expect(springAt(200, 18, 260)).toBeCloseTo(1.0977507558, 8);
+    expect(springAt(400, 18, 260)).toBeCloseTo(0.9984500614, 8);
+    // zeta ≥ 1 takes RN's critically damped branch: 1 − e^(−ω0·t)·(1 + ω0·t).
+    const w0 = Math.sqrt(260);
+    for (const damping of [2 * w0, 60]) {
+      expect(springAt(100, damping, 260)).toBeCloseTo(1 - Math.exp(-w0 * 0.1) * (1 + w0 * 0.1), 10);
+    }
+    let peak = 0;
+    for (let t = 0; t <= 600; t++) {
+      peak = Math.max(peak, springAt(t, 18, 260));
+    }
+    expect(peak).toBeGreaterThan(1.1);
+  });
+
+  test("A3: each track IS today's spring, shifted by its stagger (within 0.02)", () => {
+    for (const n of [1, 8, 13]) {
+      const { timing, tracks } = fanOpenPlan(fanMotion(false), n);
+      expect(tracks.length).toBe(n);
+      tracks.forEach((track, i) => {
+        let worst = 0;
+        for (let t = 0; t <= 600; t += 0.5) {
+          const p = (i * 18 + t) / timing.duration;
+          worst = Math.max(worst, Math.abs(read(track, p) - springAt(t, 18, 260)));
+        }
+        expect(worst).toBeLessThan(0.02);
+      });
+    }
+  });
+
+  test("A4: the stagger is kept: item i is still at 0 when item i−1 has left", () => {
+    const { timing, tracks } = fanOpenPlan(fanMotion(false), 13);
+    expect(tracks.length).toBe(13);
+    for (let i = 1; i < tracks.length; i++) {
+      const p = (i * 18) / timing.duration;
+      const own = tracks[i];
+      const before = tracks[i - 1];
+      expect(own && read(own, p)).toBe(0);
+      expect(before && read(before, p)).toBeGreaterThan(0);
+    }
+  });
+
+  test("A5: no pop at the end: the spring is within 0.0023 of 1 when the track ends", () => {
+    const { trackMs } = fanMotion(false);
+    expect(trackMs).toBe(600);
+    expect(Math.abs(1 - springAt(trackMs, 18, 260))).toBeLessThanOrEqual(0.0023);
+  });
+
+  test("A6: Reduce Motion: every item is the same [0, 1] fade", () => {
+    for (const n of COUNTS) {
+      const { tracks } = fanOpenPlan(fanMotion(true), n);
+      expect(tracks.length).toBe(n);
+      for (const track of tracks) {
+        expect(track).toEqual({ inputRange: [0, 1], outputRange: [0, 1], extrapolate: "clamp" });
+      }
+    }
   });
 });
 

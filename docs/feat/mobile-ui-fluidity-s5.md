@@ -114,7 +114,7 @@ The owner delegated these. The recommended option is chosen in each case.
   - (c) Drop the stagger. This changes the design (Design 4).
   - `Animated.stagger` is not an option: it is implemented with `delay`.
 - **D2. Sampling.**
-  - **Chosen: 600 ms × 24 samples.** The residual is |1 − x| ≤ 0.002 at 600 ms, so there is no visible pop at the end, and the error is 0.016 (repro).
+  - **Chosen: 600 ms × 24 samples.** The residual is |1 − x| ≤ 0.0023 at 600 ms (0.00221; the plan first said ≤ 0.002, which holds only from 602 ms — corrected by the executor), so there is no visible pop at the end, and the error is 0.016 (repro).
   - 16 samples (0.031) is visibly coarser at the overshoot.
   - Side effect: the settle shortens from about 933 ms to 600 ms per item, because RN's spring spends about 330 ms below 0.002 just to satisfy its velocity threshold. This is an improvement, invisible to the eye.
 - **D3. Where the catalogue re-read goes.**
@@ -169,7 +169,7 @@ Write them red first, against a stub `fanOpenPlan` that returns `{ timing: { toV
 2. There are `tracks.length === n` tracks. Each `inputRange` is strictly increasing and within [0, 1], with `extrapolate: "clamp"`. The first input is `i·18/T`, the first output 0 and the last output exactly 1. **The last item's last input is exactly 1** (eval row 5).
 3. **It is the same spring**: over 0…600 ms, each track's piecewise-linear value at `(i·18 + t)/T` is within 0.02 of `springAt(t, 18, 260)`. `springAt` itself matches RN's closed form at three points, and its peak is > 1.1, so a linear `[0,1]` track fails this test.
 4. **The stagger is kept**: at `p = (i·18)/T`, item *i* reads 0 and item *i−1* reads more than 0.
-5. The end shows no pop: `|1 − springAt(600)| ≤ 0.002`.
+5. The end shows no pop: `|1 − springAt(600)| ≤ 0.0023` (corrected from 0.002, see D2).
 6. Reduce Motion: every track is `[0,1] → [0,1]`, and `fanMotion` keeps its one-object-per-mode identity (existing test).
 
 **B. Source pins (comment lines stripped, the existing helper).**
@@ -205,7 +205,57 @@ Regression flows: `33-hub`, `34-hub-workflows`, `28-floating-activity`. Record t
 
 ## Execution
 
-*(empty — the executor's)*
+*— claude-sonnet-5-5, 2026-11-28*
+
+**Before any edit.** The repro printed the Context's output line for line. The load-bearing check holds in the main checkout's React Native: the only `setTimeout` in `TimingAnimation.js` is the `delay` one (`:146-147`), the easing is sampled at `:95-101`, `AnimatedInterpolation.js:483-501` and `:513-558` read as cited, and `:325-331` asks only for a non-decreasing range.
+
+**As built**, in plan order:
+
+1. `apps/mobile/src/hub-fan.ts`: `FanMotion.trackMs`/`trackSamples` (600/24; Reduce Motion `fadeMs`/1), `linear`, `FanTrack`, `FanOpenPlan`, `springAt`, `fanOpenPlan`.
+2. `apps/mobile/src/ui/HubFan.tsx`: one `progress`, memoized `plan` and `tracks`, one `Animated.timing(progress, plan.timing)` with a `stop` cleanup.
+3. `apps/mobile/src/screens/SessionScreen.tsx` `onHubFan`: `refreshCatalogue` moved to the `else` (close) branch.
+4. The four test files, and `changelog.d/mobile-ui-fluidity-s5.fixed.md`.
+
+**Drift.**
+
+- **The plan's end bound was wrong.** `|1 − springAt(600)|` is 0.002213, not ≤ 0.002 (the Context's own repro says 602 ms). D2 and test A5 now say ≤ 0.0023. The chosen 600 ms × 24 is unchanged.
+- `const value` in `HubFan` is annotated `Animated.AnimatedInterpolation<number>`: without it, `tsc` rejects `.interpolate` on the union with the `progress` fallback (TS2349).
+- B1 also pins the memo keys, the `stop` cleanup and no `Animated.delay` (mutation m6).
+- **Left stale (file not in the plan):** comments in `session-screen-controller.ts` (`:257`, `:329`, `:541`, `:702`, `:1420`) still say the catalogue is re-read at the hub's *open*. It is now the close.
+
+**Red first** (stub `fanOpenPlan`/`springAt`, old `HubFan`/`SessionScreen`), all on assertions:
+
+- `hub-fan.test.ts`: 43 pass, 8 fail (the `fanMotion` `toEqual`, A1, A2, both A3, A4, A5, A6).
+- Wiring: 5 fail (`fan-jank` ×2: effect key, no-timer pins; `hub-workflows` ×2: open branch, close branch; `native-driver` ×1). The "lock stays unconditional" pin is green on both, as intended. The open-branch test was simplified afterwards; m4 shows it still fails.
+
+**Mutations** (`.tentacle/tmp/mobile-ui-fluidity-s5/mutate.ts`; apply, run, restore):
+
+```
+m1 no i*staggerMs offset      48 pass, 3 fail  (A2, A3 tracks, A4)
+m2 outputs [0, 1]             50 pass, 1 fail  (A3 tracks)
+m3 delay back in HubFan        9 pass, 1 fail  (B1 no-timer)
+m4 refresh in the open branch  4 pass, 1 fail  (C1)
+m5 trackSamples: 8            49 pass, 2 fail  (A3 tracks, fanMotion toEqual)
+m6 (extra) no stop cleanup     9 pass, 1 fail  (effect pin)
+```
+
+**Checks on the finished tree:** `bun test apps/mobile/test` 5975 pass, 0 fail; `tsc -p apps/mobile` clean; `biome check apps/mobile` clean. The full `bun run check` was **not** run (the orchestrator's).
+
+**Gate 0 and flows** (iPhone 17 Pro, iOS 26.5, under `sim.lock`, since released; runner `gate0.ts`). For the `main` run the three changed sources held `HEAD`'s content (`git show`), then were restored (`cmp` equal to the backups). The app cache keys printed by the gate, `main` `39e29a2645c9` and branch `8f616d53430d`, match the keys computed from those two trees.
+
+| `90-perf-stream` | `main` | branch |
+|---|---|---|
+| verdict (Maestro: `PASS (known-bug)` on both) | PERF PASS | PERF PASS |
+| jank lines / streaming fan lines | 0 / 4 | 0 / 4 |
+| `starts` per fan line | 1,1,1,1 | 1,1,1,1 |
+| settle ms | 1070, 1067, 1067, 1066 | **705, 717, 710, 712** |
+| panes `shell` / `tail` / `cells` | 3 / 1222 / 118 | 3 / 1209 / 118 |
+
+The other panes are 1 on both. Flows `33-hub`, `34-hub-workflows` and `28-floating-activity` pass on the branch (`33-hub` also on `main`). The flow's `33-hub-fan-running-light.png` on the branch shows the six-item fan whole and at rest.
+
+**D5 videos** (for the owner): `.tentacle/tmp/mobile-ui-fluidity-s5/fan-main-33-hub.mp4` and `fan-branch-33-hub.mp4` (main checkout's `.tentacle`; the whole flow). **I did not play them**, so how the motion looks is unverified.
+
+**Not verified:** a physical device under a busy JS thread (the owner's report), and Android.
 
 ## Review
 
