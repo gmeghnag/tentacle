@@ -330,4 +330,51 @@ The queue case stays green under both mutants and on the old code, as designed
 
 ## Review
 
-*(empty — reviewer)*
+*— claude-sonnet-5-5, 2026-11-28* (fresh context; same model as the planner,
+exec was DeepSeek. The brief asked for an `claude-opus-5-5` signature; the
+session runs `claude-sonnet-5-5`, so that is what is signed.)
+
+**Verdict: PASS (APPROVE).** No HIGH or MEDIUM finding.
+
+**Gate** (run as three commands): typecheck clean; lint clean (2803 files);
+`bun run test` 21402 pass, 5 skip, 0 fail (1476 files; the diff adds no skip).
+The two touched files: 30 pass.
+
+**Mutations** on the guard (`thumbnails.ts:314`), reverted, `git diff HEAD` empty:
+
+| Mutant | Red |
+|---|---|
+| `if (true)` (= `main`) | A: 20 > 10; driver: 1 ≠ 0 |
+| `start.length > 0` only | driver abort-only step: 3 ≠ 4 |
+| `abort.length > 0` only | both new driver tests + the abandon test |
+| `if (false)` | same three driver tests |
+
+**Premises** (all TRUE against the pre-edit lines): `SessionScreen.tsx:537-544,
+854-856, 622-626`; controller `:860-867, 870-905, 1505-1517, 2189-2191`;
+`thumbnails.ts:188-189, 217, 287-290, 312, 315-323`; wiring test `:182-195`;
+`render-coalesce.ts:22`. Symptom: reproduced with the `main` guard (20).
+
+**Attacks tried**
+1. State relying on the removed emit: surveyed the controller's state
+   assignments in the attach, send, compose, activity, resync, compact, clear
+   and artifact paths; each reaches `emit()` / `render.soon()` or a subscribed
+   `onChange`. Nothing found (static, not proof for every setter).
+2. Screen render reading a ref or clock that the scroll-triggered re-render
+   refreshed: `visible` is read only by the two `window` calls; sticky row,
+   scroll dim and follow set their own state; the copy pill, activity clock and
+   voice have timers or ticks. Nothing found.
+3. End-to-end through the real controller (`.tentacle/tmp/mobile-ui-fluidity-s1/
+   review-trace.test.ts`, main checkout): effect wired, 5 images, 4 settles, 100
+   deltas, abort-only window, turn end. Last notified state equals `state()` at
+   each checkpoint; the queued 5th image starts; the abort is signalled and
+   notified. 11 notifications over the delta loop (20 on the `main` guard).
+4. Load-bearing assumption: `plan` changes only `inFlight`, by `abort` removals
+   and `start` appends. Holds, also on an aborted signal.
+5. §7: no protocol, persistence, broker or transport touched; logic stays in the
+   pure driver. Scope is the five listed files.
+
+**Executor:** followed the plan; the one drift (red one assertion earlier) is
+reported and correct.
+
+**Unverified:** device/simulator frame cost; check with a streaming turn on the
+phone's perf trace.
