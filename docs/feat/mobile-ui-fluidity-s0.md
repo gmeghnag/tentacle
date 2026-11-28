@@ -482,6 +482,33 @@ Sonnet, only the context was fresh.
 
 *— claude-sonnet-5-5, 2026-11-28*
 
+### Round 2
+
+**Verdict: PASS** (`e7546ead`, diff `HEAD~1`). No HIGH or MEDIUM.
+
+**HIGH 1 is closed.** `THINKHOLD FAST` now keeps its load for 3 holds (360 s)
+and ends the turn with it (`mock-model.ts:734-771`), so an idle turn fails
+`turn-running`. Probe at `holdMs=1000`: FAST ends at 3109 ms (no tail); `HOLD`
+1013 ms and slow `THINKHOLD` 2043 ms, as the code before the fix gives them. An
+aborted FAST request still leaves `held` true, as a cancelled hold did. Only
+flow 90 sends `THINKHOLD` among the e2e flows and scripts.
+
+**Mutations** (`mutate-r2.ts`, every file restored byte for byte): 7 of 9 killed:
+trickle tail back; load of one hold; `FAST_HOLDS = 2`; slow `THINKHOLD` given 3
+holds; `held` never released; runner hold 60 s; a longer yaml wait. Survivors,
+below MEDIUM, both outside the fixed property: inverting the tail's `hold` test,
+and slow `THINKHOLD` losing its tail (run against the two changed test files).
+
+**Gate:** `e2e-*`, `perf-*`, `fan-jank*` (18 files) 304 pass / 0 fail;
+`bun run typecheck` and `bun run lint` clean (2807 files).
+
+**Not run:** the simulator on the new mock, and full `bun run check`.
+
+**Note:** commit `93f632c1` labels round 1 `(opus)`; it was Sonnet 5.5, as is
+this round.
+
+*— claude-sonnet-5-5, 2026-11-28*
+
 ## Appendix — history
 
 `perf.txt` of validation runs 1 and 2, verbatim.
