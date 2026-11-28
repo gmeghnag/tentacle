@@ -206,6 +206,7 @@ import { STICKY_HEAD_H, StickyHost, type StickyHostHandle } from "../ui/StickySt
 import { Text } from "../ui/Text.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
 import { DiagramRenderer } from "../ui/diagram/DiagramRenderer.tsx";
+import { type NavFactSource, useNavFact } from "../use-nav-fact.ts";
 import { useSlice } from "../use-slice.ts";
 import {
   type VoiceController,
@@ -352,18 +353,20 @@ export function SessionScreen({
   // selection with `Object.is`, so a selector handing back a fresh array would
   // re-render on every state emit. This is the reconciler's dependency and the
   // voice gates' input; the entries themselves come from the same state.
-  const navigation = useNavigation<SheetStackNavigation>();
+  type RootState = ReturnType<SheetStackNavigation["getState"]>;
+  const navigation = useNavigation<SheetStackNavigation & NavFactSource<RootState>>();
   const stackKey = useNavigationState((state) =>
     stackSignature(state.routes as readonly SheetRouteLike[]),
   );
-  // Read FRESH at every render, then memoized on ALL the routes' keys: `stackKey`
-  // covers only the Sheet routes, so a screen pushed over Session (the run) never
-  // changed it, the memo kept the routes from before, and `ownRunTopId` never saw
-  // the run (e2e 44, docs/fix/mobile-ask-surfaces.md S8 gate fix).
-  const freshRoutes = navigation.getState()?.routes ?? [];
-  const freshKey = freshRoutes.map((route) => route.key).join("|");
-  // biome-ignore lint/correctness/useExhaustiveDependencies: `freshKey` IS `freshRoutes`' content.
-  const rootRoutes = useMemo(() => freshRoutes, [freshKey]);
+  // ALL the routes' keys, for the sheet stack below. `useNavFact`, never a read
+  // at render (nor `useNavigationState`, which is one too): `actual` and the
+  // "what is on top" facts further down are effect dependencies, and a live read
+  // lets React swallow their effects (docs/fix/mobile-fluidity-e2e.md).
+  const freshKey = useNavFact(navigation, (state: RootState) =>
+    state.routes.map((route) => route.key).join("|"),
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `freshKey` stands for the routes read here.
+  const rootRoutes = useMemo(() => navigation.getState().routes, [freshKey]);
   // THIS session's sheet routes, bottom→top: two Session screens can be mounted
   // at once and every `Sheet` route lives in the same root stack.
   const sheetStack = useMemo(
@@ -477,10 +480,18 @@ export function SessionScreen({
   const focused = useIsFocused();
   // This session's OWN run on top keeps it in front too (docs/fix/mobile-ask-surfaces.md D6):
   // its ask is then presented as a sheet over the run, and only that run's (Q1).
-  const topRunId = owner === null ? null : ownRunTopId(rootRoutes, owner);
+  // Subscribed, not read at render: pushing the run over the landing publishes
+  // no slice and leaves Session blurred, so only the navigator can re-render it.
+  const topRunId = useNavFact(navigation, (state: RootState) =>
+    owner === null ? null : ownRunTopId(state.routes as readonly SheetRouteLike[], owner),
+  );
   // This session's Workflows landing too (mobile-workflows-landing D8): the
   // approval its Approve raises is a sheet over it, and only that kind of ask.
-  const workflowsTop = owner !== null && ownWorkflowsTop(rootRoutes, owner);
+  const workflowsTop = useNavFact(
+    navigation,
+    (state: RootState) =>
+      owner !== null && ownWorkflowsTop(state.routes as readonly SheetRouteLike[], owner),
+  );
   const inFront = sessionInFront(focused, sheetStack, topRunId !== null || workflowsTop);
   const lastTurn = useRef(rowsSlice.view.turn);
   useEffect(() => {
