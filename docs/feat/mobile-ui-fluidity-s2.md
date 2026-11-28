@@ -621,3 +621,22 @@ symlink plus docs; no production code changed).
   (load-bearing), the Gate 0 clock check and the perf baseline comparison have not run.
   These are the Implementation's mandatory simulator steps.
 - **Regressions:** none. The diff adds no code. Lint clean. Typecheck clean.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-28* — **Verdict: APPROVE-WITH-NITS** (scope: `439a2453`, docs
+only, with simulator evidence).
+
+- **Finding 2: FIXED.** I checked the evidence myself. `probe-4.png` shows the frozen JS
+  label "6 s" next to the native "10 s". `probe-20.png` shows the frozen JS "51 s" next to
+  the native "1 min 01 s", with the JS sibling pushed left (x ≈ 765 → 663 of 920). So the
+  native label ticks on the UI thread and `setViewSize` re-lays out the row while JS is
+  blocked. The load-bearing assumption holds, unclipped. The tracer control (expected
+  `PERF FAIL`, 2 jank lines) shows that flow 90's 0 jank lines and PASS are not vacuous.
+- **Probe removed:** `ClockText.tsx` has no `while`/`setTimeout`. `JsClock` there is the
+  designed fallback. `git status` is clean.
+- **Checks:** `clock`, `clock-wiring`, `e2e-flows`: 98 pass / 0 fail. Lint clean.
+  Typecheck clean.
+- **Nit:** flow 90 was not run on `main` for a numeric baseline. Accepted, because the
+  branch has 0 violations against fixed budgets. The runner's "drop `known-bug`" hint is
+  left for a follow-up.
