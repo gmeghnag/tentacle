@@ -18,6 +18,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { parseFlowMeta } from "../e2e/gate.ts";
+import { FAST_HOLDS } from "../e2e/mock-model.ts";
 import { PERF_BUDGET, PERF_FLOW } from "../e2e/perf-budget.ts";
 import { FLOWS } from "../e2e/run.ts";
 import type { HubContext, HubEntries } from "../src/hub-actions.ts";
@@ -1221,6 +1222,22 @@ describe("flow 90: the perf gate (docs/feat/mobile-ui-fluidity-s0.md)", () => {
     expect(scriptBody("90-laptop-think.js")).toContain("laptop-prompt?session=${PERF_ID}");
     expect(scriptBody("90-laptop-think.js")).toContain("THINKHOLD%20FAST");
     expect(scriptBody("90-laptop-cancel.js")).toContain("laptop-cancel?session=${PERF_ID}");
+  });
+
+  test("the load outlasts every wait the flow can spend before its last assert", () => {
+    const body = flow();
+    const under = body.slice(
+      at(body, 'file: "90-laptop-think.js"'),
+      at(body, '- assertVisible:\n    id: "turn-running"'),
+    );
+    const waits = (part: string): number =>
+      [...part.matchAll(/timeout: (\d+)/g)].reduce((sum, match) => sum + Number(match[1]), 0);
+    const [before = "", opens = ""] = under.split("- repeat:");
+    expect(waits(opens)).toBeGreaterThan(0);
+    const worstMs = waits(before) + PERF_BUDGET.minStreamingFans * waits(opens);
+    const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    const hold = /startMockModel\(\{ holdMs: ([\d_]+) \}\)/.exec(runner)?.[1] ?? "";
+    expect(FAST_HOLDS * Number(hold.replaceAll("_", ""))).toBeGreaterThan(worstMs);
   });
 
   test("the runner holds the app's log to the budget after the flow", () => {

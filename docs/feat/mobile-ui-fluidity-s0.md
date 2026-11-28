@@ -121,9 +121,9 @@ flow (Validation); if the flow is not red for these reasons, STOP.
 - `_pair` launches with `clearState: true` (`e2e/flows/_pair.yaml:27`), so the
   log should hold only this flow's lines. Executor confirms on the first run
   (first `ptrace.txt` timestamp is after the flow started).
-- The mock's `THINKHOLD FAST` sends a reasoning delta every 10 ms
-  (`e2e/mock-model.ts:706,727-733`) for at most `holdMs` = 120 s
-  (`e2e/run.ts:540`). The eval's S2 run fit about 70 windows.
+- The mock's `THINKHOLD FAST` sends a reasoning delta every 10 ms for
+  `FAST_HOLDS` (3) × `holdMs` (120 s, `e2e/run.ts:548`) = 360 s, then the turn
+  ends (`e2e/mock-model.ts`, fix round 1). The eval's S2 run fit about 70 windows.
 - Hooks `laptop-prompt` / `laptop-cancel` start a turn without awaiting it and
   cancel it (`e2e/run.ts:765,772`; `e2e/seed.ts:353,404-410`).
 - `serve` accepts a client-seeded history: `RemoteClient.openSession(cwd,
@@ -231,6 +231,7 @@ hold**; tap `hub-scrim` at `50%,20%`; wait not visible (30 s) } → assert
 | `apps/mobile/e2e/seed.ts` | `PERF_ROUNDS`, `longHistory`, `longSessionOf` |
 | `apps/mobile/e2e/flows/90-perf-stream.yaml`, `90-laptop-think.js`, `90-laptop-cancel.js` (new) | the flow |
 | `apps/mobile/e2e/run.ts` | flow entry, session, post-flow check |
+| `apps/mobile/e2e/mock-model.ts` | fix round 1: `FAST_HOLDS`; `THINKHOLD FAST` ends with its load |
 | `TODO.md` | in the s0 item: ``e2e flow `90-perf-stream` `` (known-bug until the fix slices) |
 | `apps/mobile/test/{perf-trace,perf-budget (new),fan-jank-wiring,e2e-flows}.test.ts` | below |
 
@@ -243,9 +244,9 @@ Beyond the eval's row 0: the probe + `App.tsx` (the TODO item's `app-state` cut)
 |---|---|
 | Log unreadable, probe not wired, no lines | evidence violation → red, never a silent pass |
 | Truncated / changed line format | violation; a contract test feeds the checker what the real writer produces |
-| Stream ends (120 s) before the 4th open | `turn-running` assert fails, and `stream=false` fans miss the minimum |
+| Stream ends (360 s) before the 4th open's assert | the turn ends with its load, so the `turn-running` assert fails (360 s is above the 282 s the flow's own waits allow, pinned in `e2e-flows.test.ts`) |
 | Session setup fails | existing catch, `run.ts:1030-1037` → `fail` |
-| Flow dies before the cancel | the held turn ends by itself within 120 s; the app is terminated before the next flow (`run.ts:998`) |
+| Flow dies before the cancel | the held turn ends by itself within 360 s; the app is terminated before the next flow, but until then `serve` and the mock carry the stream while later flows run |
 | Log rotated mid-flow | `.1` + live are both read |
 | Resume: rAF vs `AppState` event order | both orders handled (Design 1). Not covered: iOS suspending before JS processed `background`; check in the next device export |
 | Flow red for an unrelated reason (Maestro, pairing) | also shows `FAIL (known-bug)`: **a slice reads `perf.txt` and `maestro.log`**, never the status alone |
@@ -376,6 +377,64 @@ started (00:28:11Z). Both `perf.txt` outputs are in the appendix.
 `e2e-shard`) 221 pass / 0 fail; earlier, the e2e-runner suites (9 files) 325
 pass / 0 fail; `biome check` on the changed files clean (after one format of
 `run.ts`); `tsc -p apps/mobile` clean. Full gate: the orchestrator's script.
+
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-28*
+
+**HIGH 1 (hub opens with no stream load count as evidence) — fixed.**
+
+- `e2e/mock-model.ts`: `THINKHOLD FAST` keeps its load for `FAST_HOLDS` = 3
+  holds (360 s in `run.ts`) and has no trickle tail: the `DELTAS` go out 20 ms
+  apart and the turn ends. So the flow's `turn-running` assert after the 4th
+  open now means every open ran under load. Plain `HOLD` and non-FAST
+  `THINKHOLD` are unchanged.
+- 360 s is above the 282 s of explicit waits the flow can spend between the
+  think script and that assert (saved run: cancel at about +131 s). A run slower
+  than 360 s fails on `turn-running`; it cannot read as a pass.
+- Tests: `e2e-mock-thinkhold.test.ts` (load lasts more than two holds, turn ends
+  less than half a hold after the last delta); `e2e-flows.test.ts` (load longer
+  than the flow's waits, read from the yaml and `run.ts`). The old "4x as often"
+  test now compares per hold, since FAST's load is longer.
+
+**Red** (with only an unused `FAST_HOLDS = 1` added, so both fail on the
+assertion): `81 pass, 2 fail` —
+`Expected: > 282000, Received: 120000`;
+`Expected: > 2000, Received: 988.22`. After the fix: `83 pass, 0 fail`.
+
+**Mutations** (`.tentacle/tmp/mobile-ui-fluidity-s0/mutate-fix1.ts`; file
+restored byte for byte):
+
+```
+== M1 trickle tail back          (hold && !loadOnly -> hold)
+Expected: < 500      Received: 1023.32
+(fail) THINKHOLD > FAST keeps its load past two holds and ends the turn with it
+ 82 pass, 1 fail
+== M2 load is one hold           ((fast ? FAST_HOLDS : 1) -> 1)
+Expected: > 16       Received: 8.67
+(fail) THINKHOLD > FAST streams the reasoning about 4x as often
+Expected: > 2000     Received: 994.83
+(fail) THINKHOLD > FAST keeps its load past two holds and ends the turn with it
+ 81 pass, 2 fail
+== M3 FAST_HOLDS = 2
+Expected: > 282000   Received: 240000
+(fail) flow 90 > the load outlasts every wait the flow can spend before its last assert
+Expected: > 2000     Received: 1998.53
+(fail) THINKHOLD > FAST keeps its load past two holds and ends the turn with it
+ 81 pass, 2 fail
+restored: true
+```
+
+**Drift:** `mock-model.ts` was not in the Files table; its row, the mock
+precondition and the two false failure-mode rows are corrected. A flow that dies
+before its cancel now leaves the stream on `serve` for up to 360 s (was 240 s);
+no host-side cancel was added.
+
+**Narrow gate:** the 8 test files that import the mock, plus `perf-budget`,
+`e2e-gate`, `e2e-shard`: 231 pass / 0 fail; `biome check` on the 3 changed files
+clean; `tsc -p apps/mobile` clean. **Not run:** the simulator (verify with
+`bun run e2e:mobile --udid <sim> --only 90-perf-stream`: Maestro passes and
+`perf.txt` is red on gap, settle and rate). Full gate: the orchestrator's script.
 
 ## Review
 
