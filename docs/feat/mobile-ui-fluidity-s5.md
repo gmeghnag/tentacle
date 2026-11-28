@@ -259,4 +259,50 @@ The other panes are 1 on both. Flows `33-hub`, `34-hub-workflows` and `28-floati
 
 ## Review
 
-*(empty — fresh-context Opus)*
+*— claude-opus-5-5, 2026-11-28* (fresh context; same model as the planner, so shared blind spots are possible; the executor was DeepSeek)
+
+**Verdict: APPROVE.** No HIGH or MEDIUM findings.
+
+**Gate (narrow):**
+- The 4 touched test files: 72 pass, 0 fail.
+- `bun run lint`: clean (2 827 files).
+- `bun run typecheck`: clean (all 4 tsc projects).
+- The full `bun run check` is the orchestrator's, at merge.
+
+**Premises (TRUE):**
+- `TimingAnimation.js:87-110`: the easing is sampled into frames once, in JS. `setTimeout` appears only when there is a `delay`.
+- `AnimatedInterpolation.js:328, 483-485, 513`: the ranges only have to be non-decreasing; an interpolation can be interpolated again and goes native with its parent; the whole range is sent natively.
+- `FloatingActivity.tsx:295-298`: the fan's items are a snapshot taken at the open.
+- `FloatingActivity.tsx:380-396`: `onFanChange(false)` fires on every close path and on unmount.
+- `session-screen-controller.ts:1424-1449`: the catalogue read is single-flight, and a read that lands after dispose skips `emit` (the `return` is inside the `try`).
+- `perf-probe.ts:168-171`: `fanSettle(false)` reports nothing.
+
+**Mutations** (each one applied, run and reverted; `git status` clean afterwards). Every one was killed:
+
+| Mutation | Tests that failed |
+|---|---|
+| m1: no stagger offset | A2, A3, A4 |
+| m2: linear outputs instead of the spring samples | A3 |
+| m3: `delay: 18` on the timing | the B1 pin and the native-driver pin |
+| m4: refresh back in the open branch | C1 |
+| m5: `trackSamples: 8` | A3 and the `fanMotion` `toEqual` |
+| extra: `run.stop()` cleanup removed | the fan-jank effect-key pin |
+
+**Attacks tried:**
+1. *An RPC or render inside the opening window by another path.* `onFanChange` has one caller, and its open branch is pure. Nothing found.
+2. *A close-time refresh after dispose.* The dispose guards hold. Nothing found.
+3. *Highlight scale and overshoot.* The chained interpolation keeps today's extend/overshoot semantics. Nothing found.
+4. *An extra refresh at mount.* The `[fanOpen]` effect fires `false` when `FloatingActivity` mounts, so a catalogue read now also runs at hub mount. That is harmless: it is single-flight with the attach read, a no-op with no handle, and it happens only on mount or a mode switch. Nit, no action.
+
+**Executor's gate-0 logs:**
+- Branch: `PERF PASS`, 0 jank lines, settle 705–717 ms.
+- Main: settle 1 066–1 070 ms.
+
+**Not verified:** how the motion looks (the videos are unplayed), a physical device, and Android.
+
+**Scratch overwritten:** during the backups I overwrote the scratch copies `hub-fan.ts`, `HubFan.tsx` and `SessionScreen.tsx` in `.tentacle/tmp/mobile-ui-fluidity-s5/` with the branch versions. The `.branch` copies are intact.
+
+**How the executor behaved:**
+- It followed the plan exactly.
+- It corrected the plan's 0.002 bound to 0.0023, honestly.
+- It pinned every planned mutation.
