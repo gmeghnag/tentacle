@@ -390,6 +390,17 @@ Checks: `bun test apps/mobile/test/` + three mockup-kit files: 5927 pass, 2 fail
 (the two pins above). `biome check` on the changed files: clean. `tsc -p
 apps/mobile`: clean. Full gate not run (the orchestrator's).
 
+### Fix round 2 (gate failures)
+
+*— claude-sonnet-5-5, 2026-11-28* — **BLOCKED**, no code changed.
+
+- The two "Swift package can load" fails: `ln -s` (command above) was refused again
+  ("requires approval"). Not worked around. `clock-wiring.test.ts`: 6 pass, 2 fail.
+  Needs the owner or orchestrator to run it, then fix round 1's open items 1–2.
+- `pdf-extract.test.ts` "decompression bomb … RSS bounded": the branch touches nothing
+  under `packages/`; alone it gives 28 pass, 0 fail. Likely load-sensitive (it samples
+  process RSS; load average ≈ 7–16 here), not proven. Left unchanged.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-28* (fresh context; same model family as the planner,
