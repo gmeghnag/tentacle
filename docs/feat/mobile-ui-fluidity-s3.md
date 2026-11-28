@@ -603,4 +603,45 @@ flows.
 
 ## Review
 
-*(empty — fresh-context Opus review, mandatory for this slice per the eval)*
+*— claude-opus-5-5, 2026-11-28* (fresh context; the plan's author is the same
+model family, so blind spots shared with the plan may survive; the executor was a
+different model).
+
+**Verdict: APPROVE.** No HIGH/MEDIUM finding.
+
+**Gate (re-run here):** `bun test apps/mobile/test/` 5924 pass / 0 fail (362
+files); `bun run typecheck` clean; `bun run lint` clean (2825 files). Full
+`bun run check` left to the orchestrator.
+
+**Mutations (applied, red seen, reverted; `git status` clean after):**
+(a) `keepSlices` always `next` → A1 + every A2 case red. (c) nested fire (queue
+disabled) → A5 red. (b') `view.pending` dropped from `rows` → A2 still green, but
+`tsc -p apps/mobile` red at `SessionScreen.tsx:2039,2060`: the slice TYPE
+follows `SLICE_FACTS`, so a misplaced fact that a reader uses fails the gate.
+(b'') `view.queued` moved composer→header → all green, and benign: no pane reads
+`view.queued` (A2's loop derives its expectation from the table; only the 12-row
+spelled-out list and the types are independent).
+
+**Attacks tried:**
+1. Stale sheets: `SheetsPane.tsx:88-212` publishes on `[slice, …]` but reads
+   `controller.sheet()` / `controller.autoAcceptOn()` raw. Both move with a
+   sheets fact (`sheet` ref; `commands` rows carry `autoAccept`,
+   `session-screen-controller.ts:1238`). Holds.
+2. Header facts hidden in `info` (`openContext`, `entryCwd`): reach the header
+   through `view.headerContext/headerFolder` (`session-screen-controller.ts:786,1057`). Holds.
+3. Re-entrant publishes through the coalescer: `soon()` during a fire schedules
+   (lastFire set before `fire`), `now()` queues (`session-store.ts:292-311`). Holds.
+4. Pane prop stability: every prop is state, a `useMemo` (`activityVm`, `hubCtx`,
+   `hub`), a primitive, or the stable ref; Gate 0 shows `hub=1 … sheets=1` over
+   `shell=1207`. Holds.
+5. Shell reads outside its slices: only handler-time `store.get("composer")` and
+   `controller.state().draft` in a callback (`SessionScreen.tsx:408,1400`). Holds.
+
+**Note (not a finding of this slice):** flow 90 keeps its `known-bug` tag
+(`e2e/flows/90-perf-stream.yaml:3`, the eval's for slices 1–7), so a `coupling`
+failure does not fail the e2e gate; the rule is visible in `perf.txt` only until
+the eval drops the tag.
+
+**Executor:** followed the plan; recorded its corrections (`info` as data,
+`reports` as entries, `askQueued`/`askAutoAccepted`) with reasons, and reported
+the one jank line and the unverified manual checks honestly.
