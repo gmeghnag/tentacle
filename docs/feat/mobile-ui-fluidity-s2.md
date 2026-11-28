@@ -349,4 +349,56 @@ Swift rule changed → test:swift red             NOT RUN
 
 ## Review
 
-*(pending)*
+*— claude-opus-5-5, 2026-11-28* (fresh context; same model family as the planner,
+not the executor). **Verdict: REQUEST-CHANGES.**
+
+Findings:
+
+1. **HIGH — `test:swift` broken for the whole package.** `native-tests/PushCoreTests/Package.swift:26`
+   declares `.target(name: "ClockCore")`, but `Sources/ClockCore` does not exist on the
+   branch (`ls Sources/` → `LACore`, `PushCore` only). SwiftPM refuses a target with no
+   source dir, so `bun run test:swift` (PushCore/LACore included) fails, and so does the
+   mandatory `e2e:mobile` preflight (`e2e/run.ts:478`). Merge = the e2e gate on `main` red.
+2. **HIGH — the native half has never been compiled or run.** `ClockTextView.swift`,
+   `TentacleClockModule.swift` and the podspec autolink into the next dev build. A compile
+   error stops the whole iOS build. The load-bearing assumption (`setViewSize` lands
+   without JS), the Swift vector suite + its mutation, and both simulator steps (incl.
+   decision 7's `copyTextFrom` on `thinking-clock`) are all open (Execution items 1–3).
+   I checked the API surface against expo-modules-core 58.0.24 by eye
+   (`ExpoFabricView.swift:46,50`, `ViewFactories.swift:70`): it matches. That is not a build.
+3. **MEDIUM — a reopen during post-tool thinking still restarts the clock.** `transcript-history.ts:191-200`
+   folds a tool result with no `endedAt`, even though `times[index]` (the result message's
+   daemon time) is right there. Repro: the turn's last tool batch finished, the model is
+   thinking, the phone reopens. `thinkingSince` (`tool-steps.ts:667-673`) then finds no
+   batch stamp and falls back to the first reasoning row's receipt (≈ the reopen) or to
+   nothing. The label reads `0 s` / no number. That is the common agentic case, and it
+   contradicts the changelog ("reopening … no longer resets them to 0 s"). No Failure-modes
+   row covers it. Fix: stamp `endedAt` from `atOf(times, index)` on the history result
+   (decision 2 amended), plus a test.
+
+Gate (this review): 17 touched test files 343 pass / 0 fail; `bun run lint` clean (2816
+files); `bun run typecheck` clean. Full `bun run test` not run (the orchestrator's gate).
+`test:swift` / `swift` were denied in this session too, so I did not run them.
+
+Mutations (each reverted, `git status` empty afterwards):
+- `thinkingSince` max → min: `tool-steps.test.ts` fails ("the LAST of its results").
+- `endedAt` spread removed from `applyToolResult`: 2 `transcript.test.ts` fail.
+
+Premises: `transcript.ts:828-856` TRUE. `isThinking` / tail shape TRUE. `liveFrom: tool.at` TRUE.
+The old `thinkingElapsed` / `liveElapsed` bodies equal `formatClock` TRUE. Load-bearing
+(on device): UNVERIFIED.
+
+Attacks tried:
+- **Max of a parallel batch with partly unstamped rows:** holds.
+- **a11y when `since` is absent:** `thinkingA11yLabel(0)` = "Thinking", which matches
+  the no-number visual. Holds.
+- **Maestro reaching an id nested in the accessible `Pressable`:** precedent exists
+  (`tool-…-running` via `labelTestID`). Plausible, still unproven for a native view.
+- **Native view width 0 before the first fit:** the label draws past the right edge
+  until the size commit lands. This is the plan's accepted row, but nobody has looked
+  at it on a simulator.
+- **The `useSyncExternalStore` snapshot is a string:** a label that has not changed
+  causes no re-render. Holds.
+
+Executor: honest. It marked itself PARTIAL and listed every open item. It never claimed
+the Swift side was green.
