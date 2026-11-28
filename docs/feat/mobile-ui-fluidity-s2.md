@@ -514,3 +514,25 @@ code, so there was nothing to mutate.
   `ln -s ../../../modules/tentacle-clock/ios/ClockCore apps/mobile/native-tests/PushCoreTests/Sources/ClockCore`,
   commit it, then run `bun run test:swift` (+ the zero-pad mutation), the dev build
   and the two simulator steps. Then a Round 4 review.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-28* (round 4, fresh context; same model family as the
+earlier reviews, a different one from the deepseek executor) — **Verdict: REQUEST-CHANGES**.
+HEAD `cc7b1324` adds no code since round 3.
+
+- **Finding 1 (HIGH): OPEN.** `apps/mobile/native-tests/PushCoreTests/Sources/` holds
+  only `LACore` and `PushCore`. `Package.swift` declares a `ClockCore` target with no
+  source folder, so `bun run test:swift` (a mandatory e2e preflight) cannot build.
+  `test/clock-wiring.test.ts`: 2 fail ("every `.target` has its source folder",
+  "`Sources/ClockCore` is the module's own folder").
+- **Finding 2 (HIGH): OPEN.** The Swift code (`ClockCore.swift`, `ClockTextView.swift`,
+  `TentacleClockModule.swift`) has never been compiled. The load-bearing assumption
+  (the `setViewSize` commit lands without JS) and the Gate 0 clock check are unverified.
+- **Gate (touched files):** 271 pass / 2 fail (the two above). `bun run lint`: clean.
+  `bun run typecheck`: clean.
+- **Mutation:** in `thinkingSince`, `opener.at ?? reasoningAt` → `reasoningAt ?? opener.at`
+  makes 2 `tool-steps` tests fail (the "no jump back" test and the context-stamp test).
+  Reverted; `git status` is clean.
+- **Escalation unchanged:** the blocker is a permission (`ln`, `swift`, simulator), not
+  code. The owner or orchestrator runs the round-3 command, then a new Review runs.
