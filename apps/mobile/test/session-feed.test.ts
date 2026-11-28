@@ -81,6 +81,8 @@ function budgetHarness(sliced = true) {
   let armed = 0;
   const timers: { fn: () => void; live: boolean }[] = [];
   const outcomes: string[] = [];
+  const brackets: string[] = [];
+  let foreign: string | null = null;
   const feed = createSessionFeed({
     state: () => state,
     put: (next, cause) => {
@@ -90,10 +92,16 @@ function budgetHarness(sliced = true) {
         streamPuts += 1;
       }
     },
-    setForeign: () => {},
+    setForeign: (turn) => {
+      foreign = turn?.turnId ?? null;
+    },
     trace: (event) => {
+      if (event.kind === "turn-start") {
+        brackets.push(`start ${event.turnId}`);
+      }
       if (event.kind === "turn-end") {
         outcomes.push(event.outcome);
+        brackets.push(`end ${event.turnId}`);
       }
     },
     ...(sliced
@@ -112,8 +120,11 @@ function budgetHarness(sliced = true) {
         }
       : {}),
   });
-  /** Run `first`, then every timer it (and they) queue. Answers each task's clock span. */
-  const drive = async (first: () => void): Promise<number[]> => {
+  /**
+   * Run `first`, then `frames` (each its own task, landing BEFORE any timer, as a
+   * socket frame can), then every timer they queue. Answers each task's clock span.
+   */
+  const drive = async (first: () => void, ...frames: (() => void)[]): Promise<number[]> => {
     const spans: number[] = [];
     let task: (() => void) | undefined = first;
     while (task !== undefined) {
@@ -121,11 +132,14 @@ function budgetHarness(sliced = true) {
       task();
       await new Promise((resolve) => setImmediate(resolve));
       spans.push(at - from);
-      let next = timers.shift();
-      while (next !== undefined && !next.live) {
-        next = timers.shift();
+      task = frames.shift();
+      if (task === undefined) {
+        let next = timers.shift();
+        while (next !== undefined && !next.live) {
+          next = timers.shift();
+        }
+        task = next?.fn;
       }
-      task = next?.fn;
     }
     return spans;
   };
@@ -136,6 +150,8 @@ function budgetHarness(sliced = true) {
     streamPuts: () => streamPuts,
     armed: () => armed,
     outcomes,
+    brackets,
+    foreign: () => foreign,
     /** The generator's own wait: time passes with nothing to fold. */
     wait: (ms: number) => {
       at += ms;
@@ -247,6 +263,189 @@ describe("ingestion budget (a backlog is folded in slices, prose merged)", () =>
         .slice(0, 2),
     ).toEqual(["user", "reasoning"]);
     expect(textOf(h.state(), "reasoning")).toBe(joined(events));
+  });
+});
+
+describe("ingestion budget: arrival order (a later input waits for a stream catching up)", () => {
+  /** Turn A as a resync leaves it: its whole reply AND its end already buffered. */
+  const turnA: SessionEvent[] = [...deltas(3000), { type: "turn_end", reason: "end_turn" }];
+  /** A turn still running: one delta, then silence. */
+  async function* running(): AsyncIterable<SessionEvent> {
+    yield { type: "text", delta: "B-answer" };
+    await new Promise(() => {});
+  }
+  const foreignTurn = (turnId: string, events: AsyncIterable<SessionEvent>): SessionActivity => ({
+    kind: "turn",
+    turnId,
+    events,
+    cancel: () => {},
+  });
+  const snapshot: SessionActivity = { kind: "history", messages: HISTORY, reason: null };
+  const end: SessionEvent[] = [{ type: "turn_end", reason: "end_turn" }];
+  const kinds = (state: State) => state.rows.map((r) => r.kind);
+
+  test("O1: a new turn waits for the older one's end: its bracket and Stop survive", async () => {
+    const h = budgetHarness();
+    await h.drive(
+      () => h.feed.activity(foreignTurn("A", gen(turnA))),
+      () => h.feed.activity(foreignTurn("B", running())),
+    );
+    expect(h.brackets).toEqual(["start A", "end A", "start B"]);
+    expect(h.state().turn?.turnId).toBe("B");
+    expect(h.foreign()).toBe("B");
+    expect(kinds(h.state())).toEqual(["reasoning", "assistant"]);
+    expect(textOf(h.state(), "reasoning")).toBe(joined(turnA));
+  });
+
+  test("O2: a history snapshot is not followed by the older turn's stale prose", async () => {
+    const h = budgetHarness();
+    await h.drive(
+      () => h.feed.activity(foreignTurn("A", gen(turnA))),
+      () => h.feed.activity(snapshot),
+    );
+    expect(kinds(h.state())).toEqual(["user", "assistant"]);
+  });
+
+  test("O3: `closed` lands after the older turn's reply and end", async () => {
+    const h = budgetHarness();
+    await h.drive(
+      () => h.feed.activity(foreignTurn("A", gen(turnA))),
+      () => h.feed.activity({ kind: "closed", reason: "closed" }),
+    );
+    expect(kinds(h.state())).toEqual(["reasoning", "notice"]);
+    expect(textOf(h.state(), "reasoning")).toBe(joined(turnA));
+  });
+
+  test("O4: an own turn opens its bracket after the older turn closed, and settles", async () => {
+    const h = budgetHarness();
+    let settled = false;
+    await h.drive(
+      () => h.feed.activity(foreignTurn("A", gen(turnA))),
+      () =>
+        void h.feed.ownTurn("mine", gen(end), { text: "go" }).then(() => {
+          settled = true;
+        }),
+    );
+    expect(h.brackets).toEqual(["start A", "end A", "start mine", "end mine"]);
+    expect(kinds(h.state())).toEqual(["reasoning", "user"]);
+    expect(settled).toBe(true);
+  });
+
+  test("O5: a waiting own turn's refusal still rejects its caller", async () => {
+    const h = budgetHarness();
+    const refusal = new Error("turn in progress");
+    const broken: AsyncIterable<SessionEvent> = {
+      [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(refusal) }),
+    };
+    let caught: unknown = null;
+    await h.drive(
+      () => h.feed.activity(foreignTurn("A", gen(turnA))),
+      () =>
+        void h.feed.ownTurn("mine", broken).catch((error: unknown) => {
+          caught = error;
+        }),
+    );
+    expect(caught).toBe(refusal);
+    expect(h.brackets).toEqual(["start A", "end A", "start mine", "end mine"]);
+  });
+
+  test("O6: waiting inputs keep their order when a waiting turn is a backlog too", async () => {
+    const h = budgetHarness();
+    await h.drive(
+      () => h.feed.activity(foreignTurn("A", gen(turnA))),
+      () => h.feed.activity(foreignTurn("B", gen(turnA))),
+      () => h.feed.activity(snapshot),
+      () => h.feed.activity(foreignTurn("C", running())),
+    );
+    expect(h.brackets).toEqual(["start A", "end A", "start B", "end B", "start C"]);
+    // C's text extends the snapshot's last reply; nothing of A or B follows it.
+    expect(kinds(h.state())).toEqual(["user", "assistant"]);
+    expect(textOf(h.state(), "assistant").endsWith("B-answer")).toBe(true);
+  });
+
+  test("O10: an input landing after the stream caught up still queues behind the waiting ones", async () => {
+    const h = budgetHarness();
+    await h.drive(
+      () =>
+        // Runs as A settles: the gate is open, the snapshot not yet let through.
+        void h.feed.ownTurn("A", gen(turnA)).then(() => {
+          h.feed.activity(foreignTurn("C", running()));
+        }),
+      () => h.feed.activity(snapshot),
+    );
+    expect(h.state().turn?.turnId).toBe("C");
+    expect(textOf(h.state(), "assistant").endsWith("B-answer")).toBe(true);
+  });
+
+  test("O7: a successor turn waits for a turn that arrived before it and is waiting", async () => {
+    const h = budgetHarness();
+    await h.drive(
+      () => h.feed.activity(foreignTurn("A", gen(turnA))),
+      () => h.feed.activity(foreignTurn("B", gen(turnA))),
+      () => void h.feed.successorTurn("S", gen(end)),
+    );
+    expect(h.brackets).toEqual(["start A", "end A", "start B", "end B", "start S", "end S"]);
+  });
+
+  test("O11: a successor turn does not overtake a waiting snapshot", async () => {
+    const h = budgetHarness();
+    await h.drive(
+      () => h.feed.activity(foreignTurn("A", gen(turnA))),
+      () => h.feed.activity(snapshot),
+      () => void h.feed.successorTurn("S", running()),
+    );
+    // Opened after the snapshot, so the snapshot cannot wipe its reply.
+    expect(h.state().turn?.turnId).toBe("S");
+    expect(textOf(h.state(), "assistant").endsWith("B-answer")).toBe(true);
+  });
+
+  test("O12: a successor turn waits for the END of a turn that was waiting when it was asked", async () => {
+    const h = budgetHarness();
+    let finish: () => void = () => {};
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    async function* open(): AsyncIterable<SessionEvent> {
+      yield { type: "text", delta: "B" };
+      await finished;
+      yield* end;
+    }
+    await h.drive(
+      () => h.feed.activity(foreignTurn("A", gen(turnA))),
+      () => h.feed.activity(foreignTurn("B", open())),
+      () => void h.feed.successorTurn("S", gen(end)),
+    );
+    expect(h.brackets).toEqual(["start A", "end A", "start B"]);
+    await h.drive(finish);
+    expect(h.brackets).toEqual(["start A", "end A", "start B", "end B", "start S", "end S"]);
+  });
+
+  test("O8: a slice spent on the last buffered event, then silence, holds nothing back", async () => {
+    const h = budgetHarness();
+    // 64 folds of 0.125 ms: the budget trips on the last one, with nothing held.
+    async function* boundary(): AsyncIterable<SessionEvent> {
+      yield* deltas(64);
+      await new Promise(() => {});
+    }
+    await h.drive(() => h.feed.activity(foreignTurn("A", boundary())));
+    expect(h.armed()).toBeGreaterThan(0); // non-vacuity: the budget did trip
+    await h.drive(() => h.feed.activity(snapshot));
+    expect(kinds(h.state())).toEqual(["user", "assistant"]);
+  });
+
+  test("O9: a catching-up stream that THROWS releases what waited behind it", async () => {
+    const h = budgetHarness();
+    async function* cut(): AsyncIterable<SessionEvent> {
+      yield* deltas(3000);
+      throw new TypeError("link cut");
+    }
+    await h.drive(
+      () => h.feed.activity(foreignTurn("A", cut())),
+      () => h.feed.activity(foreignTurn("B", running())),
+    );
+    expect(h.brackets).toEqual(["start A", "end A", "start B"]);
+    expect(h.outcomes).toEqual(["lost"]);
+    expect(h.state().turn?.turnId).toBe("B");
   });
 });
 

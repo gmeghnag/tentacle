@@ -563,6 +563,63 @@ orchestrator's). No protocol change.
 `~/Library/Developer/Xcode/DerivedData/tentacle-akcqdinhpvikysgobrlegvnkmvrm`
 (7.1 GB, `WorkspacePath` = this worktree); deleting it was not approved.
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-28*
+
+**Finding 1 (HIGH): fixed.** I built the "Plan correction" on the authority of the
+fix-round brief ("fix every HIGH/MEDIUM"); no separate approval is recorded in this
+doc. It supersedes "Open, blocks merge" above and the wrong failure-mode row.
+
+**As built** (`session-feed.ts` only):
+
+- `createGate`: while a stream is *behind* (from its first budget yield until it
+  drains or ends), `history`, `closed`, `turn` (its `setForeign` too) and `ownTurn`
+  wait, in arrival order, and are let through one per task.
+- `createPace`: a flush is armed after every yield, even with nothing held (else a
+  drain ending exactly on a slice stays behind for ever); `end()` clears *behind*
+  on both exits, after the bracket closes.
+- A waiting turn is tracked from arrival, so `successorTurn` waits for it, then
+  takes its own place in the gate.
+- `link` never waits (it is the link's state now, and adds no row).
+- A live stream never yields, so nothing waits.
+
+**Consequence.** A waiting `ownTurn` does not iterate its stream, so its prompt is
+sent after the catch-up, not at the call (an outbox run at reconnect can meet
+this). `successorTurn` already worked this way.
+
+**Red → green.** Before the source change: O1–O7, O9 red (33 pass, 8 fail); O8
+guards the new gate. O10–O12 were added after the fix and are proven by g2, g8, g9.
+
+**Mutations** (`mutate.ts`, the 3 touched test files, 63 tests, source written back):
+
+```
+m1 no await at the budget -> 61 pass, 2 fail; B1, O10
+m2 no deferred flush -> 60 pass, 3 fail; B (wiring), B4, O8
+m3 fold prose directly in backlog mode -> 60 pass, 3 fail; B (wiring), B2, B5
+m4 no gap reset in arrive -> 61 pass, 2 fail; slicer gap, B3
+m5 controller does not pass slice -> 62 pass, 1 fail; C
+m6 no release() in catch -> 62 pass, 1 fail; B6
+g1 nothing ever waits -> 54 pass, 9 fail; O1-O7, O9, O12
+g2 a newcomer overtakes the waiting ones -> 61 pass, 2 fail; O10, O11
+g3 all waiting inputs let through in one task -> 62 pass, 1 fail; O6
+g4 no flush armed after a yield -> 62 pass, 1 fail; O8
+g5 a thrown stream stays behind -> 62 pass, 1 fail; O9
+g6 an ended stream stays behind -> 53 pass, 10 fail; O1-O7, O10-O12
+g7 own turn skips the gate -> 61 pass, 2 fail; O4, O5
+g8 successor skips the gate -> 62 pass, 1 fail; O11
+g9 a waiting turn is not tracked -> 62 pass, 1 fail; O12
+g10 history/closed skip the gate -> 60 pass, 3 fail; O2, O3, O6
+```
+
+**Repro.** `interleave.ts`: SLICED now prints the same trace, bracket, Stop and rows
+as UNSLICED for both `turn` and `history`. `ingest-runs-tree.ts` (JIT): N=4 000 at
+25 µs, 254 folds, longest run 7.4 ms; N=100 000, 18 238 folds, longest run 7.1 ms.
+
+**Checks:** feed/controller-covering tests 857 pass, 0 fail (47 files); `biome check`
+on the 2 changed files clean; `tsc -p apps/mobile` clean. Full gate: the
+orchestrator's script. Gate 0 (simulator) not re-run after this change.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-28* (fresh context; same model as the planner, a different model from the executor)
