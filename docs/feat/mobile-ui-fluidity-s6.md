@@ -565,4 +565,16 @@ orchestrator's). No protocol change.
 
 ## Review
 
-*(empty — fresh-context Opus review)*
+*— claude-opus-5-5, 2026-11-28* (fresh context; same model as the planner, a different model from the executor)
+
+**Verdict: REQUEST-CHANGES**
+
+1. **HIGH: a budget yield reorders a buffered stream against a later activity** (`apps/mobile/src/session-feed.ts:241-250` `take`'s yield, against `:399-434` `activity()`). Before this change a buffered drain ran in one task, so a WebSocket-frame activity could only land once it was done. Now `await schedule(r, 0)` gives up the task while unread events (including `turn_end`) are still queued. A `turn` or `history` activity that lands in that gap is applied first. Reachable through the client's resync: `remote-session.ts:2600-2606` closes the old queue but keeps its buffered items, then `onReset` (`:2624-2640`) raises `history` / `startForeign` in the same frame. I re-ran the executor's `.tentacle/tmp/mobile-ui-fluidity-s6/interleave.ts` and got the same output. In the sliced run: A's late `turn_end` clears B's bracket and its Stop control (`setForeign(null)`), so the user cannot stop running turn B. A's reply is split around B's. After a `history` snapshot, 2 936 stale reasoning chars are appended to it. Plain unsliced is correct. This silently corrupts the transcript and loses Stop, so it blocks the merge. The "Plan correction" proposal (queue `activity()` and the `ownTurn` bracket behind a catching-up stream) is the right shape. It needs approval, then red tests for both scenarios.
+
+**Gate (touched files only, per orchestrator scope):** 3 files, 51 pass / 0 fail; `bun run lint` clean (2 827 files); `bun run typecheck` clean. I did not run the full `bun run test`.
+
+**Mutations:** m5 (controller drops `slice`) turns C red; m2 (no deferred flush) turns B4 red. Both reverted, and `git status` is clean.
+
+**Attacks tried:** a deferred flush firing mid-drain: no, because `release()` cancels it before every yield. Held prose surviving the end or the throw of a stream: no (`:372`, `:378`). A fast live stream (< 2 ms gaps) tripping the budget: yes, but it only merges deltas and adds one timer hop, so it is harmless. Interleave with a later activity: **this is finding 1.**
+
+**Executor:** honest. It found and documented finding 1 itself instead of hiding it or forcing a fix outside the plan.
