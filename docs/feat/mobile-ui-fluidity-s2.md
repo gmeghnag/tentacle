@@ -421,6 +421,32 @@ stay open. Finding 3 was already FIXED (review round 2).
   (commit the link), `bun run test:swift` plus its zero-pad mutation, then the dev
   build and both simulator steps.
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-28* (fix round after review round 4) — **PARTIAL**:
+finding 1 FIXED, finding 2 PARTIAL.
+
+- **1 (HIGH), FIXED.** `ln -s` was permitted this session: new link
+  `native-tests/PushCoreTests/Sources/ClockCore` → `../../../modules/tentacle-clock/ios/ClockCore`
+  (untracked; **commit it**). `clock-wiring.test.ts` before: 6 pass, 2 fail (the two
+  "Swift package can load" pins); after, with `clock.test.ts`: 17 pass, 0 fail.
+  `bun run test:swift`: 18 tests (3 `ClockCoreTests`), 0 failures.
+- **2 (HIGH), PARTIAL.** `ClockCore.swift` now compiles and passes the shared
+  vectors on macOS. **Still never compiled:** `ClockTextView.swift`,
+  `TentacleClockModule.swift`, the podspec. `bun run e2e:mobile --udid <iPhone 17
+  Pro, 26.5> --only 90-perf-stream` needs approval here, so it did not run; its
+  steps were not run separately. `sim.lock` was taken and released. The
+  load-bearing `setViewSize` check, the Gate 0 clock check and the perf comparison
+  with the baseline stay unverified ("Open before merge" 2–3).
+- Mutations, `test:swift` (each reverted; then 18 tests, 0 failures):
+  ```
+  padded() without the zero-pad      Executed 18 tests, with 6 failures
+    ClockCoreTests testThinkingVectors : XCTAssertEqual failed
+  formatClock stubbed to return ""   Executed 18 tests, with 29 failures
+  ```
+  Finding 1's red is the missing link itself (the 2 pins above).
+- No production code changed. Gate: run by the orchestrator's script.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-28* (fresh context; same model family as the planner,
