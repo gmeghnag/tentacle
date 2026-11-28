@@ -316,8 +316,113 @@ Paste both `perf.txt` outputs into Execution.
 
 ## Execution
 
-*(empty)*
+*— claude-sonnet-5-5, 2026-11-28*
+
+**Load-bearing check (before any edit):** `repro.ts` and `budget.ts` printed the
+Context's output unchanged (gate missing; `win=401016 … renderMs=401000`; S1
+24.4 and S2 16.5 renders/s, S2 70 windows with 68 over 250 ms).
+
+**As built, in order** (each red on assertions before its code):
+
+1. Probe cut — `src/perf-probe.ts` `appState()`, `App.tsx` module-scope
+   listener. Red with a no-op stub: 5 of the 6 new probe tests (`win=401016`,
+   `renderMs=401000`, a frame scheduled while suspended, no `settle=-1` fan
+   line) and the wiring test. The sixth (a 40 s stall is still reported) guards
+   against over-filtering and is green on both.
+2. Checker `e2e/perf-budget.ts` and `longHistory` / `longSessionOf` in
+   `e2e/seed.ts`. Red against stubs: 16 of 17 (the one pass: a smooth log is ok).
+3. Flow, its two scripts, `run.ts` wiring (`appLogText`, `perfCheck`). Red
+   before the wiring: the flow-list guard, the `PERF_ID` mapping test and the
+   post-flow check test. The yaml-order test was written after the yaml.
+
+**Drift from Implementation**
+
+- Changelog: the header says `none`; the orchestrator's brief asked for one
+  fragment, so `changelog.d/mobile-ui-fluidity-s0.fixed.md` describes the log cut.
+- `TODO.md` untouched: the s0 item already names ``e2e flow `90-perf-stream` ``
+  and the `e2e-gate` guard passes.
+- A `ptrace` line with no `ev` at all is an evidence violation (a truncated
+  line); only a present, unknown `ev` is ignored.
+- The report lists whole-log verdicts (rate, fan minimum) and per-rule totals
+  above the 10 quoted lines, so 68 gap lines cannot hide the rate.
+- No protocol schema changed.
+
+**Mutations** (applied, run, reverted)
+
+| Mutation | Result |
+|---|---|
+| `active()` without `!suspended` | 15 pass, **2 fail** (`inactive → background → active is one suspension`; `a stream that starts while suspended schedules no frame`) |
+| checker without the minimum-fans rule (`streamingFans < 0`) | 14 pass, **3 fail** (`not enough evidence is never a pass`; the report-cap test; the `perfOutcome` table) |
+
+A third, extra check for the yaml-order test: `times: 3` → 77 pass, **1 fail**.
+
+**Validation (simulator)** — iPhone 17 Pro, iOS 26.5, Release,
+`--only 90-perf-stream`, under `sim.lock` (released; simulator shut down). Run 1
+built the app; run 2 and the control reused it (`999306f83751`, unchanged app
+source).
+
+| Run | Maestro | Summary | jank lines | worst gap | fan settle ms | renders/s | violations |
+|---|---|---|---|---|---|---|---|
+| 1 (`1795825265656`) | Passed | `FAIL (known-bug)`, 192 s | 83 | 3670 ms | 4616, 4531, 4706, 4903 | 16.4 | gap 77, settle 4, rate 1 |
+| 2 (`1795825900647`) | Passed | `FAIL (known-bug)`, 188 s | 85 | 3427 ms | 4577, 4552, 4437, 4609 | 16.5 | gap 82, settle 4, rate 1 |
+| control `PERF_ROUNDS = 2` (`1795826109486`, reverted) | Passed | `FAIL (known-bug)`, 154 s | 70 | 88 ms | 1040, 1083, 1067, 1082 | 23.6 | rate 1 only |
+
+Red for the planned reasons in both runs, and the control matches S1, so the
+harness does not trip gap or settle by itself. The `clearState`
+precondition holds: run 1's first `ptrace` line (00:29:05Z) is after the flow
+started (00:28:11Z). Both `perf.txt` outputs are in the appendix.
+
+**Narrow gate:** after the last edit, 6 files (the task's plus `e2e-gate`,
+`e2e-shard`) 221 pass / 0 fail; earlier, the e2e-runner suites (9 files) 325
+pass / 0 fail; `biome check` on the changed files clean (after one format of
+`run.ts`); `tsc -p apps/mobile` clean. Full gate: the orchestrator's script.
 
 ## Review
 
 *(empty)*
+
+## Appendix — history
+
+`perf.txt` of validation runs 1 and 2, verbatim.
+
+```
+PERF FAIL
+jank lines: 83, fan lines: 4 (4 streaming)
+worst gap: 3670 ms
+fan settle ms: 4616, 4531, 4706, 4903
+renders/s: 16.4
+violations: gap 77, settle 4, rate 1
+  rate: 16.4 renders/s > 11
+  gap: worst=314 > 250 ms — 2026-11-28T00:29:05.307Z info ptrace ev=jank win=1006 gaps=5 worst=314 lost=634 stream=true folds=86 notifies=16 renders=16 renderMs=692
+  gap: worst=251 > 250 ms — 2026-11-28T00:29:06.372Z info ptrace ev=jank win=1065 gaps=7 worst=251 lost=667 stream=true folds=91 notifies=19 renders=19 renderMs=756
+  gap: worst=323 > 250 ms — 2026-11-28T00:29:08.445Z info ptrace ev=jank win=1054 gaps=7 worst=323 lost=627 stream=true folds=98 notifies=18 renders=18 renderMs=705
+  gap: worst=3332 > 250 ms — 2026-11-28T00:29:12.756Z info ptrace ev=jank win=4310 gaps=9 worst=3332 lost=3736 stream=true folds=366 notifies=71 renders=71 renderMs=3756
+  gap: worst=506 > 250 ms — 2026-11-28T00:29:13.880Z info ptrace ev=jank win=1124 gaps=6 worst=506 lost=741 stream=true folds=101 notifies=19 renders=19 renderMs=813
+  gap: worst=556 > 250 ms — 2026-11-28T00:29:14.946Z info ptrace ev=jank win=1067 gaps=5 worst=556 lost=752 stream=true folds=93 notifies=18 renders=18 renderMs=809
+  gap: worst=431 > 250 ms — 2026-11-28T00:29:15.955Z info ptrace ev=jank win=1009 gaps=3 worst=431 lost=816 stream=true folds=88 notifies=17 renders=17 renderMs=837
+  gap: worst=500 > 250 ms — 2026-11-28T00:29:17.040Z info ptrace ev=jank win=1085 gaps=2 worst=500 lost=953 stream=true folds=92 notifies=18 renders=18 renderMs=957
+  gap: worst=969 > 250 ms — 2026-11-28T00:29:18.043Z info ptrace ev=jank win=1003 gaps=1 worst=969 lost=953 stream=true folds=87 notifies=17 renders=17 renderMs=940
+  gap: worst=3499 > 250 ms — 2026-11-28T00:29:21.589Z info ptrace ev=jank win=3546 gaps=1 worst=3499 lost=3482 stream=true folds=308 notifies=59 renders=58 renderMs=3387
+  … 71 more violating lines (81 in all)
+```
+
+```
+PERF FAIL
+jank lines: 85, fan lines: 4 (4 streaming)
+worst gap: 3427 ms
+fan settle ms: 4577, 4552, 4437, 4609
+renders/s: 16.5
+violations: gap 82, settle 4, rate 1
+  rate: 16.5 renders/s > 11
+  gap: worst=457 > 250 ms — 2026-11-28T00:32:39.256Z info ptrace ev=jank win=1329 gaps=4 worst=457 lost=1084 stream=true folds=117 notifies=22 renders=22 renderMs=1115
+  gap: worst=252 > 250 ms — 2026-11-28T00:32:40.262Z info ptrace ev=jank win=1006 gaps=7 worst=252 lost=539 stream=true folds=86 notifies=17 renders=17 renderMs=631
+  gap: worst=254 > 250 ms — 2026-11-28T00:32:41.279Z info ptrace ev=jank win=1017 gaps=6 worst=254 lost=619 stream=true folds=84 notifies=17 renders=17 renderMs=687
+  gap: worst=313 > 250 ms — 2026-11-28T00:32:42.374Z info ptrace ev=jank win=1095 gaps=6 worst=313 lost=727 stream=true folds=101 notifies=19 renders=19 renderMs=803
+  gap: worst=2915 > 250 ms — 2026-11-28T00:32:46.510Z info ptrace ev=jank win=3083 gaps=2 worst=2915 lost=2947 stream=true folds=268 notifies=51 renders=51 renderMs=2892
+  gap: worst=385 > 250 ms — 2026-11-28T00:32:47.597Z info ptrace ev=jank win=1086 gaps=4 worst=385 lost=830 stream=true folds=96 notifies=18 renders=18 renderMs=860
+  gap: worst=447 > 250 ms — 2026-11-28T00:32:48.632Z info ptrace ev=jank win=1035 gaps=4 worst=447 lost=765 stream=true folds=90 notifies=17 renders=17 renderMs=800
+  gap: worst=551 > 250 ms — 2026-11-28T00:32:50.181Z info ptrace ev=jank win=1549 gaps=5 worst=551 lost=1216 stream=true folds=134 notifies=26 renders=26 renderMs=1259
+  gap: worst=486 > 250 ms — 2026-11-28T00:32:51.248Z info ptrace ev=jank win=1067 gaps=2 worst=486 lost=937 stream=true folds=93 notifies=18 renders=18 renderMs=941
+  gap: worst=3404 > 250 ms — 2026-11-28T00:32:55.233Z info ptrace ev=jank win=3985 gaps=2 worst=3404 lost=3862 stream=true folds=348 notifies=67 renders=67 renderMs=3768
+  … 76 more violating lines (86 in all)
+```

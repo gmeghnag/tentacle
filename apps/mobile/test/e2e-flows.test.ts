@@ -17,6 +17,8 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { parseFlowMeta } from "../e2e/gate.ts";
+import { PERF_BUDGET, PERF_FLOW } from "../e2e/perf-budget.ts";
 import { FLOWS } from "../e2e/run.ts";
 import type { HubContext, HubEntries } from "../src/hub-actions.ts";
 import { hubActions } from "../src/hub-actions.ts";
@@ -1185,6 +1187,50 @@ describe("the flow list is the flow files (the other direction)", () => {
       .map((file) => file.slice(0, -".yaml".length))
       .sort();
     expect(files).toEqual([...FLOWS].sort());
+  });
+});
+
+describe("flow 90: the perf gate (docs/feat/mobile-ui-fluidity-s0.md)", () => {
+  const flow = () => scriptBody(`${PERF_FLOW}.yaml`);
+  /** Where `needle` sits; it must be there. */
+  const at = (body: string, needle: string): number => {
+    expect(body).toContain(needle);
+    return body.indexOf(needle);
+  };
+
+  test("it runs, tagged known-bug, on a long session of its own", () => {
+    expect(FLOWS).toContain(PERF_FLOW);
+    expect(parseFlowMeta(PERF_FLOW, flow()).tags).toEqual(["known-bug"]);
+    expect(flow()).toContain('id: "session-${PERF_ID}"');
+    const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    expect(runner).toContain(`"${PERF_FLOW}": "PERF_ID"`);
+    expect(runner).toMatch(/PERF_FLOW\s*\?\s*longSessionOf\(endpoint\)/);
+  });
+
+  test("the stream starts after the open settled, covers every open, then stops", () => {
+    const body = flow();
+    const opened = at(body, 'id: "floating-activity"');
+    const think = at(body, 'file: "90-laptop-think.js"');
+    const repeat = at(body, "- repeat:");
+    const stillRunning = at(body, '- assertVisible:\n    id: "turn-running"');
+    const cancel = at(body, 'file: "90-laptop-cancel.js"');
+    const idle = at(body, 'id: "turn-idle"');
+    const order = [opened, think, repeat, stillRunning, cancel, idle];
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+    expect(body).toContain(`times: ${PERF_BUDGET.minStreamingFans}\n`);
+    expect(scriptBody("90-laptop-think.js")).toContain("laptop-prompt?session=${PERF_ID}");
+    expect(scriptBody("90-laptop-think.js")).toContain("THINKHOLD%20FAST");
+    expect(scriptBody("90-laptop-cancel.js")).toContain("laptop-cancel?session=${PERF_ID}");
+  });
+
+  test("the runner holds the app's log to the budget after the flow", () => {
+    const runner = readFileSync(join(import.meta.dir, "..", "e2e", "run.ts"), "utf8");
+    expect(runner).toMatch(/checkPerf\(/);
+    expect(runner).toMatch(/outcome = perfOutcome\(outcome, report\)/);
+    expect(runner).toContain('"perf.txt"');
+    expect(runner).toContain('"ptrace.txt"');
+    // Both halves of a rotated log: the predecessor first, then the live file.
+    expect(runner).toMatch(/\["tentacle-log\.1\.txt", "tentacle-log\.txt"\]/);
   });
 });
 

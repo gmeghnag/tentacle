@@ -5,7 +5,9 @@
  * Every decision (what is a gap, what a line says) is `perf-trace.ts`'s.
  *
  * The loop runs ONLY while a turn streams or a fan is opening — never at rest,
- * so an idle app does not wake the JS thread every frame for a diagnostic.
+ * so an idle app does not wake the JS thread every frame for a diagnostic — and
+ * never while the app is not `active`: iOS suspends the JS thread there, and a
+ * window spanning that would read as minutes of jank.
  */
 import type { AppLog } from "./app-log.ts";
 import {
@@ -46,6 +48,11 @@ export interface PerfProbe {
   fanSettle(finished: boolean): void;
   /** The fan closed. */
   fanClose(): void;
+  /**
+   * The app's `AppState` changed. Nothing is measured while it is not `active`:
+   * a suspension is not jank, so the windows are cut there.
+   */
+  appState(state: string): void;
   /** The clock every reading uses. */
   now(): number;
 }
@@ -58,6 +65,7 @@ export function createPerfProbe(
   const meter = createJankMeter();
   let isStreaming = false;
   let looping = false;
+  let suspended = false;
   let lastTouch: { native: number | undefined; js: number } | null = null;
   let fan: FanRecord | null = null;
   const write = (line: PerfLine | null): void => {
@@ -73,7 +81,7 @@ export function createPerfProbe(
     fan = null;
     write(fanLine(facts));
   };
-  const active = (): boolean => isStreaming || fan !== null;
+  const active = (): boolean => !suspended && (isStreaming || fan !== null);
   const tick = (): void => {
     if (!active()) {
       looping = false;
@@ -132,6 +140,19 @@ export function createPerfProbe(
     },
     fanClose() {
       report(null);
+    },
+    appState(state) {
+      const next = state !== "active";
+      if (next === suspended) {
+        return;
+      }
+      suspended = next;
+      if (suspended) {
+        // An open fan ends here (unsettled), not across the suspension.
+        report(null);
+        meter.pause();
+      }
+      loop();
     },
     now: clock,
   };
