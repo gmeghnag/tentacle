@@ -232,6 +232,47 @@ The fill meter (TUI status bar, phone header) uses the **effective** window, so
    change (compaction, prune — they already are epochs), not transient ones
    (output limit continuing).
 
+### Owner decisions
+
+*— claude-opus-5-5, 2026-11-28 (recorded from the owner's answers)*
+
+- **Q1 (revised by the owner): the model renews its own context first; auto-compaction is the safety net.**
+  - The thresholds are set on the **room left**, not on a percentage
+    (owner, after a worked example showed that a 95 % ultimatum on 115k
+    leaves 3.45k < floor, so it could never be sent). Room = effective
+    window − prompt − margin (Q4).
+    - When room ≤ **3 × floor** (≈ 12k), the model gets an explicit
+      instruction, not just the fill line: «update memory / the plan if
+      needed, then call `context_reset`».
+    - When room ≤ **1.5 × floor** (≈ 6k), it gets an ultimatum: «call
+      `context_reset` now, nothing else».
+    - Below the floor the round is not sent and the ladder runs. This works
+      the same for any window size (32k … 1M).
+  - The thresholds must leave room for the reasoning plus the handoff (about
+    3–6k tokens on Qwen). On 27/11 the owner's own «resettati» came too late,
+    because the reasoning used up the room that was left.
+  - If the window still fills (the model ignored both): the ladder runs
+    (lossless prune → bounded compaction → retry the round once → clear
+    failure notice).
+  - Auto-compaction is a config switch that is **on by default**
+    (`context.autoCompact: true`). Turning it off makes the ladder end at the
+    failure notice after the prune.
+- **Q2: `contextPrune` stays OFF, including in the ladder, until a benchmark
+  shows the model's performance does not degrade with it on.** An earlier run
+  had a model that could no longer find its messages. Until then the ladder
+  is: compaction → retry once → failure notice. Benchmarking pruning is
+  separate work (harness-compare), to be done before it is turned on.
+- **Q3: effective window = min(config, server `n_ctx`).** One notice per
+  session only when the server is smaller, plus a `tentacle doctor` line. A
+  larger server does not override the config (a deliberate choice). The
+  90/95 % thresholds and the fill meter use this window.
+- **Q4: margin 2 % of the window, floor 4 096 tokens**, fixed for now.
+  `max_tokens = min(configured, window − prompt − margin)`; a round whose
+  room is below the floor is not sent (the ladder runs instead).
+- **Q5: persist only the notices that explain a history change** (compaction,
+  `context_reset`: already epochs). Transient ones (output limit continuing,
+  the 90/95 % instructions) are live only.
+
 ## Execution
 
 *(empty — an `eval`; filled by each promoted slice's own doc)*
