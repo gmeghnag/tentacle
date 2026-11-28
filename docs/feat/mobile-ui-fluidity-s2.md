@@ -562,3 +562,19 @@ HEAD `cc7b1324` adds no code since round 3.
   Reverted; `git status` is clean.
 - **Escalation unchanged:** the blocker is a permission (`ln`, `swift`, simulator), not
   code. The owner or orchestrator runs the round-3 command, then a new Review runs.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-28* — **Verdict: REQUEST-CHANGES** (scope: `d8f87300`, a
+symlink plus docs; no production code changed).
+
+- **Finding 1: FIXED.** `Sources/ClockCore` is committed as a symlink (mode 120000) to
+  `../../../modules/tentacle-clock/ios/ClockCore`. Before the link, the round-4 run had 2
+  `clock-wiring` failures. Now the touched files pass 230 / 0 fail. `bun run test:swift`:
+  18 tests, 0 failures (3 of them `ClockCoreTests`). Mutation: dropping `padded()`'s
+  zero-pad gives 18 tests with 6 failures. Reverted; tree clean.
+- **Finding 2 (HIGH): STILL OPEN.** `ClockTextView.swift`, `TentacleClockModule.swift` and
+  the podspec have still never been compiled. The `setViewSize`-without-JS check
+  (load-bearing), the Gate 0 clock check and the perf baseline comparison have not run.
+  These are the Implementation's mandatory simulator steps.
+- **Regressions:** none. The diff adds no code. Lint clean. Typecheck clean.
