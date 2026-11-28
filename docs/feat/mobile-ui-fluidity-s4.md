@@ -717,3 +717,16 @@ the old window — holds); voice turn-end under a coalesced A-end/B-start publis
 `CodeBlock`'s scroll widths and offset there, and diagrams, charts and images
 live on tool rows, which are never live. So the only cost is cosmetic: a code
 block scrolled sideways mid-stream snaps back (nit). §7: mobile-only, untouched.
+
+### Round 2
+
+*— claude-opus-5-5, 2026-11-28*
+
+**Verdict: APPROVE-WITH-NITS** (PASS). Fix round 1 (`706b5395`) changes only
+this doc and no code, so there is nothing to mutate and nothing can regress.
+`bun run typecheck` and `bun run lint` (2827 files) are clean, and
+`perf-budget.test.ts` passes 25/0. The margin it records is right
+(0.1 × 1218 = 121.8). The `cells` MEDIUM (round 1 #1) is still **open, recorded, not fixed**.
+Deferring it is acceptable: the fix changes approved decision 4, and the
+reviews asked for it as a follow-up. It should be a TODO item before flow 90 grows. The
+live→settled screenshot (round 1 #2) is still unverified.
