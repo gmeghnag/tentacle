@@ -318,6 +318,73 @@ is necessary-looking but NOT sufficient; do not merge as "44 fixed".**
 - No changelog fragment, per orchestrator decision 4. The spawn brief's generic
   line asks for one; the orchestrator decides.
 
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-28*
+
+Both findings are fixed. Flow 44 is GREEN on the simulator. This supersedes
+"44 — PARTIAL" above.
+
+**Root cause (replaces the Context's s3-only account and the Design's premise).**
+`useNavigationState` returns `selector(getState())` **read live during render**
+(`useNavigationState.tsx`, core 7.24.0); so did `freshRoutes`
+(`navigation.getState()`). A render where **no hook's state changed** (e.g. a
+same-value `setState`) that lands after the navigator's commit but before its
+notify sees the new value. React bails it out: it drops that render's effects
+but **keeps their new deps**. Later renders compare equal, so the sheet loop
+never runs. This matches the probe log (#64–#66: only the no-deps effect logs).
+Which `setState` triggers that render in the app was not identified; the fix
+does not depend on it.
+
+**Repro** (`.tentacle/tmp/mobile-fluidity-e2e/bail.test.ts`, real React 18).
+One component, `useEffect([v])` plus a no-deps effect. Steps: `set(1)`; change
+the outside value; `set(1)` again; notify; `set(2)`. `v` is read live, or via
+`useSyncExternalStore`:
+```
+live: render 1 permission | render 2 permission | nodeps permission     ← "dep permission" never
+uses: render 1 permission | dep permission | nodeps permission | …
+```
+
+**Drift from the approved Design (orchestrator: please confirm).** The goal and
+screen are the same, but the mechanism differs: `useNavigationState` selectors
+cannot fix this. There is one new production file, outside §Files:
+`apps/mobile/src/use-nav-fact.ts`, a `useSyncExternalStore` over the
+navigator's `state` event.
+- `SessionScreen.tsx`: `topRunId`, `workflowsTop` and `freshKey` use
+  `useNavFact`. `freshKey` is included because it feeds `actual`, a dependency
+  of the same loop (same hazard; no separate e2e red for it). The navigation
+  type is widened at the call site; `routes.ts` is unchanged. `stackKey` stays:
+  it only triggers re-renders.
+- `native-sheets-wiring.test.ts`: the older "e2e 44" case pinned the live-read
+  line. It now pins the all-routes key through the new form.
+
+**Red → green.**
+- Finding 2: `use-nav-fact.test.ts` (new, real React). With the seam holding
+  today's pattern (subscribe + live read): 1 fail / 1 pass, effects
+  `["landing"]`, expected `["landing","run"]`. With the fix: 2/2. On the old
+  tree the module does not exist, hence this step-A form.
+- `session-front-wiring.test.ts`, rewritten: 3 fail / 0 pass on the old screen
+  (on assertions), then green.
+
+**Mutations** (by Edit, each reverted):
+- M5, the hook returns a live read → `use-nav-fact.test.ts` 2/2 red (the first
+  on the effects assertion, the second on its push timeout).
+- M6 + M7 together, `freshKey` read at render and `topRunId` back to
+  `useNavigationState` → their two wiring cases red (1 pass, 2 fail).
+
+**Evidence.**
+- `bun test apps/mobile/test/`: 6039 pass / 0 fail. `tsc -p apps/mobile` clean;
+  `biome check apps/mobile` clean.
+- E2E (iOS 26 `0B43D716…`, under `sim.lock`, released), final sources:
+  `--only 44-workflow-editor` PASS, 1 try (run `1795860824829`). The planned set
+  (run `1795861320491`): 10, 34, 35, 36-preview, 36-theme and 44 PASS
+  (`GATE PASS — 6 passed, 0 failed, 1 known-bug`).
+- 90-perf-stream: FAIL (known-bug, not counted; it also failed before this
+  round). This run's violation: `cells=126 > 125.9` per 1259 tail renders;
+  `shell=3`. It was not compared with `main`, so the plan's "90 must pass" is
+  **not met**.
+- Not run: the second simulator, the full 2-sim gate, `bun run check`.
+
 ## Review
 
 *— claude-opus-5-5, 2026-11-28* (fresh context; same model as the planner, a

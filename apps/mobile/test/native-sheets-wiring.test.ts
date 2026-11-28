@@ -217,13 +217,12 @@ describe("S3 — the reconciler is the pure module's, and the screen only dispat
     expect(SCREEN).toContain("sheetsOfSession(rootRoutes, owner)");
   });
 
-  test("the root routes are re-read FRESH each render, never memoized on the hook's stale key (e2e 44)", () => {
+  test("the root routes follow ALL the routes' keys, never the sheet-only key (e2e 44)", () => {
     // `stackKey` covers only the Sheet routes: a screen pushed over Session (the run)
     // never changed it, a memo keyed on it kept the routes from before, `ownRunTopId`
     // never saw the run, and the run's ask stayed a slim row instead of a sheet.
-    expect(SCREEN).toContain("const freshRoutes = navigation.getState()?.routes ?? [];");
-    expect(SCREEN).toContain("useMemo(() => freshRoutes, [freshKey])");
-    expect(SCREEN).toContain("freshRoutes.map((route) => route.key)");
+    expect(SCREEN).toContain('state.routes.map((route) => route.key).join("|")');
+    expect(SCREEN).toContain("useMemo(() => navigation.getState().routes, [freshKey])");
     expect(SCREEN).not.toContain("[stackKey, navigation]");
   });
 
