@@ -380,6 +380,7 @@ const APP_LOG: AppLog = createAppLog({ now: Date.now, capacity: 500 });
 const APP_LOG_FILE = createAppLogFile(APP_LOG_FILES);
 // The perf trace (docs/fix/mobile-fan-jank-device.md): `grep ptrace` in an export.
 PERF.attach(APP_LOG);
+AppState.addEventListener("change", (state) => PERF.appState(state));
 
 /**
  * The app-switcher cover (D4, Owner Q2/Q3): the stock native blur Step 0 proved

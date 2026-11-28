@@ -1,0 +1,80 @@
+appId: so.tentacle.app
+tags:
+  - known-bug
+# known-bug: the session screen janks under a fast stream on a long session (docs/eval/mobile-ui-fluidity.md, slices 1-7)
+---
+# 90 (docs/feat/mobile-ui-fluidity-s0.md): the AI-free perf gate. A long seeded
+# session (`PERF_ID`, 120 rounds), opened and left to settle; then the laptop
+# starts a fast reasoning stream and the hub is opened 4 times under it. Maestro
+# only DRIVES: after the flow `run.ts` reads the app's `ptrace` lines and
+# `perf-budget.ts` turns a pass into a fail (`perf.txt`, `ptrace.txt` in the
+# flow's output dir). The 30 s waits are generous on purpose: a janky app must
+# still be driven to the end, so the CHECKER is what turns this flow red.
+- runFlow: _pair.yaml
+- tapOn:
+    id: "computer-${output.computerId}"
+- assertVisible:
+    id: "sessions-list"
+- scrollUntilVisible:
+    element:
+      id: "session-${PERF_ID}"
+    direction: DOWN
+- tapOn:
+    id: "session-${PERF_ID}"
+- extendedWaitUntil:
+    visible:
+      id: "session-view"
+    timeout: 60000
+- extendedWaitUntil:
+    visible:
+      id: "floating-activity"
+    timeout: 60000
+# Let the open settle (a sleep: nothing ever has this id).
+- extendedWaitUntil:
+    visible:
+      id: "never-there"
+    timeout: 5000
+    optional: true
+- runScript:
+    file: "90-laptop-think.js"
+- extendedWaitUntil:
+    visible:
+      id: "turn-running"
+    timeout: 30000
+- extendedWaitUntil:
+    visible:
+      id: "never-there"
+    timeout: 4000
+    optional: true
+# 4 = `PERF_BUDGET.minStreamingFans`.
+- repeat:
+    times: 4
+    commands:
+      - tapOn:
+          id: "floating-activity"
+      - extendedWaitUntil:
+          visible:
+            id: "hub-scrim"
+          timeout: 30000
+      # Held longer than the 1.5 s settle budget: a healthy open settles first.
+      - extendedWaitUntil:
+          visible:
+            id: "never-there"
+          timeout: 2000
+          optional: true
+      - tapOn:
+          id: "hub-scrim"
+          point: "50%,20%"
+      - extendedWaitUntil:
+          notVisible:
+            id: "hub-scrim"
+          timeout: 30000
+# The stream covered every open.
+- assertVisible:
+    id: "turn-running"
+- runScript:
+    file: "90-laptop-cancel.js"
+- extendedWaitUntil:
+    visible:
+      id: "turn-idle"
+    timeout: 30000

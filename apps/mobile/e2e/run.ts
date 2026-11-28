@@ -25,6 +25,7 @@ import { publicKeyOf } from "@tentacle/transport/noise";
 import { $, type Subprocess } from "bun";
 import { createApnsClient } from "../../relay/src/apns-client.ts";
 import type { ApnsJwtSource } from "../../relay/src/apns.ts";
+import { PTRACE } from "../src/perf-trace.ts";
 import { type ProbeListener, escapeFixture, startProbeListener } from "./escape-probes.ts";
 import {
   type AttemptStatus,
@@ -41,6 +42,13 @@ import {
 import { startHooks } from "./hooks.ts";
 import { payloadFor, sealPushMessage } from "./notify-steps.ts";
 import { createPairingHooks } from "./pairing.ts";
+import {
+  PERF_FLOW,
+  type PerfReport,
+  checkPerf,
+  perfOutcome,
+  perfReportText,
+} from "./perf-budget.ts";
 import {
   type IosMajor,
   type Missing,
@@ -665,6 +673,7 @@ async function main(): Promise<number> {
       historyOf,
       queueStateOf,
       composeSessionOf,
+      longSessionOf,
       workflowRunsOf,
       fileExists,
       turnOnce,
@@ -1021,12 +1030,23 @@ async function main(): Promise<number> {
               runDir,
               seeded,
               hooks.address,
-              // A run-seeded flow's session holds two ENDED workflow runs (S7);
-              // every other flow's own session is a plain compose session.
+              // A run-seeded flow's session holds two ENDED workflow runs (S7),
+              // the perf flow's a long history; every other flow's own session is
+              // a plain compose session.
               (name) =>
-                RUN_SEEDED_FLOWS.has(name) ? workflowRunsOf(endpoint) : composeSessionOf(endpoint),
+                name === PERF_FLOW
+                  ? longSessionOf(endpoint)
+                  : RUN_SEEDED_FLOWS.has(name)
+                    ? workflowRunsOf(endpoint)
+                    : composeSessionOf(endpoint),
               flowTimeoutMs,
             );
+            // The perf gate (docs/feat/mobile-ui-fluidity-s0.md): Maestro only
+            // drove; the app's own `ptrace` lines are held to the budget.
+            if (flow === PERF_FLOW) {
+              const report = await perfCheck(device, outDir);
+              outcome = perfOutcome(outcome, report);
+            }
           } catch (error) {
             // A setup step (the flow's own session, a restart) failed: this
             // flow is red, the run goes on.
@@ -1133,6 +1153,46 @@ async function appLogFile(udid: string): Promise<string> {
     }
   }
   return "";
+}
+
+/**
+ * BOTH of the app's log files, oldest first: a rotation mid-flow splits the lines
+ * between them (`appLogFile` answers only one). A missing file is empty.
+ */
+async function appLogText(udid: string): Promise<string> {
+  const container = Bun.spawnSync(
+    ["xcrun", "simctl", "get_app_container", udid, "so.tentacle.app", "data"],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const dir = container.stdout.toString().trim();
+  if (container.exitCode !== 0 || dir === "") {
+    return "";
+  }
+  const parts: string[] = [];
+  for (const name of ["tentacle-log.1.txt", "tentacle-log.txt"]) {
+    parts.push(await readFile(join(dir, "Documents", name), "utf8").catch(() => ""));
+  }
+  return parts.join("\n");
+}
+
+/** The app drains its log to the file every 2 s: two periods, so the last lines landed. */
+const PERF_DRAIN_MS = 4000;
+
+/**
+ * Flow 90's verdict: the app's `ptrace` lines against the budget, kept beside the
+ * flow's output (`ptrace.txt`, `perf.txt`) and printed. An unreadable log is no
+ * evidence, which `checkPerf` fails.
+ */
+async function perfCheck(udid: string, outDir: string): Promise<PerfReport> {
+  await Bun.sleep(PERF_DRAIN_MS);
+  const log = await appLogText(udid);
+  const lines = log.split("\n").filter((line) => line.split(" ")[2] === PTRACE);
+  await writeFile(join(outDir, "ptrace.txt"), `${lines.join("\n")}\n`);
+  const report = checkPerf(log);
+  const text = perfReportText(report);
+  await writeFile(join(outDir, "perf.txt"), `${text}\n`);
+  console.log(text);
+  return report;
 }
 
 /**
@@ -1910,6 +1970,9 @@ export const FLOWS: readonly string[] = [
   // sentence, the blinking node, the Thinking footer) and its tap detail, with
   // the beta theme and compactShell off and on — on a session of its own.
   "38-running-row",
+  // docs/feat/mobile-ui-fluidity-s0.md: the perf gate — a long session, a fast
+  // reasoning stream and 4 hub opens; the app's `ptrace` lines are the verdict.
+  "90-perf-stream",
   // docs/feat/mobile-projects.md: two projects of one computer (a second `serve`
   // on the same config dir) — stop, re-probe, revoke one, the other stays.
   "37-projects",
@@ -2023,6 +2086,7 @@ const COMPOSE_SESSION_VARS: Readonly<Record<string, string>> = {
   "36-theme-beta-shots": "THEMEBETA_ID",
   "36-preview-cards": "PREVIEW_ID",
   "38-running-row": "RUNROW_ID",
+  "90-perf-stream": "PERF_ID",
   // docs/fix/mobile-transcript-type.md: the transcript's type, dark + light.
   "41-transcript-type-shots": "TRANSCRIPT_ID",
   // docs/feat/workflow-editor.md slice 7c: the editor's create → save → Run flow.

@@ -1,0 +1,1 @@
+- **The app's performance log no longer counts time in the background as stalls.** The `ptrace` lines in an exported log are now cut when the app leaves the foreground, so a suspension of minutes no longer reads as minutes of jank.

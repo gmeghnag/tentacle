@@ -174,3 +174,120 @@ describe("createPerfProbe", () => {
     expect(h.frames.length).toBe(0);
   });
 });
+
+describe("createPerfProbe: windows are cut at app-state changes", () => {
+  function probe() {
+    let t = 0;
+    const frames: ((t: number) => void)[] = [];
+    const p = createPerfProbe(
+      () => t,
+      (fn) => frames.push(fn),
+    );
+    const log = createAppLog({ now: () => 0, capacity: 200 });
+    p.attach(log);
+    const step = (ms: number): void => {
+      t += ms;
+      const fn = frames.shift();
+      fn?.(t);
+    };
+    /** Two seconds of 20 fps frames: every window has gaps, so each writes a line. */
+    const jank = (): void => {
+      for (let i = 0; i < 40; i++) {
+        step(50);
+      }
+    };
+    const fields = (ev: string) =>
+      log
+        .entries()
+        .filter((e) => e.fields.ev === ev)
+        .map((e) => e.fields);
+    return { p, step, jank, frames, fields };
+  }
+
+  /** No window holds the suspension; the render that straddled it is not booked. */
+  function expectCut(lines: ReturnType<ReturnType<typeof probe>["fields"]>): void {
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines.filter((f) => Number(f.win) > 2000)).toEqual([]);
+    expect(lines.filter((f) => Number(f.renderMs) > 1000)).toEqual([]);
+  }
+
+  test("a frame that fires while still suspended: no window spans it", () => {
+    const h = probe();
+    h.p.streaming(true);
+    h.step(16);
+    h.step(16);
+    h.p.appState("background");
+    h.p.render(401_000);
+    h.step(401_000);
+    h.p.appState("active");
+    h.jank();
+    expectCut(h.fields("jank"));
+  });
+
+  test("the first frame after `active`: no window spans it, and the loop runs", () => {
+    const h = probe();
+    h.p.streaming(true);
+    h.step(16);
+    h.step(16);
+    h.p.appState("background");
+    h.p.render(401_000);
+    h.p.appState("active");
+    expect(h.frames.length).toBe(1); // the pending one, not a second loop
+    h.step(401_000);
+    h.jank();
+    expect(h.frames.length).toBe(1);
+    expectCut(h.fields("jank"));
+  });
+
+  test("inactive → background → active is one suspension", () => {
+    const h = probe();
+    h.p.streaming(true);
+    h.step(16);
+    h.step(16);
+    h.p.appState("inactive");
+    h.step(100); // the loop stops here
+    h.p.appState("background");
+    expect(h.frames.length).toBe(0);
+    h.p.render(401_000);
+    h.step(401_000);
+    h.p.appState("active");
+    expect(h.frames.length).toBe(1);
+    h.jank();
+    expectCut(h.fields("jank"));
+  });
+
+  test("a stream that starts while suspended schedules no frame until `active`", () => {
+    const h = probe();
+    h.p.appState("background");
+    h.p.streaming(true);
+    expect(h.frames.length).toBe(0);
+    h.p.appState("active");
+    expect(h.frames.length).toBe(1);
+  });
+
+  test("a fan open at `background` reports once, unsettled", () => {
+    const h = probe();
+    h.p.touch(undefined);
+    h.p.fanOpen();
+    h.p.fanStart();
+    h.step(16);
+    h.p.appState("background");
+    expect(h.fields("fan").map((f) => f.settle)).toEqual([-1]);
+    h.step(401_000);
+    h.p.appState("active");
+    h.p.fanSettle(true);
+    h.p.fanClose();
+    expect(h.fields("fan").length).toBe(1);
+    expect(h.frames.length).toBe(0);
+  });
+
+  test("a 40 s stall with no state change is still reported (no duration filter)", () => {
+    const h = probe();
+    h.p.appState("active");
+    h.p.streaming(true);
+    h.step(16);
+    h.step(16);
+    h.step(40_000);
+    expect(h.fields("jank").map((f) => f.worst)).toEqual([40_000]);
+  });
+});

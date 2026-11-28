@@ -73,6 +73,12 @@ function frame(delta: object, finish?: string): string {
 const DELTAS = ["Hello", " from", " the", " mock", " model."];
 
 /**
+ * How many holds the `THINKHOLD FAST` load lasts: longer than every wait flow
+ * `90-perf-stream` can spend under it (docs/feat/mobile-ui-fluidity-s0.md).
+ */
+export const FAST_HOLDS = 3;
+
+/**
  * `SHOWCASE …` (docs/feat/mobile-ui-polish.md Slice 6, flow `24-ui-shots`): one
  * answer with every markdown shape the Conversation mockup draws — inline code
  * short (a chip) and long (a run), a fenced block whose quotes, `<`, `>` and `&`
@@ -722,11 +728,14 @@ function stream(
       // `THINKHOLD` (docs/feat/mobile-hub-native-driver.md): a HOLD turn that is
       // all Thinking first — a reasoning delta every 40 ms for the hold — the
       // load under which the owner saw the hub fan stutter.
-      // `THINKHOLD FAST` (docs/fix/mobile-fan-jank-device.md): the same, a delta
-      // every 10 ms — a real model's token rate, not a slow trickle.
+      // `THINKHOLD FAST` (docs/fix/mobile-fan-jank-device.md): a delta every 10 ms
+      // — a real model's token rate, not a slow trickle — for `FAST_HOLDS` holds,
+      // and then the turn ENDS: a running turn is a loaded one.
+      const fast = prompt.includes("FAST");
+      const loadOnly = hold && fast && prompt.includes("THINKHOLD");
       if (hold && prompt.includes("THINKHOLD")) {
-        const until = Date.now() + ctx.holdMs;
-        const every = prompt.includes("FAST") ? 10 : 40;
+        const until = Date.now() + ctx.holdMs * (fast ? FAST_HOLDS : 1);
+        const every = fast ? 10 : 40;
         for (let i = 0; Date.now() < until; i++) {
           send(frame({ reasoning_content: `thinking step ${i}, weighing the next move. ` }));
           await Bun.sleep(every);
@@ -752,7 +761,7 @@ function stream(
           continue;
         }
         await Bun.sleep(
-          hold
+          hold && !loadOnly
             ? Math.max(20, ctx.holdMs / deltas.length)
             : slow
               ? SLOW_MS

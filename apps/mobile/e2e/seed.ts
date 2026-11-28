@@ -11,7 +11,7 @@ import { join } from "node:path";
  * a flow can make the daemon do something the phone did not.
  */
 import { RemoteClient, webSocketChannelFactory } from "@tentacle/client";
-import { PermissionBroker, type PermissionResponse } from "@tentacle/core";
+import { type ChatMessage, PermissionBroker, type PermissionResponse } from "@tentacle/core";
 import type { HistoryMessage } from "./hooks.ts";
 
 export interface SeedDeps {
@@ -143,6 +143,72 @@ export async function composeSessionOf(deps: {
   const id = crypto.randomUUID();
   try {
     await finishTurn(live.newSession(undefined, id), "compose");
+  } finally {
+    await live.drain().catch(() => {});
+    live.close();
+  }
+  return id;
+}
+
+/** Rounds of the perf flow's long session (the eval's S2). */
+export const PERF_ROUNDS = 120;
+
+const PERF_MARKDOWN = [
+  "## Punto della situazione",
+  "",
+  "Ho letto il **digest** e i file del giorno. Ecco cosa resta da fare:",
+  "",
+  "- aggiungere l'addendum al file 08",
+  "- controllare `15-spagna-elezioni.md`",
+  "- verificare il budget UE",
+  "",
+  "| file | stato |",
+  "| --- | --- |",
+  "| 08 | da aggiornare |",
+  "| 15 | ok |",
+  "",
+  "```ts",
+  "const x = await read(path);",
+  "```",
+].join("\n");
+
+/**
+ * A long conversation (docs/eval/mobile-ui-fluidity.md, the measurement driver's):
+ * a user line, then `rounds` of an assistant message (markdown on even rounds)
+ * with one `fs_read` call and its 80-line result, then a closing markdown answer.
+ */
+export function longHistory(rounds: number): ChatMessage[] {
+  const messages: ChatMessage[] = [{ role: "user", content: "Prepara il notiziario di oggi." }];
+  for (let round = 0; round < rounds; round += 1) {
+    const id = `call_${round}`;
+    messages.push({
+      role: "assistant",
+      content: round % 2 === 0 ? PERF_MARKDOWN : "",
+      toolCalls: [
+        { id, name: "fs_read", arguments: JSON.stringify({ path: `notes/file-${round}.md` }) },
+      ],
+    });
+    messages.push({
+      role: "tool",
+      toolCallId: id,
+      // 80 lines, the last one unterminated.
+      content: Array.from({ length: 80 }, () => "riga di testo del file").join("\n"),
+      durationMs: 3,
+    });
+  }
+  messages.push({ role: "assistant", content: PERF_MARKDOWN });
+  return messages;
+}
+
+/** Flow 90's session: seeded with the long history just before the flow, then left. */
+export async function longSessionOf(deps: {
+  readonly url: string;
+  readonly token: string;
+}): Promise<string> {
+  const live = await attach(deps);
+  const id = crypto.randomUUID();
+  try {
+    await live.openSession(undefined, longHistory(PERF_ROUNDS), id);
   } finally {
     await live.drain().catch(() => {});
     live.close();

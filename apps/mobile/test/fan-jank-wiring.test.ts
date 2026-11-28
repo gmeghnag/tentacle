@@ -86,6 +86,12 @@ describe("the ptrace probe is wired", () => {
     expect(SCREEN).toMatch(/PERF\.streaming\(running\)/);
   });
 
+  test("App hands every AppState change to the probe, at module scope", () => {
+    expect(APP).toMatch(
+      /^AppState\.addEventListener\("change", \(state\) => PERF\.appState\(state\)\);$/m,
+    );
+  });
+
   test("the hub reports the touch, the open, each start and the close", () => {
     expect(BUTTON.match(/PERF\.touch\(event\.nativeEvent\.timestamp\)/g)?.length).toBe(2);
     expect(BUTTON).toMatch(/PERF\.fanOpen\(\)/);
