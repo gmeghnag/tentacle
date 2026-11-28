@@ -65,7 +65,7 @@ export interface ActivitySheetProps {
   readonly detail: SheetDetail;
   /** WHICH detail was asked for — the detent's rule (`panelDetentFor`). */
   readonly focus: ActivityFocus;
-  /** The screen's 1 s clock: the elapsed times and the Stop arm's window. */
+  /** The sheet's 1 s clock (`SheetsPane`): the elapsed times and the Stop arm's window. */
   readonly now: number;
   readonly child: ChildAction | null;
   readonly job: JobAction | null;

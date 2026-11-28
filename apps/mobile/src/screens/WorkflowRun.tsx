@@ -224,7 +224,9 @@ function Edge({
         toValue: 1,
         duration: FLOW_MS,
         easing: Easing.linear,
-        useNativeDriver: false,
+        // The loop runs for the whole live run: off the JavaScript thread
+        // (docs/feat/mobile-ui-fluidity-s7.md, Design 3).
+        useNativeDriver: true,
       }),
     );
     loop.start();

@@ -79,8 +79,9 @@ describe("the layer is in the empty session, and clipped between header and comp
     // The Review's finding: the layer passed a literal `run = 0`, so Paracadute
     // always walked off the same side and Mimetismo's switches never moved.
     expect(code(layer)).toMatch(/drawOnce\(memory\)/);
-    expect(code(layer)).toMatch(/frameAt\(scene, elapsedMs, drawn\.run,/);
-    expect(code(layer)).not.toMatch(/frameAt\([^)]*,\s*0\s*,/);
+    expect(code(layer)).toMatch(/frameAt\(scene, elapsed, drawn\.run,/);
+    // The THIRD argument is the run; the second may be `0` (the first picture).
+    expect(code(layer)).not.toMatch(/frameAt\(\s*\w+,\s*\w+,\s*0\s*[,)]/);
   });
   test("every rect gets the pure module's key, and none is made up here (Review round 2)", () => {
     // The layer keys `<Rect>` from `rectKey`, which puts the index in the key: two

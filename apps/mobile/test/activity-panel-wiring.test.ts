@@ -133,7 +133,10 @@ describe("every close path converges on one handler (Design 5)", () => {
       join(import.meta.dir, "..", "src", "screens", "session", "SheetsPane.tsx"),
       "utf8",
     );
-    const at2 = SHEETS.indexOf("<ActivitySheet");
+    // The pane mounts it through its clock leaf, which spreads the rest on.
+    const at2 = SHEETS.indexOf("<ActivityClockSheet");
+    expect(at2).toBeGreaterThan(-1);
+    expect(SHEETS).toContain("{...sheet}");
     const props = SHEETS.slice(at2, SHEETS.indexOf("\n      />", at2));
     expect(SCREEN).toMatch(/^\s*closeActivity,$/m);
     expect(props).toContain("onClose={() => actions.current.closeActivity()}");

@@ -23,6 +23,16 @@ const SAMPLER = createClockSampler(
 const NEVER = (): (() => void) => () => {};
 
 /**
+ * The time now, floored to `periodMs`, re-rendering the caller only when that
+ * value changes; the same sampler, no timer of its own. Inactive: no
+ * subscription (docs/feat/mobile-ui-fluidity-s7.md).
+ */
+export function useWallClock(active: boolean, periodMs: number): number {
+  const snapshot = (): number => Math.floor(SAMPLER.now() / periodMs) * periodMs;
+  return useSyncExternalStore(active ? SAMPLER.subscribe : NEVER, snapshot, snapshot);
+}
+
+/**
  * `render(elapsed ms)`, re-rendering the caller only when that STRING changes.
  * `since` absent → `render(null)`, and no subscription.
  */

@@ -33,6 +33,7 @@ import {
   pickScene,
   pixels,
   rectKey,
+  sameFrame,
   sceneByKey,
   sceneMemory,
   showsScene,
@@ -800,5 +801,88 @@ describe("pixels: the one grid → points projection", () => {
     expect(body({ legs: 2 })[7]).toBe(".KSKSKSK.");
     expect(body({ squash: true })[0]).toBe(".........");
     expect(body({ squash: true }).length).toBe(9);
+  });
+});
+
+describe("sameFrame: the layer redraws only a changed picture (mobile-ui-fluidity-s7)", () => {
+  const sprite = { kind: "sprite", rows: ["KK", ".K"], x: 1, y: 2 } as const;
+  const box = { kind: "rect", rect: [1, 2, 3, 4], color: "K", alpha: 0.5 } as const;
+  const base: readonly Op[] = [sprite, box];
+
+  test("equal contents are the same frame, whatever the arrays' identity", () => {
+    const copy: readonly Op[] = [
+      { kind: "sprite", rows: ["KK", ".K"], x: 1, y: 2 },
+      { kind: "rect", rect: [1, 2, 3, 4], color: "K", alpha: 0.5 },
+    ];
+    expect(sameFrame(base, copy)).toBe(true);
+    expect(sameFrame([], [])).toBe(true);
+    expect(
+      sameFrame([{ ...sprite, map: { K: "#000" } }], [{ ...sprite, map: { K: "#000" } }]),
+    ).toBe(true);
+  });
+
+  test.each<[string, readonly Op[]]>([
+    ["a moved sprite (x)", [{ ...sprite, x: 2 }, box]],
+    ["a moved sprite (y)", [{ ...sprite, y: 3 }, box]],
+    ["a changed row", [{ ...sprite, rows: ["KK", "KK"] }, box]],
+    ["an added row", [{ ...sprite, rows: ["KK", ".K", ".."] }, box]],
+    ["a fading sprite", [{ ...sprite, alpha: 0.4 }, box]],
+    ["a colour override", [{ ...sprite, map: { K: "#fff" } }, box]],
+    ["a changed rect tuple", [sprite, { ...box, rect: [1, 2, 3, 5] }]],
+    ["a changed rect colour", [sprite, { ...box, color: "B" }]],
+    ["a changed rect alpha", [sprite, { ...box, alpha: 0.4 }]],
+    ["another kind", [sprite, sprite]],
+    ["another order", [box, sprite]],
+    ["a shorter frame", [sprite]],
+    ["a longer frame", [sprite, box, box]],
+    ["nothing", []],
+  ])("%s is another frame, in both directions", (_, other) => {
+    expect(sameFrame(base, other)).toBe(false);
+    expect(sameFrame(other, base)).toBe(false);
+  });
+
+  test("a changed or extra colour-override key is another frame", () => {
+    const one: Op = { ...sprite, map: { K: "#000" } };
+    const maps: readonly Readonly<Record<string, string>>[] = [
+      { K: "#111" },
+      { K: "#000", B: "#222" },
+      { B: "#000" },
+    ];
+    for (const map of maps) {
+      expect(sameFrame([one], [{ ...sprite, map }])).toBe(false);
+      expect(sameFrame([{ ...sprite, map }], [one])).toBe(false);
+    }
+  });
+
+  // The property: over every scene × run at the rAF rate, `sameFrame` sees a
+  // change exactly when the frame's data changed: nothing real is swallowed, and
+  // nothing identical is redrawn.
+  test("over every scene × run at 60 Hz it counts exactly the distinct transitions", () => {
+    let samples = 0;
+    let redraws = 0;
+    for (const s of MASCOT_SCENES) {
+      for (const run of [0, 1]) {
+        let last: readonly Op[] | null = null;
+        let lastJson = "";
+        let same = 0;
+        let json = 0;
+        for (let t = 0; t <= s.durationMs; t += 1000 / 60) {
+          const next = frameAt(s, t, run, { eyeFade: "#fff" });
+          const nextJson = JSON.stringify(next);
+          if (last === null || !sameFrame(last, next)) {
+            same++;
+          }
+          if (nextJson !== lastJson) {
+            json++;
+          }
+          last = next;
+          lastJson = nextJson;
+          samples++;
+        }
+        expect({ scene: s.key, run, redraws: same }).toEqual({ scene: s.key, run, redraws: json });
+        redraws += same;
+      }
+    }
+    expect(redraws).toBeLessThan(samples / 2);
   });
 });

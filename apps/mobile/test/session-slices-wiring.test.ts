@@ -90,8 +90,18 @@ describe("the native sheets are republished only when their inputs change", () =
 
 describe("the shell's pane props keep their identity over a delta", () => {
   test("the computed ones are memoized, and the closed menus are constants", () => {
-    for (const name of ["reports", "activityVm", "activityDetail", "hubCtx", "hub", "menu"]) {
-      expect([name, new RegExp(`const ${name} = useMemo\\(`).test(SCREEN)]).toEqual([name, true]);
+    for (const name of [
+      "reports",
+      "activityInput",
+      "detailInput",
+      "activityVm",
+      "activityDetail",
+      "hubCtx",
+      "hub",
+      "menu",
+    ]) {
+      const memo = new RegExp(`const ${name} = useMemo(<\\w+>)?\\(`);
+      expect([name, memo.test(SCREEN)]).toEqual([name, true]);
     }
     expect(SCREEN).toContain('hubMenu === "all" ? hub.all : NO_HUB_ITEMS;');
     expect(SCREEN).toContain(": NO_MENU)");

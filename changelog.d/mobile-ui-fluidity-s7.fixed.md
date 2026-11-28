@@ -1,0 +1,1 @@
+- **Smoother Activity sheet, workflow runs and empty-session scene.** On the iPhone the Activity sheet's running times no longer re-render the whole session screen every second, a live workflow run's flowing edge animates off the JavaScript thread, and Polpetto's entrance redraws only when its picture changes.

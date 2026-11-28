@@ -128,6 +128,14 @@ closed — kept as is (Notes).
      `ActivitySheet`; it calls `useWallClock(visible, ACTIVITY_CLOCK_TICK_MS)` and
      memoizes `activityView(activityInput, now)` / `sheetDetail(focus, detailInput, now)`.
      So a tick re-renders ONLY the sheet, never the screen or the other panes.
+   - **Execution fix (claude-sonnet-5-5, 2026-11-28) — the Stop arm expires by
+     STATE, not by the clock.** The screen's arm timer (`SessionScreen.tsx:1101-1108`)
+     and `stopRow` bumped `activityNow`, which the sheet no longer receives; a sheet
+     clock floored to 1000 ms keeps the pill drawn armed up to ~1 s past
+     `STOP_ARM_MS` (measured: `+3020 ms` real armed=false, floored armed=true), while
+     `stopTap` would only re-arm. So the timer now calls `setArm(STOP_IDLE)`
+     (equivalent for `stopTap`: an expired arm is already a fresh first tap) and
+     `stopRow` no longer touches a clock. Pinned.
 2. **Mascot → redraw only when the picture changes.**
    - `mascot-scenes.ts`: pure `sameFrame(a: readonly Op[], b: readonly Op[]): boolean`
      (structural: length, kind, x/y/alpha/map/rows for sprites — `rows` by identity is
@@ -192,8 +200,10 @@ No protocol, persistence, daemon or client change.
 - **Sheet shows stale times** (clock not subscribed): `useWallClock(visible, …)` —
   `visible` is the same `activityOpen && !yields` the sheet gets; pinned. A closing
   sheet freezes its labels for its ~300 ms close — acceptable.
-- **Stop arm never expires**: it reads the sheet's ticking `now` exactly as today
-  (`ActivitySheet.tsx:131`); unchanged.
+- **Stop arm never expires / outlives its window**: the screen's timer disarms it
+  at `STOP_ARM_MS + 20` (`setArm(STOP_IDLE)`), which re-renders the sheet through
+  its `arm` prop; `ActivitySheet.tsx:131` unchanged. A closed sheet already disarms
+  (`closeActivity`).
 - **Screen decision diverges from what the sheet draws**: impossible by the
   load-bearing assumption (screen fields are time-free); both read the same memoized
   inputs, so a data change reaches both in the same render.
@@ -252,5 +262,83 @@ RED first (show each failing on `0510b3c3`, on the assertion):
   this row's scope.
 
 ## Execution
+
+*— claude-sonnet-5-5, 2026-11-28*
+
+**Setup.** The worktree had no workspace links (`@tentacle/core` unresolved):
+`bun install --frozen-lockfile` (no tracked file changed).
+
+**Load-bearing check** (`.tentacle/tmp/mobile-ui-fluidity-s7/load-bearing.ts`: every
+screen-read field of `activityView`, `panelAutoClose`/`panelOpensFor` and the detail's
+`report`, over six `now` values) — HOLDS:
+
+```
+view: screen-read variants=1 whole-view variants=5      (×3 inputs: 1/5, 1/1, 1/1)
+detail sa-1: report variants=1 whole variants=5         (sa-2: 1/1, bg-1: 1/5)
+LOAD-BEARING: HOLDS
+arm +3020ms: real-clock armed=false floored armed=true (window 3000)
+arm +3500ms: real-clock armed=false floored armed=true (window 3000)
+```
+
+The mascot Repro reproduces (e.g. swim 397/516 distinct, heli 310/576).
+
+**Drift from Implementation.**
+
+1. The arm lines above contradict Design 1's «Stop arm … unchanged»: fixed in Design 1
+   and Failure modes before coding (the arm timer disarms; `stopRow` bumps no clock),
+   with its own pin.
+2. Order: all code and tests first, then ONE build for the edge spike and gate 0 (the
+   spike still decided before the edge change was accepted).
+3. Pins that followed the moved code, beyond Files 7:
+   `test/activity-panel-wiring.test.ts` (the pane mounts `ActivityClockSheet`);
+   `test/mascot-wiring.test.ts`'s «never a literal run 0» regex now checks the third
+   argument (the first picture is `frameAt(scene, 0, drawn.run, …)`).
+
+**As built.** `useWallClock` (`use-since.ts`); `sameFrame` (`mascot-scenes.ts`);
+`MascotScene.tsx` holds the frame and sets it through `sameFrame`;
+`SessionScreen.tsx` has no activity interval (`activityStamp`, `activityInput`,
+`detailInput`); `ActivityClockSheet` (`SheetsPane.tsx`); edge
+`useNativeDriver: true` (`WorkflowRun.tsx`); sheet height springs untouched, pinned.
+No protocol/schema change.
+
+**RED first** (new/updated tests on the unchanged code, `sameFrame` stubbed to
+`() => true`): `90 pass 26 fail`, all on assertions; the sheet-height guard green.
+**GREEN:** `bun test apps/mobile/test/` → `6024 pass 0 fail` (364 files);
+`tsc -p apps/mobile` clean; `biome check apps/mobile/src apps/mobile/test` clean.
+
+**Mutations** (`mutate.ts`, each restored):
+
+| Mutation | Failing tests |
+|---|---|
+| `sameFrame` → always true | 16 (incl. the 60 Hz property) |
+| `sameFrame` ignores alpha | 3 (incl. the property) |
+| `useWallClock` subscribes `NEVER` | 1 |
+| interval back in the screen | 2 |
+| arm timer bumps a clock again | 1 |
+| leaf ticks regardless of visibility | 1 |
+| edge back to the JS driver | 1 |
+
+**Edge spike — PASS, native kept** (iPhone 17 Pro, iOS 26 simulator, Release build,
+under `sim.lock`). Temporary harness edits (restored; `e2e/` unchanged in git): a third
+run `collect → sleep 240 → archive` seeded in `workflowRunsOf`, flow 45 replaced by
+one that opens it and takes four screenshots; compared inside the live edge's box
+(`png-diff.ts 325,772,375,842`):
+
+```
+motion:        a 0 · b 324 · c 534 · d 732 bytes differing from a (dash phase moves)
+Reduce Motion: a 0 · b 0   · c 0   · d 0
+```
+
+App log (`log show`, animation/unhandled/redbox predicate, motion run): no match.
+Reduce Motion restored to off.
+
+**Gate 0** (`--only 90-perf-stream`, branch): `PERF PASS`, jank lines 0, `starts=1`,
+fan settle 707/711/713/721 ms, panes `shell=3 tail=1203 cells=118 … sheets=1` — no
+worse than s6's recorded 707–735 ms and 3/1233/118. `main` was NOT re-measured (this
+executor stays in the worktree): the baseline is s6's figures.
+
+**Not verified.** No pixels of the Activity sheet ticking or of the mascot scene on a
+device/simulator (source pins and pure tests only). React may run `MascotSceneLayer`'s
+body once more after a change before it bails out (no commit); not measured.
 
 ## Review

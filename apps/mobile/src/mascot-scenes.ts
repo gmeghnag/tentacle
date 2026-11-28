@@ -895,6 +895,46 @@ export function frameAt(
   return scene.frame(Math.max(0, tMs) / 1000, run, ctx);
 }
 
+/**
+ * Do two frames draw the same picture? Compared by CONTENT (a scene builds its
+ * arrays anew each frame), so the layer redraws only on a real change
+ * (docs/feat/mobile-ui-fluidity-s7.md).
+ */
+export function sameFrame(a: readonly Op[], b: readonly Op[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((op, i) => {
+      const other = b[i];
+      return other !== undefined && sameOp(op, other);
+    })
+  );
+}
+
+function sameOp(a: Op, b: Op): boolean {
+  if (a.alpha !== b.alpha) {
+    return false;
+  }
+  if (a.kind === "rect") {
+    return b.kind === "rect" && a.color === b.color && a.rect.every((v, i) => v === b.rect[i]);
+  }
+  return (
+    b.kind === "sprite" &&
+    a.x === b.x &&
+    a.y === b.y &&
+    a.rows.length === b.rows.length &&
+    a.rows.every((row, i) => row === b.rows[i]) &&
+    sameMap(a.map, b.map)
+  );
+}
+
+function sameMap(a: SpriteOp["map"], b: SpriteOp["map"]): boolean {
+  if (a === undefined || b === undefined) {
+    return a === b;
+  }
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every((key) => a[key] === b[key]);
+}
+
 /** Reduce Motion (owner decision 6): Polpetto stands still at home, eyes open. */
 export function stillFrame(): readonly Op[] {
   return [sprite(body({ eyes: "open" }), HOME_GRID.x, HOME_GRID.y)];
