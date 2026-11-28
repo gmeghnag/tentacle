@@ -656,3 +656,34 @@ missing-key paths (holds); non-running deltas (foreign turn with
 
 **Executor behaviour:** honest — it flagged the `cells` margin and the missing
 screenshots itself, and recorded which mutation was not run.
+
+## Review
+
+*— claude-opus-5-5, 2026-11-28* (round 2, fresh context; same model as the
+planner and the round-1 reviewer, so blind spots may be shared; the executor was DeepSeek).
+
+**Verdict: APPROVE-WITH-NITS** (PASS: no HIGH; round 1's MEDIUM 1 stands).
+
+**Gate:** touched files 209 pass / 0 fail; `bun test apps/mobile/test/` 5965 / 0;
+`bun run typecheck` clean; `bun run lint` clean (2827 files). Full parallel
+`bun run test` not run (the orchestrator runs it at merge).
+
+**New mutations (red, then reverted from a scratch copy; tree clean):**
+`cellDataOf` with `[]` in place of `live ? [row] : []` → 3 red in `transcript-cell.test.ts`;
+`settled: rows` (the live row both settled and a stand-in) → 5 red in
+`session-store.test.ts` (A1, A2, A8, A9, table). `renderCell` deps and
+`LiveCell`'s key check are pinned in `list-stream-wiring.test.ts:46,89`.
+
+**Findings:** round 1 #1 (`e2e/perf-budget.ts:160-166`: `cells` is budgeted
+against `tail`, but it scales with mounted cells × env changes, giving a 3 % margin and a flaky
+gate) — confirmed by reading the code; keep it as a follow-up. No new HIGH/MEDIUM.
+
+**Attacks tried:** `keepMembers` key-set and `view` recursion (holds);
+per-delta `settled` slice + deep `sameData` of `cells`/`looks` (identity kept,
+O(n) — holds); an append at a steer while live (the stand-in index is replaced in
+the old window — holds); voice turn-end under a coalesced A-end/B-start publish
+(`settled` excludes B's partial, which is better than main); the remount at settle
+(`LiveCell`→`TranscriptCell`) resets local state. Assistant rows hold only
+`CodeBlock`'s scroll widths and offset there, and diagrams, charts and images
+live on tool rows, which are never live. So the only cost is cosmetic: a code
+block scrolled sideways mid-stream snaps back (nit). §7: mobile-only, untouched.
