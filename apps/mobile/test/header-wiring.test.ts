@@ -26,6 +26,8 @@ const RING = read("src", "ui", "ContextRing.tsx");
 const RING_ARC = read("src", "ui", "RingArc.tsx");
 const SCREEN_HEADER = read("src", "ui", "ScreenHeader.tsx");
 const SESSION_SCREEN = read("src", "screens", "SessionScreen.tsx");
+// The header is `HeaderPane`'s (docs/feat/mobile-ui-fluidity-s3.md).
+const HEADER_PANE = read("src", "screens", "session", "HeaderPane.tsx");
 
 const screens = readdirSync(join(APP, "src", "screens")).filter((f) => f.endsWith(".tsx"));
 
@@ -34,11 +36,11 @@ const screenSource = (file: string) => read("src", "screens", file);
 
 /** The `<ContextRing …/>` element exactly as the chat header writes it. */
 function ringCallSite(): string {
-  const start = SESSION_SCREEN.indexOf("<ContextRing");
+  const start = HEADER_PANE.indexOf("<ContextRing");
   expect(start).toBeGreaterThan(-1);
-  const end = SESSION_SCREEN.indexOf("/>", start);
+  const end = HEADER_PANE.indexOf("/>", start);
   expect(end).toBeGreaterThan(start);
-  return SESSION_SCREEN.slice(start, end);
+  return HEADER_PANE.slice(start, end);
 }
 
 describe("S2 · one thin header button for the whole app (A1)", () => {
@@ -76,7 +78,7 @@ describe("S2 · one thin header button for the whole app (A1)", () => {
 
   test("the chat, Sessions, Settings, Computers and Pair headers use `HeaderIcon`", () => {
     for (const file of [
-      "SessionScreen.tsx",
+      "session/HeaderPane.tsx",
       "SessionsScreen.tsx",
       "SettingsScreen.tsx",
       "ComputersScreen.tsx",
@@ -95,12 +97,12 @@ describe("S2 · the context ring (A1 + F11)", () => {
     // The ring is drawn ONLY when there is a reading (never a fake 0, the old
     // bar's rule), so the guard and the draw are asserted together — a `null`
     // ring or an always-null guard both fail here.
-    const guard = SESSION_SCREEN.indexOf("state.view.headerContext === null ? null : (");
+    const guard = HEADER_PANE.indexOf("view.headerContext === null ? null : (");
     expect(guard).toBeGreaterThan(-1);
-    const afterGuard = SESSION_SCREEN.slice(guard, guard + 400);
+    const afterGuard = HEADER_PANE.slice(guard, guard + 400);
     expect(afterGuard).toContain("<ContextRing");
-    expect(afterGuard).toContain("percent={state.view.headerContext.percent}");
-    expect(SESSION_SCREEN).toContain('testID="session-header-context"');
+    expect(afterGuard).toContain("percent={view.headerContext.percent}");
+    expect(HEADER_PANE).toContain('testID="session-header-context"');
     // The old 64 × 2 bar is gone, and so is its style entry.
     expect(SESSION_SCREEN).not.toMatch(/contextBar:/);
     expect(SESSION_SCREEN).not.toMatch(/session-header-context[\s\S]{0,200}height: 2/);
@@ -135,7 +137,8 @@ describe("S2 · the context ring (A1 + F11)", () => {
     // literal setter, so a second way into the sheet still fails it.
     const call = ringCallSite();
     expect(call).toMatch(/onPress=\{/);
-    expect(call).toMatch(/openInfo\(\)/);
+    expect(call).toMatch(/actions\.current\.openInfo\(\)/);
+    expect(SESSION_SCREEN).toContain("openInfo: () => openInfo(),");
     // …and `openInfo` still is what opens it, with no reveal by default.
     expect(SESSION_SCREEN).toMatch(
       /const openInfo = \(revealTo: SectionId \| null = null\) => \{[\s\S]{0,200}setInfoOpen\(true\);/,
@@ -161,15 +164,16 @@ describe("mobile-header-status · the dot before the title, `<folder> · <model>
   const DRAWER = read("src", "screens", "SessionsDrawer.tsx");
 
   test("no status WORD and no StatusDot in the subtitle any more", () => {
-    expect(SESSION_SCREEN).not.toMatch(/status\.text/);
-    expect(SESSION_SCREEN).not.toMatch(/<StatusDot\b/);
+    expect(SESSION_SCREEN + HEADER_PANE).not.toMatch(/status\.text/);
+    expect(SESSION_SCREEN + HEADER_PANE).not.toMatch(/<StatusDot\b/);
   });
 
   test("the dot is the pure module's: the ask fact is wired, the title gets lead/dim/label", () => {
-    expect(SESSION_SCREEN).toMatch(/asking: state\.sheet\.kind === "asking"/);
-    expect(SESSION_SCREEN).toMatch(/titleLead=\{status\.dot === null \? null : <HeaderDot/);
-    expect(SESSION_SCREEN).toMatch(/titleDim=\{status\.dimTitle\}/);
-    expect(SESSION_SCREEN).toMatch(/titleLabel=\{titleLabel\(state\.view\.title, status\)\}/);
+    expect(read("src", "session-store.ts")).toMatch(/asking: s\.sheet\.kind === "asking"/);
+    expect(HEADER_PANE).toMatch(/asking: slice\.asking/);
+    expect(HEADER_PANE).toMatch(/titleLead=\{status\.dot === null \? null : <HeaderDot/);
+    expect(HEADER_PANE).toMatch(/titleDim=\{status\.dimTitle\}/);
+    expect(HEADER_PANE).toMatch(/titleLabel=\{titleLabel\(view\.title, status\)\}/);
     // The look comes from `dotLook`, the pulse is native and Reduce Motion holds it.
     expect(HEADER_DOT).toMatch(/dotLook\(dot\)/);
     expect(HEADER_DOT).toMatch(/useNativeDriver: true/);
@@ -180,12 +184,14 @@ describe("mobile-header-status · the dot before the title, `<folder> · <model>
   });
 
   test("the subtitle's folder is mono, middle-cut, and the tap opens Session info", () => {
-    const at = SESSION_SCREEN.indexOf('testID="session-header-folder"');
+    const at = HEADER_PANE.indexOf('testID="session-header-folder"');
     expect(at).toBeGreaterThan(-1);
-    expect(SESSION_SCREEN.slice(at, at + 400)).toMatch(/ellipsizeMode="middle"/);
-    expect(SESSION_SCREEN).toMatch(/headerFolder: \{ fontFamily: MONO/);
-    const press = SESSION_SCREEN.indexOf('testID="session-header-status"');
-    expect(SESSION_SCREEN.slice(press, press + 600)).toMatch(/onPress=\{\(\) => openInfo\(\)\}/);
+    expect(HEADER_PANE.slice(at, at + 400)).toMatch(/ellipsizeMode="middle"/);
+    expect(HEADER_PANE).toMatch(/headerFolder: \{ fontFamily: MONO/);
+    const press = HEADER_PANE.indexOf('testID="session-header-status"');
+    expect(HEADER_PANE.slice(press, press + 600)).toMatch(
+      /onPress=\{\(\) => actions\.current\.openInfo\(\)\}/,
+    );
   });
 
   test("the drawer row draws its folder under the title, mono, middle-cut", () => {

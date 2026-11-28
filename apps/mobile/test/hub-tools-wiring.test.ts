@@ -23,6 +23,8 @@ const code = (src: string) =>
 
 const SCREEN = code(read("src", "screens", "SessionScreen.tsx"));
 const SHEET = code(read("src", "screens", "ToolsSheet.tsx"));
+// The sheet is published by `SheetsPane` (docs/feat/mobile-ui-fluidity-s3.md).
+const SHEETS = code(read("src", "screens", "session", "SheetsPane.tsx"));
 
 /** The screen's slice from `from` to the first `to` after it (a property or a call). */
 const slice = (from: string, to: string): string => {
@@ -43,10 +45,10 @@ describe("the entry exists only where the sheet can be drawn", () => {
   });
 
   test("its figures come from the sheet's own summary, and never from nothing", () => {
-    const ctx = slice("const hubCtx = hubContextOf({", "});");
+    const ctx = slice("return hubContextOf({", "\n    });");
     expect(ctx).toContain("...(info === null ? {} : { tools: toolsSummary(info.tools) })");
     // ONE source: the same facts the sheet's own view is built from.
-    expect(SCREEN).toContain("toolsView(info.tools, {");
+    expect(SHEETS).toContain("toolsView(info.tools, {");
   });
 });
 
@@ -80,12 +82,15 @@ describe("the commit opens the sheet and asks the controller", () => {
   });
 
   test("the switch is the ONE write the controller already owns (no second path)", () => {
-    const sheet = slice("<ToolsSheet", "/>");
+    const from = SHEETS.indexOf("<ToolsSheet");
+    const sheet = SHEETS.slice(from, SHEETS.indexOf("\n        />", from));
+    expect(SCREEN).toMatch(/^\s*refreshTools,$/m);
+    expect(SCREEN).toMatch(/^\s*closeTools,$/m);
     expect(sheet).toContain(
       "onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}",
     );
-    expect(sheet).toContain("onRefresh={refreshTools}");
-    expect(sheet).toContain("onClose={closeTools}");
+    expect(sheet).toContain("onRefresh={() => actions.current.refreshTools()}");
+    expect(sheet).toContain("onClose={() => actions.current.closeTools()}");
   });
 });
 

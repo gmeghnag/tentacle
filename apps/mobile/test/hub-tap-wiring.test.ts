@@ -26,13 +26,13 @@ const SCREEN = code(read("src", "screens", "SessionScreen.tsx"));
 
 describe("the screen tells the hub whether Activity has anything to show", () => {
   test("`activityEmpty` is the sheet's OWN emptiness rule, not a second one", () => {
-    const at = SCREEN.indexOf("const hubCtx = hubContextOf({");
+    const at = SCREEN.indexOf("return hubContextOf({");
     expect(at).toBeGreaterThan(-1);
-    const call = SCREEN.slice(at, SCREEN.indexOf("});", at));
+    const call = SCREEN.slice(at, SCREEN.indexOf("\n    });", at));
     expect(call).toContain("activityEmpty: activityVm.nothingRunning");
     // `activityView(...)` is the one truth for "is the sheet empty" — the same
     // field the sheet draws its dimmed line from (`activity.ts`).
-    expect(SCREEN).toContain("const activityVm = activityView(");
+    expect(SCREEN).toMatch(/const activityVm = useMemo\(\s*\(\) =>\s*activityView\(/);
   });
 });
 
@@ -46,11 +46,15 @@ describe("the button no longer opens Activity itself", () => {
   test("Activity is reached through the fan's item, so the button has no `onPress` prop", () => {
     expect(BUTTON).not.toContain("onPress");
     // ...and the screen no longer passes one to it (the header pill keeps its own).
-    const at = SCREEN.indexOf("<FloatingActivity");
+    // `HubPane` hands the button's gestures to the shell's actions.
+    const PANE = code(read("src", "screens", "session", "HubPane.tsx"));
+    const at = SCREEN.indexOf("<HubPane");
     const props = SCREEN.slice(at, SCREEN.indexOf("/>", at));
     expect(props).not.toContain("onPress=");
-    expect(props).toContain("onCommit={commitHub}");
-    expect(props).toContain('onMenu={() => setHubMenu("all")}');
+    expect(PANE).toContain("onCommit={(id) => actions.current.hubCommit(id)}");
+    expect(SCREEN).toContain("hubCommit: commitHub,");
+    expect(PANE).toContain("onMenu={() => actions.current.hubShowAll()}");
+    expect(SCREEN).toContain('hubShowAll: () => setHubMenu("all"),');
   });
 
   test("VoiceOver's activate and long-press both open the actions menu (owner Q2 = B)", () => {

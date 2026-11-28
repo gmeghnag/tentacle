@@ -22,14 +22,21 @@ const root = join(import.meta.dir, "..");
 const read = (...parts: string[]): string => readFileSync(join(root, ...parts), "utf8");
 
 const screen = (): string => read("src", "screens", "SessionScreen.tsx");
+const pane = (name: string): string => read("src", "screens", "session", name);
 
 describe("H4a: the sheet is handed the reveal's two seams", () => {
   test("`SessionScreen` passes `onSectionLayout` and `scrollRef` to the sheet", () => {
     const source = screen();
     // The measuring seam: the screen's handler, which reaches `revealStep`.
-    expect(source).toContain("onSectionLayout={revealOnLayout}");
+    expect(pane("SheetsPane.tsx")).toContain(
+      "onSectionLayout={(id, y) => actions.current.sectionLayout(id, y)}",
+    );
+    expect(source).toContain("sectionLayout: revealOnLayout,");
     // The scroll seam: a callback ref onto the screen's own scroller holder.
-    expect(source).toContain("scrollRef={(node) => {");
+    expect(pane("SheetsPane.tsx")).toContain(
+      "scrollRef={(node) => actions.current.scrollRef(node)}",
+    );
+    expect(source).toContain("scrollRef: (node) => {");
     expect(source).toContain("infoScroller.current = node;");
     // …and the scroll is issued on that scroller, with the step's y.
     expect(source).toContain("infoScroller.current?.scrollTo({ y, animated: true });");
@@ -72,7 +79,7 @@ describe("H4a: one opening path for Session info", () => {
     // (the count the menu's Scheduled item is shown for) and the sheet's OWN
     // view-model — a value that can predate the wake (Fix round (simulator))…
     expect(source).toContain(
-      "openInfo(scheduledSection(info?.view ?? null, state.schedules?.length ?? 0));",
+      "openInfo(scheduledSection(info?.view ?? null, hubSlice.schedules?.length ?? 0));",
     );
     // …and `openInfo` is the only place that opens the sheet.
     expect(source).toMatch(/const openInfo = \(revealTo: SectionId \| null = null\) => \{/);
@@ -84,15 +91,18 @@ describe("H4a: one opening path for Session info", () => {
 
   test("the header's ring and the menu's Session info open it with NO reveal", () => {
     const source = screen();
-    expect(source).toContain("onPress={() => openInfo()}");
-    expect(source).toMatch(/if \(action\.id === "info"\) \{[\s\S]{0,220}openInfo\(\);/);
+    expect(pane("HeaderPane.tsx")).toContain("onPress={() => actions.current.openInfo()}");
+    expect(source).toContain("openInfo: () => openInfo(),");
+    expect(source).toMatch(/if \(id === "info"\) \{[\s\S]{0,220}openInfo\(\);/);
   });
 
   test("the menu's `scheduled` action calls `openScheduled`", () => {
     const source = screen();
-    expect(source).toMatch(/if \(action\.id === "scheduled"\) \{[\s\S]{0,200}openScheduled\(\);/);
+    expect(source).toMatch(/if \(id === "scheduled"\) \{[\s\S]{0,200}openScheduled\(\);/);
+    expect(pane("SheetsPane.tsx")).toContain("actions.current.menuPick(action.id, action.text)");
     // The menu is built with the wakes count, or the action could never appear.
-    expect(source).toContain("sessionMenu(rows, state.schedules?.length ?? 0)");
+    expect(source).toContain("const wakes = hubSlice.schedules?.length ?? 0;");
+    expect(source).toContain("sessionMenu(rows, wakes)");
   });
 
   test("the sheet hands back a real `onSectionLayout`, typed by the band id", () => {

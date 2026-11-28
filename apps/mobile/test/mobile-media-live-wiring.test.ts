@@ -85,7 +85,7 @@ describe("item 3: pull-to-refresh is wired to the transcript list", () => {
     // renders it (AGENTS §7) — and re-arms the silent landing first, so a pull
     // never scrolls the transcript again (docs/fix/mobile-open-at-end.md).
     expect(screen).toMatch(/onRefresh=\{\(\) => \{[\s\S]{0,300}void controller\.resync\(\);/);
-    expect(screen).toContain("refreshing={state.refreshing}");
+    expect(screen).toContain("refreshing={rowsSlice.refreshing}");
   });
 });
 

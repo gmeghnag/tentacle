@@ -254,16 +254,22 @@ describe("the browser surfaces, rendered", () => {
 });
 
 describe("SessionScreen joins them (source)", () => {
-  const source = readFileSync(join(import.meta.dir, "..", "src/screens/SessionScreen.tsx"), "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/^\s*\/\/.*$/gm, "");
+  // The shell and the panes that draw its parts (mobile-ui-fluidity-s3).
+  const read = (path: string): string =>
+    readFileSync(join(import.meta.dir, "..", "src/screens", path), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+  const source = read("SessionScreen.tsx");
+  const composer = read("session/ComposerPane.tsx");
+  const sheets = read("session/SheetsPane.tsx");
 
   test("the strip sits right above the composer, from the controller's value", () => {
-    const at = source.indexOf("<RiskStrip");
+    const at = composer.indexOf("<RiskStrip");
     expect(at).toBeGreaterThan(-1);
-    expect(at).toBeLessThan(source.indexOf("<Composer\n"));
-    expect(source).toContain("state.riskStrip === null");
-    expect(source).toMatch(/<RiskStrip[^>]*onChange=\{openBrowser\}/);
+    expect(at).toBeLessThan(composer.indexOf("<Composer\n"));
+    expect(composer).toContain("slice.riskStrip === null");
+    expect(composer).toMatch(/<RiskStrip[\s\S]{0,120}actions\.current\.openBrowser\(\)/);
+    expect(source).toMatch(/^\s*openBrowser,$/m);
   });
 
   test("Change › opens Session info ON the Browser page; a fresh open starts on the sheet", () => {
@@ -271,9 +277,10 @@ describe("SessionScreen joins them (source)", () => {
       /const openBrowser = \(\) => \{\s*openInfo\(\);\s*setInfoPage\("browser"\);\s*\};/,
     );
     expect(source).toMatch(/const openInfo = [^{]*\{\s*setInfoPage\("info"\);/);
-    expect(source).toContain('infoPage === "browser" ?');
-    expect(source).toContain('onBack={() => setInfoPage("info")}');
-    expect(source).toContain('onOpenBrowser={() => setInfoPage("browser")}');
-    expect(source).toContain('onLockedTap={() => playHaptic("light")}');
+    expect(sheets).toContain('infoPage === "browser" ?');
+    expect(sheets).toContain('onBack={() => actions.current.showInfoPage("info")}');
+    expect(sheets).toContain('onOpenBrowser={() => actions.current.showInfoPage("browser")}');
+    expect(source).toContain("showInfoPage: setInfoPage,");
+    expect(sheets).toContain('onLockedTap={() => playHaptic("light")}');
   });
 });

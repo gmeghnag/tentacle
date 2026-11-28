@@ -47,7 +47,7 @@ describe("M7: the Session info section's delete control", () => {
   });
 
   test("the screen passes the controller's delete to the sheet", () => {
-    expect(read("src", "screens", "SessionScreen.tsx")).toContain(
+    expect(read("src", "screens", "session", "SheetsPane.tsx")).toContain(
       "onDeleteSchedule={(scheduleId) => void controller.deleteSchedule(scheduleId)}",
     );
     // The controller surface exists and forwards to the sheet's controller.

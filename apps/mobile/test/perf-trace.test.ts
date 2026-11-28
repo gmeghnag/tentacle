@@ -291,3 +291,57 @@ describe("createPerfProbe: windows are cut at app-state changes", () => {
     expect(h.fields("jank").map((f) => f.worst)).toEqual([40_000]);
   });
 });
+
+describe("createPerfProbe: renders per pane over a stream (`ev=panes`)", () => {
+  function counter() {
+    const p = createPerfProbe(
+      () => 0,
+      () => 0,
+    );
+    const log = createAppLog({ now: () => 0, capacity: 50 });
+    p.attach(log);
+    const lines = () =>
+      log
+        .entries()
+        .filter((e) => e.fields.ev === "panes")
+        .map((e) => e.fields);
+    return { p, lines };
+  }
+
+  test("one line on the falling edge: the shell's and each pane's renders while streaming", () => {
+    const h = counter();
+    // At rest: counted nowhere.
+    h.p.render(1);
+    h.p.pane("hub");
+    h.p.streaming(true);
+    for (let i = 0; i < 3; i += 1) {
+      h.p.render(1);
+    }
+    h.p.pane("hub");
+    h.p.pane("hub");
+    h.p.pane("header");
+    // Streaming again is no edge.
+    h.p.streaming(true);
+    expect(h.lines()).toEqual([]);
+    h.p.streaming(false);
+    expect(h.lines()).toEqual([
+      { ev: "panes", shell: 3, header: 1, composer: 0, hub: 2, sheets: 0 },
+    ]);
+  });
+
+  test("the counts reset for the next stream, and a second stop writes nothing", () => {
+    const h = counter();
+    h.p.streaming(true);
+    h.p.render(1);
+    h.p.pane("sheets");
+    h.p.streaming(false);
+    h.p.streaming(false);
+    h.p.streaming(true);
+    h.p.pane("composer");
+    h.p.streaming(false);
+    expect(h.lines()).toEqual([
+      { ev: "panes", shell: 1, header: 0, composer: 0, hub: 0, sheets: 1 },
+      { ev: "panes", shell: 0, header: 0, composer: 1, hub: 0, sheets: 0 },
+    ]);
+  });
+});

@@ -59,12 +59,14 @@ describe("RenameSheet (bug 1: the dialog sits above the keyboard, with a top ins
 });
 
 describe("items 5/6: a send dismisses the keyboard and remounts the field", () => {
-  test("SessionScreen: `Keyboard.dismiss()` in an effect keyed on `state.sends`", () => {
+  test("SessionScreen: `Keyboard.dismiss()` in an effect keyed on the sends figure", () => {
     const src = read("screens", "SessionScreen.tsx");
     expect(src).toMatch(
-      /useEffect\([\s\S]{0,300}Keyboard\.dismiss\(\)[\s\S]{0,200}\[state\.sends\]\)/,
+      /useEffect\([\s\S]{0,300}Keyboard\.dismiss\(\)[\s\S]{0,200}\[rowsSlice\.sends\]\)/,
     );
-    expect(src).toMatch(/<Composer[\s\S]{0,200}fieldKey=\{state\.sends\}/);
+    // The field is `ComposerPane`'s, keyed on its slice's `sends`.
+    const pane = read("screens", "session", "ComposerPane.tsx");
+    expect(pane).toMatch(/<Composer[\s\S]{0,200}fieldKey=\{slice\.sends\}/);
   });
 
   test("Composer: `key={fieldKey}` on the composer-input TextInput", () => {
@@ -136,7 +138,7 @@ describe("SessionScreen: a session opens ALREADY at its end (docs/fix/mobile-ope
     // report about the VIEWPORT, so a slow attach looked already settled and the
     // history that then arrived went through `contentGrew` ANIMATED.
     expect(src).toMatch(
-      /hasRows\.current = state\.view\.rows\.length > 0 \|\| state\.status\.phase !== "opening"/,
+      /hasRows\.current = rowsSlice\.view\.rows\.length > 0 \|\| rowsSlice\.status\.phase !== "opening"/,
     );
     // Both measurements pass it (the reveal is what settled the empty state).
     expect(src).toMatch(
@@ -298,7 +300,7 @@ describe("the scroll dim's handlers (owner 2 B)", () => {
   });
 
   test("the screen hands the dim to the button, and the button takes it as a prop", () => {
-    expect(src).toMatch(/<FloatingActivity[\s\S]{0,1200}scroll=\{scrollDim\}/);
+    expect(src).toMatch(/<HubPane[\s\S]{0,1200}scroll=\{scrollDim\}/);
     expect(src).toMatch(
       /import \{[\s\S]{0,200}scrollDimStep,[\s\S]{0,200}\} from "\.\.\/hub-scroll-dim\.ts"/,
     );

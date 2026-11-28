@@ -13,11 +13,20 @@ import type { AppLog } from "./app-log.ts";
 import {
   FAN_REPORT_MAX_MS,
   type FanOpenFacts,
+  type PaneName,
   type PerfLine,
   createJankMeter,
   fanLine,
+  panesLine,
   usableTap,
 } from "./perf-trace.ts";
+
+const noPaneRenders = (): Record<PaneName, number> => ({
+  header: 0,
+  composer: 0,
+  hub: 0,
+  sheets: 0,
+});
 
 interface FanRecord {
   tapNative: number | null;
@@ -34,6 +43,8 @@ export interface PerfProbe {
   streaming(on: boolean): void;
   /** The session screen rendered (render start → commit, ms). */
   render(ms: number): void;
+  /** One of the session screen's panes rendered. */
+  pane(name: PaneName): void;
   /** The session screen was handed a new state. */
   notify(): void;
   /** A streamed delta was folded. */
@@ -63,6 +74,9 @@ export function createPerfProbe(
 ): PerfProbe {
   let log: AppLog | null = null;
   const meter = createJankMeter();
+  // The renders of the stream in progress (`ev=panes`).
+  let shellRenders = 0;
+  let paneRenders = noPaneRenders();
   let isStreaming = false;
   let looping = false;
   let suspended = false;
@@ -107,10 +121,26 @@ export function createPerfProbe(
       log = next;
     },
     streaming(on) {
+      // The falling edge: one `panes` line for the stream that just ended.
+      if (isStreaming && !on) {
+        write(panesLine(shellRenders, paneRenders));
+        shellRenders = 0;
+        paneRenders = noPaneRenders();
+      }
       isStreaming = on;
       loop();
     },
-    render: (ms) => meter.render(ms),
+    pane(name) {
+      if (isStreaming) {
+        paneRenders[name] += 1;
+      }
+    },
+    render(ms) {
+      if (isStreaming) {
+        shellRenders += 1;
+      }
+      meter.render(ms);
+    },
     notify: () => meter.notify(),
     fold: () => meter.fold(),
     touch(nativeTimestamp) {

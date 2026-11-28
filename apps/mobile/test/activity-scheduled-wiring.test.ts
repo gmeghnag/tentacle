@@ -18,7 +18,7 @@ describe("Activity ▸ Scheduled wiring", () => {
     const at = screen.indexOf("activityView(");
     expect(at).toBeGreaterThan(-1);
     const call = screen.slice(at, screen.indexOf("activityNow,", at));
-    expect(call).toContain("schedules: state.schedules");
+    expect(call).toContain("schedules: hubSlice.schedules");
   });
 
   test("the sheet paints no hard-coded ghost value", () => {
@@ -36,9 +36,12 @@ describe("Activity ▸ Scheduled wiring", () => {
     const sheet = src("ActivitySheet.tsx");
     expect(sheet).toMatch(/row\.kind === "scheduled"\s*\?\s*onScheduled\(\)/);
     const screen = src("SessionScreen.tsx");
-    const at = screen.indexOf("onScheduled={");
+    expect(src("session/SheetsPane.tsx")).toContain(
+      "onScheduled={() => actions.current.activityScheduled()}",
+    );
+    const at = screen.indexOf("activityScheduled: () => {");
     expect(at).toBeGreaterThan(-1);
-    const handler = screen.slice(at, screen.indexOf("}}", at));
+    const handler = screen.slice(at, screen.indexOf("\n    },", at));
     expect(handler).toContain("setActivityOpen(false)");
     expect(handler).toContain("openScheduled()");
   });

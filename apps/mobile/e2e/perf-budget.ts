@@ -4,7 +4,7 @@
  * `90-perf-stream` and says whether the session screen stayed fluid. Pure — no
  * I/O: `run.ts` reads the files and writes the report.
  */
-import { PTRACE } from "../src/perf-trace.ts";
+import { PANES, PTRACE } from "../src/perf-trace.ts";
 import type { AttemptStatus } from "./gate.ts";
 
 /** The flow the budget is checked after. */
@@ -24,7 +24,7 @@ export const PERF_BUDGET = {
 /** How many violating lines a report quotes (the totals are always complete). */
 const REPORT_LINES = 10;
 
-const RULES = ["gap", "settle", "rate", "evidence"] as const;
+const RULES = ["gap", "settle", "rate", "coupling", "evidence"] as const;
 
 export interface PerfViolation {
   readonly rule: (typeof RULES)[number];
@@ -45,7 +45,15 @@ export interface PerfReport {
   readonly settles: readonly number[];
   /** Σ renders / Σ window over the streaming jank lines, or null (none). */
   readonly rendersPerSecond: number | null;
+  /** Every complete `ev=panes` line's figures, in log order. */
+  readonly panes: readonly string[];
 }
+
+/** A stream the shell rendered fewer times than this says nothing about coupling. */
+const COUPLING_MIN_SHELL = 50;
+
+/** The most a pane may render over a stream the shell rendered `shell` times. */
+const paneRendersAllowed = (shell: number): number => Math.max(10, 0.1 * shell);
 
 type Fields = ReadonlyMap<string, string>;
 
@@ -84,6 +92,8 @@ export function checkPerf(logText: string): PerfReport {
   let worstGapMs: number | null = null;
   let renders = 0;
   let windowMs = 0;
+  const panes: string[] = [];
+  let coupledEvidence = false;
   for (const line of logText.split("\n")) {
     const fields = ptraceFields(line);
     if (fields === null) {
@@ -133,6 +143,25 @@ export function checkPerf(logText: string): PerfReport {
           violations.push({ rule: "settle", detail, line });
         }
       }
+    } else if (ev === "panes") {
+      const shell = numberOf(fields, "shell");
+      const counts = PANES.map((pane) => [pane, numberOf(fields, pane)] as const);
+      if (shell === null || counts.some(([, n]) => n === null)) {
+        broken(`a panes line missing \`shell\`, \`${PANES.join("`, `")}\``);
+        continue;
+      }
+      panes.push(`shell=${shell} ${counts.map(([pane, n]) => `${pane}=${n}`).join(" ")}`);
+      if (shell < COUPLING_MIN_SHELL) {
+        continue;
+      }
+      coupledEvidence = true;
+      const allowed = paneRendersAllowed(shell);
+      for (const [pane, n] of counts) {
+        if (n !== null && n > allowed) {
+          const detail = `${pane}=${n} > ${allowed} renders over ${shell} shell renders`;
+          violations.push({ rule: "coupling", detail, line });
+        }
+      }
     }
   }
   const rendersPerSecond = windowMs === 0 ? null : (renders * 1000) / windowMs;
@@ -148,7 +177,14 @@ export function checkPerf(logText: string): PerfReport {
       detail: `${streamingFans} streaming fan opens < ${PERF_BUDGET.minStreamingFans}`,
     });
   }
+  if (!coupledEvidence) {
+    violations.push({
+      rule: "evidence",
+      detail: `no \`panes\` line over a stream of ${COUPLING_MIN_SHELL}+ shell renders`,
+    });
+  }
   return {
+    panes,
     ok: violations.length === 0,
     violations,
     jankLines,
@@ -166,7 +202,9 @@ export function perfReportText(report: PerfReport): string {
     `jank lines: ${report.jankLines}, fan lines: ${report.fanLines} (${report.streamingFans} streaming)`,
     `worst gap: ${report.worstGapMs === null ? "n/a" : `${report.worstGapMs} ms`}`,
     `fan settle ms: ${report.settles.length === 0 ? "n/a" : report.settles.join(", ")}`,
-    `renders/s: ${report.rendersPerSecond?.toFixed(1) ?? "n/a"}`,
+    // The shell's renders only: a pane's own are in the `panes` figures.
+    `renders/s (shell only): ${report.rendersPerSecond?.toFixed(1) ?? "n/a"}`,
+    ...(report.panes.length === 0 ? ["panes: n/a"] : report.panes.map((p) => `panes: ${p}`)),
   ];
   if (report.ok) {
     return out.join("\n");

@@ -338,6 +338,7 @@ describe("a ready row's own tap runs it", () => {
 describe("the screen mounts it, on the controller's own view-model", () => {
   const ROOT = join(import.meta.dir, "..");
   const SCREEN = readFileSync(join(ROOT, "src", "screens", "SessionScreen.tsx"), "utf8");
+  const SHEETS = readFileSync(join(ROOT, "src", "screens", "session", "SheetsPane.tsx"), "utf8");
 
   test("`commandsOpen` is finally READ: it is what the publish block derives the stack from", () => {
     // Since docs/feat/mobile-native-sheets.md S3 the sheet is a ROUTE: the screen
@@ -346,12 +347,13 @@ describe("the screen mounts it, on the controller's own view-model", () => {
     // closes C1's no-op tap, the derived `desired` stack is.
     // (`userSheet` in `sheet-plan.ts` maps the three flags to one sheet.)
     expect(SCREEN).toContain("user: userSheet({ commands: commandsOpen,");
-    const at = SCREEN.indexOf('host.publish(\n      "commands"');
+    const at = SHEETS.indexOf('host.publish(\n      "commands"');
     expect(at).toBeGreaterThan(-1);
-    const props = SCREEN.slice(at, SCREEN.indexOf("/>,", at));
+    const props = SHEETS.slice(at, SHEETS.indexOf("/>,", at));
     // The rows come from `session-commands.ts`'s view-model, never built here.
-    expect(props).toContain("rows={state.commands}");
-    expect(props).toContain("onClose={closeCommands}");
+    expect(props).toContain("rows={slice.commands}");
+    expect(props).toContain("onClose={() => actions.current.closeCommands()}");
+    expect(SCREEN).toMatch(/^\s*closeCommands,$/m);
     // No `Modal` of its own: a JS modal here would wedge the native sheet (F6).
     expect(props).not.toContain("visible=");
     expect(SCREEN).toContain("const closeCommands = () => setCommandsOpen(false);");
@@ -377,8 +379,11 @@ describe("the screen mounts it, on the controller's own view-model", () => {
   });
 
   test("every action is the controller's own — no second command path", () => {
-    const at = SCREEN.indexOf('host.publish(\n      "commands"');
-    const props = SCREEN.slice(at, SCREEN.indexOf("/>,", at));
+    const at = SHEETS.indexOf('host.publish(\n      "commands"');
+    const props = SHEETS.slice(at, SHEETS.indexOf("/>,", at));
+    // The pane's `controller` is the shell's, off the stable actions ref.
+    expect(SHEETS).toContain("const { controller } = actions.current;");
+    expect(SCREEN).toContain("paneActions.current = {\n    controller,");
     expect(props).toContain("onCompact={() => void controller.compact()}");
     expect(props).toContain("onStopCompact={() => controller.cancelCompaction()}");
     expect(props).toContain("onArmClear={() => controller.armClear()}");
