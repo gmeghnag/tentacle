@@ -9,6 +9,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ChatMessage } from "@tentacle/core";
 import { NOTICE_GLYPHS, noticeLooks } from "../src/notice-group.ts";
+import { stepLayout } from "../src/tool-steps.ts";
 import {
   type Row,
   type State,
@@ -919,24 +920,50 @@ describe("a tool result stamps `endedAt`", () => {
     expect(row(apply(initialState, result, 7000)).endedAt).toBe(7000);
   });
 
-  test("a fold with no clock, and a history, carry none", () => {
+  test("a fold with no clock carries none", () => {
     expect(row(fold([call, result]))).not.toHaveProperty("endedAt");
-    const history = fold([
-      {
-        type: "history",
-        messages: [
-          {
-            role: "assistant",
-            content: "",
-            toolCalls: [{ id: "c1", name: "shell", arguments: "{}" }],
-          },
-          { role: "tool", toolCallId: "c1", content: "x" },
-        ],
-        times: [1000, 2000],
-        reason: null,
-      },
-    ]);
-    expect(row(history).status).toBe("ok");
-    expect(row(history)).not.toHaveProperty("endedAt");
+  });
+});
+
+/** Review round 1, finding 3: a reopen while the model thinks after a tool batch. */
+describe("a history tool result stamps `endedAt` from the daemon's time", () => {
+  const messages: readonly ChatMessage[] = [
+    { role: "user", content: "go" },
+    {
+      role: "assistant",
+      content: "",
+      toolCalls: [
+        { id: "c1", name: "shell", arguments: "{}" },
+        { id: "c2", name: "shell", arguments: "{}" },
+      ],
+    },
+    { role: "tool", toolCallId: "c1", content: "x" },
+    { role: "tool", toolCallId: "c2", content: "y" },
+  ];
+  const reopen = (times?: readonly number[]) =>
+    fold([{ type: "history", messages, ...(times ? { times } : {}), reason: null }]);
+  const tools = (state: State) => state.rows.filter((r): r is ToolRow => r.kind === "tool");
+
+  test("each result's own time; the call keeps the assistant's `at`", () => {
+    const rows = tools(reopen([500, 1000, 9000, 7000]));
+    expect(rows.map((r) => r.endedAt)).toEqual([9000, 7000]);
+    expect(rows.map((r) => r.at)).toEqual([1000, 1000]);
+  });
+
+  test("reopened mid-thinking: the clock starts at the batch's end, not at the reopen", () => {
+    const state = reopen([500, 1000, 9000, 7000]);
+    expect(stepLayout(state.rows, true).tail?.since).toBe(9000);
+    const thinking = apply(state, reasoning("hmm"), 60_000);
+    expect(stepLayout(thinking.rows, true).tail?.since).toBe(9000);
+  });
+
+  test("an unknown time (no `times`, a short array, 0) stamps none", () => {
+    for (const times of [undefined, [500, 1000], [500, 1000, 0, 0]]) {
+      const rows = tools(reopen(times));
+      expect(rows.map((r) => r.status)).toEqual(["ok", "ok"]);
+      for (const r of rows) {
+        expect(r).not.toHaveProperty("endedAt");
+      }
+    }
   });
 });

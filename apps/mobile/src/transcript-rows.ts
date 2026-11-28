@@ -114,9 +114,10 @@ export interface ToolRow {
    */
   readonly at?: number;
   /**
-   * Live only: the receipt time of its result (docs/feat/mobile-ui-fluidity-s2.md)
-   * — where the thinking period after a finished batch starts. A row rebuilt from
-   * history, or folded with no clock, carries none.
+   * When its result arrived (docs/feat/mobile-ui-fluidity-s2.md) — where the
+   * thinking period after a finished batch starts: live, the receipt time; from
+   * history, the daemon's time of the result message. Absent when neither is
+   * known.
    */
   readonly endedAt?: number;
   /** The tool's name, as the model called it. */

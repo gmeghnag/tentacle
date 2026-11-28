@@ -3,7 +3,7 @@
  * the render-time and Swift halves no unit test can execute here.
  */
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 
 const APP = join(import.meta.dir, "..");
@@ -47,6 +47,24 @@ describe("the step rows own no clock of their own", () => {
     expect(view).toContain("formatClock(format, ms)");
     expect(view).toContain("Math.min(fontScale, DENSE_FONT_SCALE)");
     expect(view).not.toContain("setInterval");
+  });
+});
+
+/** SwiftPM refuses the WHOLE package when one target has no source folder. */
+describe("the Swift package can load", () => {
+  const PKG = "native-tests/PushCoreTests";
+
+  test("every `.target` has its source folder", () => {
+    const manifest = code(`${PKG}/Package.swift`);
+    const targets = [...manifest.matchAll(/\.target\(\s*name: "(\w+)"/g)].map((m) => m[1] ?? "");
+    expect(targets).toContain("PushCore");
+    expect(targets.filter((name) => !existsSync(join(APP, PKG, "Sources", name)))).toEqual([]);
+  });
+
+  test("`Sources/ClockCore` is the module's own folder (one implementation, no copy)", () => {
+    const link = join(APP, PKG, "Sources/ClockCore");
+    expect(existsSync(link) && lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(realpathSync(link)).toBe(realpathSync(join(APP, MODULE, "ios/ClockCore")));
   });
 });
 

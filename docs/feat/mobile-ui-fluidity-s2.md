@@ -124,6 +124,8 @@ the simulator before anything else is built on it.
    reopen). Absent ⇒ no number (just `Thinking`), never mount time.
 2. **`ToolRow.endedAt`** stamped at the result's receipt (`when.at`), live only;
    a history row has none (falls to rule 1's next case).
+   *Amended in fix round 1 (claude-sonnet-5-5), review finding 3:* a history row
+   takes the result message's daemon time (`times[i]`; `0` / missing → none).
 3. **JS fallback ticker: ONE app-wide sampler at 250 ms, re-render only on a
    changed string** (recommended, taken over the eval's "1 s ticker"): a 1 s
    sampler shared by clocks with different origins skips or repeats a second when
@@ -346,6 +348,47 @@ Swift rule changed → test:swift red             NOT RUN
 `bun test apps/mobile/test/` + the three mockup-kit files: 5926 pass, 0 fail
 (363 files). Changelog tests: pass. `biome check` on the changed folders: clean.
 `tsc -p apps/mobile`: clean. The full gate was not run (the orchestrator's).
+
+### Fix round 1
+
+*— claude-sonnet-5-5, 2026-11-28* — **PARTIAL**: finding 3 fixed; findings 1 and 2
+need `ln` / `swift`, which this session's permissions refused (`ln -s …` and
+`swift --version`: "requires approval"). Not worked around.
+
+1. **`test:swift` broken — NOT FIXED, now caught by the gate.** To fix, from the
+   worktree root, then commit the link:
+   `ln -s ../../../modules/tentacle-clock/ios/ClockCore apps/mobile/native-tests/PushCoreTests/Sources/ClockCore`
+   New pins in `test/clock-wiring.test.ts` ("the Swift package can load") are RED
+   until then, **so `bun run test` fails on this branch, on purpose**:
+   ```
+   (fail) … every `.target` has its source folder      Received: ["ClockCore"]
+   (fail) … `Sources/ClockCore` is the module's own folder   Expected true, Received false
+   ```
+   Their green side, by temporary edits (reverted): `ClockCore` target removed and
+   the link pin aimed at `LACore` → 8 pass 0 fail; the `LACore` link checked
+   against the clock folder → 7 pass 1 fail. Green with the real link: not seen.
+2. **Native half never compiled or run — NOT FIXED.** Still open: `bun run
+   test:swift` + its mutation, the dev build, both simulator steps (Execution
+   "Open before merge" 2–3).
+3. **Reopen during post-tool thinking — FIXED** (decision 2 amended, see below).
+   `transcript-history.ts` stamps `endedAt` from the result message's daemon time
+   (`0` / missing → none); `transcript-rows.ts` doc updated. A finished batch is
+   committed before the next round (`agent.ts` `history_commit`), so it reopens
+   as history. Red first: 2 of 3 new `transcript.test.ts` cases failed
+   (`[undefined, undefined]`, `since` `undefined`); the "none" case guards. Drift:
+   the old "a history carries none" assertion is replaced.
+   ```
+   endedAt = the call's `at`          transcript.test.ts 56 pass 3 fail
+   endedAt = raw `times[index]` (0)   transcript.test.ts 58 pass 1 fail
+     (fail) … an unknown time (no `times`, a short array, 0) stamps none
+   ```
+   Residual, by source only: a reconnect that REPLAYS a missed `tool_result`
+   (attach with `since`) still stamps the replay's receipt time (replayed updates
+   fold with the phone's clock).
+
+Checks: `bun test apps/mobile/test/` + three mockup-kit files: 5927 pass, 2 fail
+(the two pins above). `biome check` on the changed files: clean. `tsc -p
+apps/mobile`: clean. Full gate not run (the orchestrator's).
 
 ## Review
 
