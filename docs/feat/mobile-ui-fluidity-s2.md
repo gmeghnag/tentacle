@@ -495,3 +495,22 @@ the Swift side was green.
 - Gate: `apps/mobile/test/` 5848 pass / 2 fail (the two above). Lint clean. Typecheck clean.
 - Needed: someone with permission runs the `ln -s` (Execution item 1), then
   `bun run test:swift` + its zero-pad mutation, then a dev build + the simulator steps.
+
+### Round 3
+
+*— claude-opus-5-5, 2026-11-28* — **Verdict: REQUEST-CHANGES** (unchanged).
+`e1a759f4` (HEAD~1..HEAD) is docs only. The executor reports BLOCKED and changed no
+code, so there was nothing to mutate.
+
+- **Finding 1 (HIGH): OPEN.** `Sources/ClockCore` is still absent (`ls` → `LACore`,
+  `PushCore`). `clock-wiring.test.ts`: 2 fail ("the Swift package can load").
+- **Finding 2 (HIGH): OPEN.** Native code is still uncompiled. `test:swift`, the dev
+  build and the simulator steps have not run.
+- **Finding 3: still FIXED** (round 2). Touched files: 126 pass / 2 fail (the two
+  above). Lint clean. Typecheck clean.
+- **Escalation (AGENTS §0):** this is the third round with the same block. Another
+  executor round cannot close it, because the blocker is a permission, not code. The
+  owner or orchestrator must run, from the worktree root:
+  `ln -s ../../../modules/tentacle-clock/ios/ClockCore apps/mobile/native-tests/PushCoreTests/Sources/ClockCore`,
+  commit it, then run `bun run test:swift` (+ the zero-pad mutation), the dev build
+  and the two simulator steps. Then a Round 4 review.
