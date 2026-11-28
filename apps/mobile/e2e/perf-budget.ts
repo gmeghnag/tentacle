@@ -49,11 +49,15 @@ export interface PerfReport {
   readonly panes: readonly string[];
 }
 
-/** A stream the shell rendered fewer times than this says nothing about coupling. */
-const COUPLING_MIN_SHELL = 50;
+/**
+ * A stream the tail rendered fewer times than this says nothing about coupling
+ * (docs/feat/mobile-ui-fluidity-s4.md decision 4: the tail is what follows a
+ * stream; the shell no longer does).
+ */
+const COUPLING_MIN_TAIL = 50;
 
-/** The most a pane may render over a stream the shell rendered `shell` times. */
-const paneRendersAllowed = (shell: number): number => Math.max(10, 0.1 * shell);
+/** The most anything else may render over a stream the tail rendered `tail` times. */
+const rendersAllowed = (tail: number): number => Math.max(10, 0.1 * tail);
 
 type Fields = ReadonlyMap<string, string>;
 
@@ -146,19 +150,20 @@ export function checkPerf(logText: string): PerfReport {
     } else if (ev === "panes") {
       const shell = numberOf(fields, "shell");
       const counts = PANES.map((pane) => [pane, numberOf(fields, pane)] as const);
-      if (shell === null || counts.some(([, n]) => n === null)) {
+      const tail = numberOf(fields, "tail");
+      if (shell === null || tail === null || counts.some(([, n]) => n === null)) {
         broken(`a panes line missing \`shell\`, \`${PANES.join("`, `")}\``);
         continue;
       }
       panes.push(`shell=${shell} ${counts.map(([pane, n]) => `${pane}=${n}`).join(" ")}`);
-      if (shell < COUPLING_MIN_SHELL) {
+      if (tail < COUPLING_MIN_TAIL) {
         continue;
       }
       coupledEvidence = true;
-      const allowed = paneRendersAllowed(shell);
-      for (const [pane, n] of counts) {
-        if (n !== null && n > allowed) {
-          const detail = `${pane}=${n} > ${allowed} renders over ${shell} shell renders`;
+      const allowed = rendersAllowed(tail);
+      for (const [pane, n] of [["shell", shell] as const, ...counts]) {
+        if (pane !== "tail" && n !== null && n > allowed) {
+          const detail = `${pane}=${n} > ${allowed} renders over ${tail} tail renders`;
           violations.push({ rule: "coupling", detail, line });
         }
       }
@@ -180,7 +185,7 @@ export function checkPerf(logText: string): PerfReport {
   if (!coupledEvidence) {
     violations.push({
       rule: "evidence",
-      detail: `no \`panes\` line over a stream of ${COUPLING_MIN_SHELL}+ shell renders`,
+      detail: `no \`panes\` line over a stream of ${COUPLING_MIN_TAIL}+ tail renders`,
     });
   }
   return {

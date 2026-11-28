@@ -88,11 +88,11 @@ export function voiceComposerView(
 
 /** The speaker button for one row: offered, speaking, or none. */
 export function speakButtonOf(
-  state: VoiceState | null,
+  state: Pick<VoiceState, "readAloud"> | null,
   row: { readonly kind: string; readonly key: string; readonly text?: string },
   rows: readonly { readonly kind: string; readonly key: string }[],
   running: boolean,
-  settings: VoiceSettings,
+  settings: Pick<VoiceSettings, "readAloudButton">,
 ): "offered" | "speaking" | undefined {
   // The Beta switch gates the whole surface, `speaking` included: with Read aloud
   // off a row shows neither the speaker nor the stop (docs/feat/mobile-voice-hidden.md).

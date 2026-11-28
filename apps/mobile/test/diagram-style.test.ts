@@ -165,7 +165,8 @@ describe("wiring", () => {
   test("the session screen reads the setting live and hands it to each diagram row", () => {
     const screen = read("src", "screens", "SessionScreen.tsx");
     expect(screen).toContain("DIAGRAM_SETTINGS.subscribe(");
-    expect(screen).toContain("diagramStyle={diagramStyle}");
+    expect(screen).toMatch(/const cellEnv = useMemo[\s\S]{0,200}\bdiagramStyle,/);
+    expect(read("src", "transcript-cell.ts")).toContain("diagramStyle: env.diagramStyle,");
     const row = read("src", "screens", "transcript", "TranscriptRow.tsx");
     expect(row).toContain("style: props.diagramStyle");
     const block = read("src", "ui", "diagram", "DiagramBlock.tsx");

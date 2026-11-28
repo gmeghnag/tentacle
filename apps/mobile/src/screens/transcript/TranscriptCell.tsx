@@ -15,10 +15,12 @@ import type { DiagramStyle } from "../../diagram-settings-store.ts";
 import type { CopyVia } from "../../message-copy.ts";
 import { rowErrorFields } from "../../row-guard.ts";
 import { rowTimeLabel } from "../../row-swipe.ts";
+import type { SessionStore } from "../../session-store.ts";
 import type { Palette } from "../../theme.ts";
 import type { ThumbnailState } from "../../thumbnails.ts";
-import { type CellData, sameCellProps } from "../../transcript-cell.ts";
+import { type CellData, type CellEnv, cellDataOf, sameCellProps } from "../../transcript-cell.ts";
 import type { Row } from "../../transcript-rows.ts";
+import { useSlice } from "../../use-slice.ts";
 import { RowGuard } from "./RowGuard.tsx";
 import { SwipeTime } from "./SwipeTime.tsx";
 import { RowFallback, TranscriptRow } from "./TranscriptRow.tsx";
@@ -95,3 +97,31 @@ function TranscriptCellView(props: TranscriptCellProps): JSX.Element {
 }
 
 export const TranscriptCell = memo(TranscriptCellView, sameCellProps);
+
+interface LiveCellProps {
+  readonly store: SessionStore;
+  readonly env: CellEnv;
+  readonly actions: RefObject<CellActions>;
+  /** The stand-in's key (`LiveSlot`): the only row this cell may draw. */
+  readonly rowKey: string;
+}
+
+/**
+ * The cell of the row a stream is writing (docs/feat/mobile-ui-fluidity-s4.md,
+ * decision 1): the list holds a stand-in that no delta changes, and this follows
+ * the `tail` slice for the row's content. A live reasoning row draws nothing
+ * (the Thinking line has it), and so does another key's row (the next commit
+ * brings the stand-in that matches).
+ */
+export const LiveCell = memo(function LiveCell({
+  store,
+  env,
+  actions,
+  rowKey,
+}: LiveCellProps): JSX.Element | null {
+  const { live } = useSlice(store, "tail");
+  if (live === null || live.kind !== "assistant" || live.key !== rowKey) {
+    return null;
+  }
+  return <TranscriptCell {...cellDataOf(live, env, true)} actions={actions} />;
+});

@@ -34,8 +34,11 @@ export const JANK_WINDOW_MS = 1000;
 /** A fan that never settles (closed first, or still opening) reports at most this late. */
 export const FAN_REPORT_MAX_MS = 5000;
 
-/** The session screen's panes, as `ev=panes` names them. */
-export const PANES = ["header", "composer", "hub", "sheets"] as const;
+/**
+ * What `ev=panes` counts besides the shell: the session screen's panes, and
+ * `cells` — the transcript list's `renderItem` calls.
+ */
+export const PANES = ["tail", "cells", "header", "composer", "hub", "sheets"] as const;
 export type PaneName = (typeof PANES)[number];
 
 /** One line, ready for `AppLog.log`. */
@@ -195,8 +198,8 @@ export function fanLine(f: FanOpenFacts): PerfLine {
 
 /**
  * The `panes` line (docs/feat/mobile-ui-fluidity-s3.md): over ONE stream, how
- * often the screen's shell rendered and how often each pane did. A pane near the
- * shell's figure follows the stream.
+ * often the screen's shell rendered and how often each pane did. `tail` is the
+ * one that follows the stream; any other figure near it does too.
  */
 export function panesLine(shell: number, panes: Readonly<Record<PaneName, number>>): PerfLine {
   return { level: "info", kind: PTRACE, fields: { ev: "panes", shell, ...panes } };

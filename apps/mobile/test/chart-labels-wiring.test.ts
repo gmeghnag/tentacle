@@ -20,7 +20,10 @@ describe("the Charts setting reaches every chart, and only the screen subscribes
       /useState<ChartSettings>\(\(\) => CHART_SETTINGS\.current\(\)\)[\s\S]{0,120}CHART_SETTINGS\.subscribe\(setChartSettings\)/,
     );
     // Through the memoized cell (docs/fix/mobile-fan-jank-device.md).
-    expect(screen).toMatch(/<TranscriptCell[\s\S]{0,800}chartLabels=\{chartSettings\.labels\}/);
+    expect(screen).toMatch(
+      /const cellEnv = useMemo[\s\S]{0,300}chartLabels: chartSettings\.labels,/,
+    );
+    expect(read("transcript-cell.ts")).toContain("chartLabels: env.chartLabels,");
     const cell = read("screens", "transcript", "TranscriptCell.tsx");
     expect(cell).toMatch(/<TranscriptRow[\s\S]{0,400}chartLabels=\{props\.chartLabels\}/);
   });

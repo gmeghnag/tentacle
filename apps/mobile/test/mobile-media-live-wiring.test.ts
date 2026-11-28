@@ -185,12 +185,12 @@ describe("fix/mobile-qa-1119 row 12: the thumbnail window reads the LIST's curre
     expect(screen).toContain(
       "controller.window(visible.current.first, visible.current.last, listRows.current);",
     );
-    expect(screen).toContain("listRows.current = rows;");
+    expect(screen).toContain("listRows.current = data;");
   });
 
   test("a resync's new rows ask the window again (mutation: no effect → a rebuilt history stays labels)", () => {
     expect(screen).toContain(
-      "controller.window(visible.current.first, visible.current.last, rows);",
+      "controller.window(visible.current.first, visible.current.last, data);",
     );
   });
 });

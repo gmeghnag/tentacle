@@ -1,0 +1,1 @@
+- **Mobile: a streaming reply no longer redraws the transcript.** The reply being written and the Thinking line update on their own, so long sessions stay smooth while the model streams.

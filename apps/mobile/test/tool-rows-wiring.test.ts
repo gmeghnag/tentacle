@@ -23,46 +23,52 @@ describe("SessionScreen: one layout, the open state, the footer", () => {
   const src = read("screens", "SessionScreen.tsx");
 
   test("the layout is memoised on the rows and the running flag", () => {
-    expect(src).toMatch(
-      /useMemo\(\s*\(\) => stepLayout\(rows, running, isBlockRow\),\s*\[rows, running\]/,
-    );
+    // In the store (mobile-ui-fluidity-s4 decision 2): once per publish, behind
+    // a one-entry memo on (rows, running). The shell computes none.
+    const store = read("session-store.ts");
+    expect(store).toContain("const layout = stepLayout(rows, running, isBlockRow);");
+    expect(store).toContain("last.rows !== rows || last.running !== running");
+    expect(src).toMatch(/useMemo\(\(\) => new Map\(rowsSlice\.cells\), \[rowsSlice\.cells\]\)/);
   });
 
   test("renderItem reads the row's cell, and a hidden cell is null BEFORE SwipeTime wraps it", () => {
-    expect(src).toContain("layout.cells.get(item.key)");
+    expect(src).toContain("cellEnv.cells.get(item.key)");
     // The memoized cell (docs/fix/mobile-fan-jank-device.md) wraps SwipeTime.
-    expect(src).toMatch(/cell\?\.kind === "hidden"\)\s*\{?\s*return null;[\s\S]*<TranscriptCell/);
+    expect(src).toMatch(/kind === "hidden"\)\s*\{?\s*return null;[\s\S]*<TranscriptCell/);
   });
 
   test("the open and show-all sets live in the screen and reach every cell through extraData", () => {
     expect(src).toMatch(/useState<readonly string\[\]>\(\[\]\)/);
     expect(src).toMatch(
-      /rowExtraData = useMemo\([\s\S]{0,400}openSteps[\s\S]{0,200}fullSteps[\s\S]{0,200}layout/,
+      /const cellEnv = useMemo[\s\S]{0,600}cells,[\s\S]{0,100}openSteps,\s*fullSteps,/,
     );
+    expect(src).toContain("extraData={cellEnv}");
     expect(src).toContain("toggleOpen(");
   });
+
+  // The footer is `TailPane`'s since mobile-ui-fluidity-s4 (always mounted; it
+  // draws nothing when it has nothing).
+  const pane = read("screens", "session", "TailPane.tsx");
 
   test("the footer is the live tail, drawn only when there is one", () => {
     // docs/feat/mobile-queued-compose.md D1 added the pending bubbles to the same
     // footer (a queued message is read at the next step, so it is the thread's last
     // node): the tail is still drawn only when there IS one, under the rows.
     // mobile-hub-commands C2 item 15: the compaction slot rides the same footer.
-    expect(src).toMatch(
-      /ListFooterComponent=\{\s*layout\.tail === null &&\s*rowsSlice\.slot === null &&\s*rowsSlice\.view\.pending\.length === 0\s*\? undefined/,
-    );
-    expect(src).toMatch(/\{layout\.tail === null \? null : \(\s*<ThinkingNode/);
-    expect(src).toMatch(/\{rowsSlice\.slot === null \? null : \(\s*<CompactSlotNode/);
+    expect(src).toContain("ListFooterComponent={tailFooter}");
+    expect(pane).toMatch(/\{thinking === null \? null : \(\s*<ThinkingNode/);
+    expect(pane).toMatch(/\{slice\.slot === null \? null : \(\s*<CompactSlotNode/);
   });
 
   test("the pending bubbles ride the same footer, after the tail (D1)", () => {
-    const footer = src.slice(src.indexOf("ListFooterComponent="));
-    expect(footer.indexOf("<ThinkingNode")).toBeLessThan(footer.indexOf("<PendingBubbles"));
+    expect(pane.indexOf("<ThinkingNode")).toBeGreaterThan(-1);
+    expect(pane.indexOf("<ThinkingNode")).toBeLessThan(pane.indexOf("<PendingBubbles"));
   });
 
   test("the footer node gets the tail's thought and its up segment (Review S2 #1)", () => {
-    const footer = src.slice(src.indexOf("<ThinkingNode"));
-    expect(footer).toMatch(/^<ThinkingNode[^>]*thought=\{layout\.tail\.thought\}/);
-    expect(footer).toMatch(/^<ThinkingNode[^>]*up=\{layout\.tail\.up\}/);
+    const footer = pane.slice(pane.indexOf("<ThinkingNode\n"));
+    expect(footer).toMatch(/^<ThinkingNode[^>]*thought=\{thinking\.thought\}/);
+    expect(footer).toMatch(/^<ThinkingNode[^>]*up=\{thinking\.up\}/);
   });
 
   test("a toggle animates, unless Reduce Motion is on", () => {

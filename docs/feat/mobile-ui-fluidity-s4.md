@@ -496,7 +496,107 @@ and D files). Before done: `bun test apps/mobile/test/`, `tsc -p apps/mobile`,
 
 ## Execution
 
-*(empty — the executor's)*
+*— claude-sonnet-5-5, 2026-11-28*
+
+**Load-bearing check: holds.** I re-ran the Repro against this worktree's
+sources (`.tentacle/tmp/mobile-ui-fluidity-s4/list-inputs-wt.ts`, a trimmed
+copy that reads `onPublish`). The worktree first needed
+`bun install --frozen-lockfile`.
+
+- **The Repro's tool round was not finished.** It sends `tool_end`, which is not
+  an event, so the tool stayed `running`. I re-ran it with the real
+  `tool_result`, with the same result both times:
+
+```
+reasoning: 10 consecutive publishes | data new 10/10 | prefix same 10/10 | cells deep-equal 10/10 | looks deep-equal 10/10
+text: 9 consecutive publishes | data new 9/9 | prefix same 9/9 | cells deep-equal 9/9 | looks deep-equal 9/9
+```
+
+**Red first** (tests A–D; stubs: a `tail` slice with no members, `liveRow` →
+null, `listData` → identity, `cellDataOf` throwing; old `PANES`):
+`137 pass, 58 fail`. The failures were assertions and the planned stub throw.
+Two other kinds: the `TailPane` pin failed on ENOENT (the file did not exist),
+and two A tests failed on members the stub lacked.
+
+**As built, in the plan's order:** `tool-steps.ts` → `voice-view.ts` →
+`transcript-cell.ts` → `session-store.ts` → `perf-trace.ts` /
+`perf-budget.ts` → `LiveCell` / `TailPane.tsx` → `SessionScreen.tsx` → tests and
+the changelog fragment. No protocol or schema change.
+
+**Drift:**
+
+- `speakButtonOf`'s **settings** parameter is narrowed too
+  (`Pick<VoiceSettings, "readAloudButton">`), because `cellEnv` carries only
+  `speakShown`.
+- Two files were not in the plan's list. `measured-cell.tsx` now types `item` as
+  `ListItem`. `perf-probe.ts` gains the two zero counters (no logic change).
+- `slot`, `view.pending` and `view.state` left the `rows` slice (the types found
+  no other shell reader).
+- `deriveSlices(state, list?)` takes the memo as an argument. It is one per
+  store, so two mounted screens do not evict each other's entry.
+- `view.rows` is skipped in the per-fact loop and spelled out in its own test
+  (A3). A `transcript.turn` change now wakes only `hub`.
+- Existing pins retargeted, none deleted: `notice-row`, `voice-wiring`,
+  `diagram-style`, `clock`, `row-guard`, `swipe-time`, `tool-rows`,
+  `hub-scheduled`, `mobile-media-live`, `mascot`, `session-screen-follow`,
+  `artifact-gallery`, `chart-labels`.
+- In the `perf-budget` probe-log test the tail now renders 640 times. With 64
+  shell renders and no tail, that log is now correctly `coupling` or `evidence`.
+- A8 first ended the fake turn without `turn_end`. That appends a notice after
+  the reply, so mutation (d) **survived**. The test now sends `turn_end` and
+  asserts the reply is the last row.
+
+**Mutations** (applied, run, restored; script
+`.tentacle/tmp/mobile-ui-fluidity-s4/mutate.mjs`):
+
+```
+(a) `transcript` back into `rows`: 53 pass, 5 fail   (both "30 deltas" tests among them)
+(b) slice-level keepSlices:        56 pass, 2 fail   (both member-identity tests)
+(c) no strictMode:                  6 pass, 1 fail
+(d) liveRow ignores `running`:     57 pass, 1 fail   (turn end)
+(e-source) shell follows `tail`:    5 pass, 2 fail
+(f) cellDataOf ignores `live`:     22 pass, 3 fail
+```
+
+(e) **in the app** (flow 90 going red on `coupling: shell=…`) was **not run**.
+Only the source pin above covers it. The `shell=1207 tail=1207` budget test
+covers the rule.
+
+**Gate 0** (iPhone 17 Pro, iOS 26.5, under `sim.lock`, since released):
+`90-perf-stream` Maestro PASS, 0 violations.
+
+```
+PERF PASS
+jank lines: 0, fan lines: 4 (4 streaming)
+worst gap: n/a
+fan settle ms: 1068, 1067, 1066, 1059
+renders/s (shell only): n/a
+panes: shell=3 tail=1218 cells=118 header=1 composer=1 hub=1 sheets=1
+```
+
+- **For the reviewer: `cells=118` has little margin.** The limit here is 121.8,
+  and the plan expected "a few dozen". My inference, not measured: each of the
+  ≤ 3 shell renders can re-run every mounted cell once through a new `cellEnv`,
+  and the list also renders newly mounted cells. That would make the figure
+  scale with mounted cells and row transitions rather than deltas, so a shorter
+  stream or more transitions could trip `coupling`. I left the threshold as
+  planned. To verify, count `cells` per `cellEnv` identity in flow 90.
+- The runner reports flow 90 as a known bug that now passes. The tag stays, as
+  the plan says.
+
+**Visual and regression flows:** `07-prompt`, `09-foreign-turn`,
+`11-disconnect-mid-turn`, `12-steer` and `13-send-now`: 5/5 PASS, one try each.
+**The two settle screenshots are not attached.** I recorded a passing rerun of
+07 (`.tentacle/tmp/mobile-ui-fluidity-s4/flow07.mp4`), but cutting frames with
+`ffmpeg` needed an approval this run did not have. Nobody has looked at the
+live→settled handoff yet. To check it, view that video where the reply ends and
+look for a blink or a jump.
+
+**Gate:** `bun test apps/mobile/test`: 5965 pass, 0 fail. A8 was tightened
+after that run, and `session-store.test.ts` was rerun: 58 pass.
+`tsc -p apps/mobile` is clean, and so is
+`biome check` on `apps/mobile/{src,test,e2e}`. The full `bun run check` is the
+orchestrator's and was not run.
 
 ## Review
 

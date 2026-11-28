@@ -320,12 +320,15 @@ describe("createPerfProbe: renders per pane over a stream (`ev=panes`)", () => {
     h.p.pane("hub");
     h.p.pane("hub");
     h.p.pane("header");
+    h.p.pane("tail");
+    h.p.pane("tail");
+    h.p.pane("cells");
     // Streaming again is no edge.
     h.p.streaming(true);
     expect(h.lines()).toEqual([]);
     h.p.streaming(false);
     expect(h.lines()).toEqual([
-      { ev: "panes", shell: 3, header: 1, composer: 0, hub: 2, sheets: 0 },
+      { ev: "panes", shell: 3, tail: 2, cells: 1, header: 1, composer: 0, hub: 2, sheets: 0 },
     ]);
   });
 
@@ -340,8 +343,8 @@ describe("createPerfProbe: renders per pane over a stream (`ev=panes`)", () => {
     h.p.pane("composer");
     h.p.streaming(false);
     expect(h.lines()).toEqual([
-      { ev: "panes", shell: 1, header: 0, composer: 0, hub: 0, sheets: 1 },
-      { ev: "panes", shell: 0, header: 0, composer: 1, hub: 0, sheets: 0 },
+      { ev: "panes", shell: 1, tail: 0, cells: 0, header: 0, composer: 0, hub: 0, sheets: 1 },
+      { ev: "panes", shell: 0, tail: 0, cells: 0, header: 0, composer: 1, hub: 0, sheets: 0 },
     ]);
   });
 });

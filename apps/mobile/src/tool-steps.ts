@@ -3,10 +3,11 @@
  * Design 2, mockup C). Pure and React-free (AGENTS §7): the screen memoises
  * `stepLayout(rows, running)` and each cell only draws what it is told.
  *
- * The contract is ONE list cell per row: the FlatList keeps `rows` as its data
- * (keys, "Show in chat" indices and open-at-end's follow are unchanged), and the
- * layout only says how a row draws — a reasoning row folded into a step draws
- * nothing (`hidden`); the live "Thinking…" node is the list's footer (`tail`).
+ * The contract is ONE list cell per row: the FlatList's data is the rows
+ * (`listData`: same keys and indices, so "Show in chat" and open-at-end's follow
+ * hold; the row a stream is writing is a stand-in), and the layout only says how
+ * a row draws — a reasoning row folded into a step draws nothing (`hidden`); the
+ * live "Thinking…" node is the list's footer (`tail`).
  */
 import { shellExitCode, shellRowParts } from "@tentacle/core";
 import { chartRowSpec } from "./chart-row.ts";
@@ -56,6 +57,29 @@ export type StepCell =
    * `contextRowView`, this only places it on the thread.
    */
   | { readonly kind: "context"; readonly thread: ThreadPos };
+
+/** The row a stream is still writing: the last row while a turn runs, when it is text or reasoning. */
+export function liveRow(rows: readonly Row[], running: boolean): Row | null {
+  const last = rows.at(-1);
+  return running && (last?.kind === "assistant" || last?.kind === "reasoning") ? last : null;
+}
+
+/**
+ * The list's stand-in for the live row (same key, same index; it never changes
+ * while that row streams): its content is read from the `tail` slice, so a delta
+ * leaves the `FlatList` data alone (docs/feat/mobile-ui-fluidity-s4.md).
+ */
+export interface LiveSlot {
+  readonly kind: "live";
+  readonly key: string;
+}
+
+export type ListItem = Row | LiveSlot;
+
+/** The `FlatList` data: the settled rows, then the stand-in when a row is live. */
+export function listData(settled: readonly Row[], liveKey: string | null): readonly ListItem[] {
+  return liveKey === null ? settled : [...settled, { kind: "live", key: liveKey }];
+}
 
 export interface StepLayout {
   /** By row key. A row absent from the map (user, text, notice) draws as today. */

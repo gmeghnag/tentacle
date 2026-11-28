@@ -138,7 +138,7 @@ describe("SessionScreen: a session opens ALREADY at its end (docs/fix/mobile-ope
     // report about the VIEWPORT, so a slow attach looked already settled and the
     // history that then arrived went through `contentGrew` ANIMATED.
     expect(src).toMatch(
-      /hasRows\.current = rowsSlice\.view\.rows\.length > 0 \|\| rowsSlice\.status\.phase !== "opening"/,
+      /hasRows\.current = data\.length > 0 \|\| rowsSlice\.status\.phase !== "opening"/,
     );
     // Both measurements pass it (the reveal is what settled the empty state).
     expect(src).toMatch(

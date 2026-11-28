@@ -99,7 +99,9 @@ describe("openArtifactGallery is the ONE entry (D9)", () => {
       /onArtifact: \(meta\) => onOpenArtifacts\?\.\("card", meta\.artifactId\)/,
     );
     // The cell offers the card only when the screen has a gallery to open.
-    expect(session).toMatch(/artifacts=\{onOpenArtifacts !== undefined\}/);
+    expect(session).toContain("const artifactsOn = onOpenArtifacts !== undefined;");
+    expect(session).toContain("artifacts: artifactsOn,");
+    expect(read("src", "transcript-cell.ts")).toContain("artifacts: env.artifacts,");
   });
 
   test("the sheet calls it for a row whose `opens` is `artifacts`", () => {

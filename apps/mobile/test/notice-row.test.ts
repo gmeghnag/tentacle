@@ -273,23 +273,29 @@ describe("SessionScreen hands each notice its look", () => {
   );
 
   test("the looks are memoised over the rows AND the visible cells", () => {
-    expect(src).toMatch(/useMemo\(\(\) => noticeLooks\(rows, layout\.cells\), \[rows, layout\]\)/);
+    // Derived by the store from the full rows (mobile-ui-fluidity-s4 decision 2),
+    // and rebuilt into a Map by the screen.
+    const store = readFileSync(join(import.meta.dir, "..", "src", "session-store.ts"), "utf8");
+    expect(store).toContain("looks: [...noticeLooks(rows, layout.cells)],");
+    expect(src).toMatch(/useMemo\(\(\) => new Map\(rowsSlice\.looks\), \[rowsSlice\.looks\]\)/);
   });
 
   test("renderItem passes it to a notice row only", () => {
-    expect(src).toMatch(/look=\{item\.kind === "notice" \? looks\.get\(item\.key\) : undefined\}/);
+    const cell = readFileSync(join(import.meta.dir, "..", "src", "transcript-cell.ts"), "utf8");
+    expect(cell).toContain('look: row.kind === "notice" ? env.looks.get(row.key) : undefined,');
   });
 
   test("`looks` is in extraData, so a block's head re-renders when a neighbour arrives", () => {
-    expect(src).toMatch(/rowExtraData = useMemo\([\s\S]{0,600}looks,[\s\S]{0,200}\[/);
+    expect(src).toMatch(/const cellEnv = useMemo<CellEnv>\([\s\S]{0,600}looks,[\s\S]{0,200}\[/);
     // `looks` is a DEPENDENCY of the memo, not merely a member of the object it
     // builds — a mutation that drops it from `[...]` leaves the row un-re-rendered.
     // Asserted as membership: a later switch appends its own entry
     // (`compactShell`, docs/feat/shell-intent-line.md §7), so its position is not
     // this test's business.
-    const deps = /rowExtraData = useMemo\(\s*\(\) => \(\{[\s\S]*?\}\s*\),\s*\[([\s\S]*?)\]/.exec(
-      src,
-    );
+    const deps =
+      /const cellEnv = useMemo<CellEnv>\(\s*\(\) => \(\{[\s\S]*?\}\s*\),\s*\[([\s\S]*?)\]/.exec(
+        src,
+      );
     const names = (deps?.[1] ?? "")
       .split(",")
       .map((name) => name.trim())

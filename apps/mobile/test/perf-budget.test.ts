@@ -21,9 +21,20 @@ const jank = (worst: number | string, renders = 10, win = 1000, stream = true): 
 const fan = (settle: number | string, stream = true): string =>
   `${AT} ev=fan wait=12 start=16 settle=${settle} starts=1 stream=${stream}`;
 const FOUR_FANS = [fan(1068), fan(1070), fan(1090), fan(1100)];
+const PANE_KEYS = ["shell", "tail", "cells", "header", "composer", "hub", "sheets"];
+/** s4's healthy shape: the tail follows the stream, nothing else does. */
 const panes = (over: Record<string, number>): string => {
-  const f = { shell: 500, header: 0, composer: 0, hub: 0, sheets: 0, ...over };
-  return `${AT} ev=panes shell=${f.shell} header=${f.header} composer=${f.composer} hub=${f.hub} sheets=${f.sheets}`;
+  const f: Record<string, number> = {
+    shell: 4,
+    tail: 500,
+    cells: 0,
+    header: 0,
+    composer: 0,
+    hub: 0,
+    sheets: 0,
+    ...over,
+  };
+  return `${AT} ev=panes ${PANE_KEYS.map((key) => `${key}=${f[key]}`).join(" ")}`;
 };
 /** Four healthy streaming opens, and one stream no pane followed. */
 const FANS = [...FOUR_FANS, panes({})];
@@ -179,13 +190,16 @@ describe("checkPerf", () => {
       step(600);
       probe.fanSettle(true);
     }
+    for (let i = 0; i < 640; i++) {
+      probe.pane("tail");
+    }
     for (let i = 0; i < 60; i++) {
       probe.render(1);
     }
     probe.pane("hub");
     probe.streaming(false);
     const report = checkPerf(entriesToText(log.entries()));
-    expect(report.panes).toEqual(["shell=64 header=0 composer=0 hub=1 sheets=0"]);
+    expect(report.panes).toEqual(["shell=64 tail=640 cells=0 header=0 composer=0 hub=1 sheets=0"]);
     expect(report.fanLines).toBe(4);
     expect(report.streamingFans).toBe(4);
     expect(report.settles).toEqual([1200, 1200, 1200, 1200]);
@@ -228,40 +242,54 @@ describe("perfReportText", () => {
   });
 });
 
-describe("coupling: no pane follows the stream", () => {
+describe("coupling: nothing but the tail follows the stream", () => {
   const log = (...lines: string[]) => check(jank(60), ...FOUR_FANS, ...lines);
   const only = (...lines: string[]) => [...new Set(log(...lines).violations.map((v) => v.rule))];
 
-  test("a pane that renders with the shell is a violation; a few renders are not", () => {
-    for (const pane of ["header", "composer", "hub", "sheets"]) {
-      expect(only(panes({ [pane]: 400 }))).toEqual(["coupling"]);
+  test("the shell, a cell or a pane that renders with the tail is a violation", () => {
+    for (const pane of ["shell", "cells", "header", "composer", "hub", "sheets"]) {
+      expect([pane, only(panes({ [pane]: 400 }))]).toEqual([pane, ["coupling"]]);
     }
     expect(log(panes({ hub: 8 })).ok).toBe(true);
   });
 
-  test("the boundary: max(10, a tenth of the shell's renders)", () => {
+  test("s3's real shape (the shell renders with the stream) fails on the shell", () => {
+    const report = log(panes({ shell: 1207, tail: 1207 }));
+    expect(report.violations.map((v) => v.rule)).toEqual(["coupling"]);
+    expect(report.violations[0]?.detail).toStartWith("shell=1207");
+  });
+
+  test("s4's shape passes", () => {
+    expect(log(panes({ shell: 4, tail: 1200, cells: 0, hub: 3 })).ok).toBe(true);
+  });
+
+  test("the boundary: max(10, a tenth of the tail's renders)", () => {
     expect(log(panes({ hub: 50 })).ok).toBe(true);
     expect(only(panes({ hub: 51 }))).toEqual(["coupling"]);
-    expect(log(panes({ shell: 50, hub: 10 })).ok).toBe(true);
-    expect(only(panes({ shell: 50, hub: 11 }))).toEqual(["coupling"]);
+    expect(log(panes({ tail: 50, hub: 10 })).ok).toBe(true);
+    expect(only(panes({ tail: 50, hub: 11 }))).toEqual(["coupling"]);
   });
 
   test("a short stream gives no verdict; with no other panes line that is no evidence", () => {
-    expect(only(panes({ shell: 20, hub: 20 }))).toEqual(["evidence"]);
-    expect(log(panes({ shell: 20, hub: 20 }), panes({})).ok).toBe(true);
+    expect(only(panes({ tail: 20, hub: 20 }))).toEqual(["evidence"]);
+    expect(only(panes({ shell: 1200, tail: 20 }))).toEqual(["evidence"]);
+    expect(log(panes({ tail: 20, hub: 20 }), panes({})).ok).toBe(true);
     expect(only()).toEqual(["evidence"]);
   });
 
-  test("a pane figure missing or not a number is evidence", () => {
-    const missing = `${AT} ev=panes shell=500 header=1 composer=1 hub=1`;
-    const text = `${AT} ev=panes shell=500 header=1 composer=1 hub=1 sheets=x`;
-    expect(only(missing, panes({}))).toEqual(["evidence"]);
-    expect(only(text, panes({}))).toEqual(["evidence"]);
+  test("a figure missing (`tail` too) or not a number is evidence", () => {
+    const noTail = `${AT} ev=panes shell=500 cells=0 header=1 composer=1 hub=1 sheets=1`;
+    const missing = `${AT} ev=panes shell=4 tail=500 cells=0 header=1 composer=1 hub=1`;
+    const text = `${missing} sheets=x`;
+    for (const line of [noTail, missing, text]) {
+      expect(only(line, panes({}))).toEqual(["evidence"]);
+      expect(only(line)).toEqual(["evidence"]);
+    }
   });
 
   test("the report prints the panes' figures", () => {
     const text = perfReportText(log(panes({ hub: 8 })));
-    expect(text).toContain("panes: shell=500 header=0 composer=0 hub=8 sheets=0");
+    expect(text).toContain("panes: shell=4 tail=500 cells=0 header=0 composer=0 hub=8 sheets=0");
   });
 
   test("the budget turns a coupled pass into a fail", () => {
@@ -280,6 +308,8 @@ describe("perfOutcome", () => {
     expect(perfOutcome("fail", red)).toBe("fail");
     expect(perfOutcome("timeout", ok)).toBe("timeout");
     expect(perfOutcome("timeout", red)).toBe("timeout");
+    const coupled = check(...FOUR_FANS, panes({ shell: 1207, tail: 1207 }));
+    expect(perfOutcome("pass", coupled)).toBe("fail");
   });
 });
 

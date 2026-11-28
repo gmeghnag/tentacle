@@ -17,14 +17,16 @@ describe("every transcript row is guarded", () => {
   const cell = read("src", "screens", "transcript", "TranscriptCell.tsx");
 
   test("renderItem wraps the whole row (SwipeTime + TranscriptRow) in RowGuard", () => {
-    expect(screen).toMatch(/return \(\s*<TranscriptCell/);
+    expect(screen).toMatch(/return <TranscriptCell \{\.\.\.cellDataOf\(item, cellEnv, false\)\}/);
+    // The live row's cell goes through the same guarded component.
+    expect(cell).toMatch(/return <TranscriptCell \{\.\.\.cellDataOf\(live, env, true\)\}/);
     expect(cell).toMatch(
       /<RowGuard[\s\S]{0,300}fallback=\{<RowFallback palette=\{palette\} \/>\}[\s\S]{0,300}>\s*<SwipeTime[\s\S]*<TranscriptRow[\s\S]*<\/SwipeTime>\s*<\/RowGuard>/,
     );
   });
 
   test("a failed row retries when its row object changes (resetKey is the row itself)", () => {
-    expect(screen).toMatch(/<TranscriptCell\s+row=\{item\}/);
+    expect(read("src", "transcript-cell.ts")).toMatch(/return \{\s*row,\s*cell: env\.cells/);
     expect(cell).toMatch(/<RowGuard[\s\S]{0,300}resetKey=\{row\}[\s\S]{0,300}>\s*<SwipeTime/);
   });
 

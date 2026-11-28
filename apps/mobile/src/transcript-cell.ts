@@ -13,8 +13,93 @@
  * cell fires are NOT data: they go through one stable handle that always
  * reaches the screen's latest closures (`TranscriptCell.tsx`).
  */
+import { agentCardTarget } from "./activity.ts";
+import type { LabelMode } from "./chart-layout-kit.ts";
+import type { DiagramStyle } from "./diagram-settings-store.ts";
 import type { NoticeLook } from "./notice-group.ts";
-import type { StepCell } from "./tool-steps.ts";
+import type { ReadAloudState } from "./read-aloud.ts";
+import type { Palette } from "./theme.ts";
+import type { ThumbnailState } from "./thumbnails.ts";
+import { type StepCell, isOpen } from "./tool-steps.ts";
+import type { Row } from "./transcript-rows.ts";
+import { speakButtonOf } from "./voice-view.ts";
+
+/**
+ * Everything a cell reads besides its row (docs/feat/mobile-ui-fluidity-s4.md,
+ * decision 5): the screen memoizes ONE of these, which is both `renderItem`'s
+ * key and the list's `extraData`. Nothing here changes on a streamed delta.
+ */
+export interface CellEnv {
+  readonly palette: Palette;
+  readonly thumbnails: ThumbnailState;
+  readonly diagramStyle: DiagramStyle;
+  readonly chartLabels: LabelMode;
+  readonly reduceMotion: boolean;
+  readonly compactShell: boolean;
+  /** Whether the speaker is wired at all (there is a voice controller). */
+  readonly voice: boolean;
+  readonly readAloud: ReadAloudState | undefined;
+  /** The Beta `Read aloud` switch. */
+  readonly speakShown: boolean;
+  readonly artifacts: boolean;
+  /** The live and Finished sub-agents: an agent card's link follows them. */
+  readonly activity: {
+    readonly subagents: Parameters<typeof agentCardTarget>[2];
+    readonly memory: { readonly finished: Parameters<typeof agentCardTarget>[3] };
+  };
+  readonly cells: ReadonlyMap<string, StepCell>;
+  readonly looks: ReadonlyMap<string, NoticeLook>;
+  readonly openSteps: readonly string[];
+  readonly fullSteps: readonly string[];
+}
+
+/**
+ * One cell's props from its row and the environment — the one place for it, for
+ * a list cell and for the live one. `live`: this row is the one the stream is
+ * writing (`liveRow`), so its speaker is not offered yet.
+ */
+export function cellDataOf(
+  row: Row,
+  env: CellEnv,
+  live: boolean,
+): CellData<Row, Palette, ThumbnailState> & {
+  readonly diagramStyle: DiagramStyle;
+  readonly chartLabels: LabelMode;
+} {
+  return {
+    row,
+    cell: env.cells.get(row.key),
+    look: row.kind === "notice" ? env.looks.get(row.key) : undefined,
+    open: isOpen(env.openSteps, row.key),
+    full: isOpen(env.fullSteps, row.key),
+    reduceMotion: env.reduceMotion,
+    compactShell: env.compactShell,
+    // `speakButtonOf` asks the rows only which one streams: the live row alone
+    // stands for them (it IS the last one), and a list cell never streams.
+    speak: speakButtonOf(
+      env.readAloud === undefined ? null : { readAloud: env.readAloud },
+      row,
+      live ? [row] : [],
+      live,
+      { readAloudButton: env.speakShown },
+    ),
+    child:
+      row.kind === "tool"
+        ? agentCardTarget(
+            row.id,
+            row.sub?.movedTo,
+            env.activity.subagents,
+            env.activity.memory.finished,
+          )
+        : null,
+    voice: env.voice,
+    artifacts: env.artifacts,
+    palette: env.palette,
+    thumbnails: env.thumbnails,
+    diagramStyle: env.diagramStyle,
+    chartLabels: env.chartLabels,
+  };
+}
 
 /** What a cell draws; every field is compared (see `sameCellData`). */
 export interface CellData<RowT = unknown, PaletteT = unknown, ThumbsT = unknown> {

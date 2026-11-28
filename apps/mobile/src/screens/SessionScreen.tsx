@@ -60,7 +60,7 @@ import {
 import { ACTIVITY_SETTINGS } from "../activity-settings-expo.ts";
 import type { ActivitySettings } from "../activity-settings-store.ts";
 import { listEndOn } from "../activity-settings-store.ts";
-import { activityView, agentCardTarget } from "../activity.ts";
+import { activityView } from "../activity.ts";
 import type { AppLogField } from "../app-log.ts";
 import { ARTIFACT_SEEN } from "../artifact-seen-expo.ts";
 import { seenFor } from "../artifact-seen-store.ts";
@@ -142,7 +142,6 @@ import {
   messageCopy,
 } from "../message-copy.ts";
 import { ACTIVITY_CLOCK_TICK_MS } from "../motion.ts";
-import { noticeLooks } from "../notice-group.ts";
 import { type StickyBlock, openOutputSteps, stickyState } from "../output-sticky.ts";
 import { PERF } from "../perf-probe.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
@@ -190,14 +189,14 @@ import {
 import { SPEECH_PORT } from "../speech-native-expo.ts";
 import { type ActivityFocus, sheetDetail, showRow, stopConfirm } from "../subagent-detail.ts";
 import { type Palette, typography } from "../theme.ts";
-import { isBlockRow, isOpen, stepLayout, toggleOpen } from "../tool-steps.ts";
+import { type ListItem, isOpen, listData, toggleOpen } from "../tool-steps.ts";
 import { type ToolsSegmentId, toolsSummary } from "../tools-view.ts";
+import { type CellEnv, cellDataOf } from "../transcript-cell.ts";
 import type { Row } from "../transcript-rows.ts";
 import { EmptyState } from "../ui/EmptyState.tsx";
 import { useAccessibilityFlags } from "../ui/FloatingActivity.tsx";
 import { Icon } from "../ui/Icon.tsx";
 import { MascotSceneLayer } from "../ui/MascotScene.tsx";
-import { CompactSlotNode, ThinkingNode } from "../ui/StepNode.tsx";
 import { STICKY_HEAD_H, StickyHost, type StickyHostHandle } from "../ui/StickyStep.tsx";
 import { Text } from "../ui/Text.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
@@ -210,15 +209,15 @@ import {
 } from "../voice-controller.ts";
 import { VOICE_SETTINGS } from "../voice-settings-expo.ts";
 import type { VoiceSettings } from "../voice-settings-store.ts";
-import { endedTurn, speakButtonOf } from "../voice-view.ts";
+import { endedTurn } from "../voice-view.ts";
 import { type RunsState, catalogueFigure, workflowsHub } from "../workflow-runs-controller.ts";
-import { PendingBubbles } from "./compose/PendingBubble.tsx";
 import { ComposerPane } from "./session/ComposerPane.tsx";
 import { HeaderPane } from "./session/HeaderPane.tsx";
 import { HubPane } from "./session/HubPane.tsx";
 import { SheetsPane } from "./session/SheetsPane.tsx";
+import { TailPane } from "./session/TailPane.tsx";
 import type { PaneActions } from "./session/actions.ts";
-import { type CellActions, TranscriptCell } from "./transcript/TranscriptCell.tsx";
+import { type CellActions, LiveCell, TranscriptCell } from "./transcript/TranscriptCell.tsx";
 import { type CellRect, measuredCell } from "./transcript/measured-cell.tsx";
 
 export interface SessionScreenProps {
@@ -327,6 +326,11 @@ export function SessionScreen({
   const rowsSlice = useSlice(store, "rows");
   const hubSlice = useSlice(store, "hub");
   const sheetsSlice = useSlice(store, "sheets");
+  // The list's data (docs/feat/mobile-ui-fluidity-s4.md): the settled rows, and
+  // a stand-in for the one the stream writes — so a delta leaves it alone, and
+  // never re-renders this shell. `TailPane` and `LiveCell` follow the content.
+  const { settled, liveKey } = rowsSlice;
+  const data = useMemo(() => listData(settled, liveKey), [settled, liveKey]);
   const paneActions = useRef<PaneActions>(null as unknown as PaneActions);
   const sheet = controller.sheet();
   //
@@ -478,9 +482,9 @@ export function SessionScreen({
     const ended = endedTurn(lastTurn.current, rowsSlice.view.turn);
     lastTurn.current = rowsSlice.view.turn;
     if (ended !== undefined && voice !== null) {
-      void voice.turnEnded({ ownTurn: ended.own, focused: inFront, rows: rowsSlice.view.rows });
+      void voice.turnEnded({ ownTurn: ended.own, focused: inFront, rows: settled });
     }
-  }, [rowsSlice.view.turn, rowsSlice.view.rows, voice, inFront]);
+  }, [rowsSlice.view.turn, settled, voice, inFront]);
 
   // The spoken permission ask (eval Q4): the title template only, approval stays a tap.
   const askSeq = sheetsSlice.sheet.kind === "asking" ? sheetsSlice.sheet.seq : undefined;
@@ -509,7 +513,7 @@ export function SessionScreen({
   const visible = useRef({ first: 0, last: 0 });
   /**
    * The rows the LIST shows, current (fix/mobile-qa-1119 row 12): the viewable
-   * indexes are the FlatList's own (`rowsSlice.view.rows`), and this callback is
+   * indexes are the FlatList's own (`data`), and this callback is
    * created once — reading `state` here read the FIRST render's (empty) rows,
    * so no thumbnail was ever asked for and every history photo drew its label.
    */
@@ -527,7 +531,7 @@ export function SessionScreen({
   // B5: follow the stream. `follow.ts` decides (and names the offset: the TRUE
   // end, padding included — bug 3); the screen only reports the list's native
   // sizes and scroll metrics (a DRAG is the person's) and performs the scroll.
-  const list = useRef<FlatList<Row>>(null);
+  const list = useRef<FlatList<ListItem>>(null);
   // The sticky step row's decision, re-run on every scroll event (assigned below,
   // once the rows and the open state exist) and the key it currently shows.
   const recomputeSticky = useRef<() => void>(() => undefined);
@@ -591,7 +595,7 @@ export function SessionScreen({
   // slow attach looked already settled and the history that then arrived went
   // through `contentGrew` ANIMATED: the visible scroll this fix exists to stop.
   const hasRows = useRef(false);
-  hasRows.current = rowsSlice.view.rows.length > 0 || rowsSlice.status.phase !== "opening";
+  hasRows.current = data.length > 0 || rowsSlice.status.phase !== "opening";
   // Item 1 (docs/fix/mobile-open-at-end.md): a session opens ALREADY at its end.
   // `landingStep` re-scrolls, never animated, until the end stops moving (a
   // FlatList renders the first cells only, so the end moves as the silent scroll
@@ -826,28 +830,23 @@ export function SessionScreen({
     }
   }, [rowsSlice.sends]);
 
-  const rows = rowsSlice.view.rows;
-  listRows.current = rows;
+  listRows.current = data;
   // A resync REPLACES the rows without a viewability change: the window is
   // asked again for the rows now on screen (row 12).
   useEffect(() => {
-    controller.window(visible.current.first, visible.current.last, rows);
-  }, [controller, rows]);
+    controller.window(visible.current.first, visible.current.last, data);
+  }, [controller, data]);
   const running = rowsSlice.view.composer.running;
   // The perf trace's loop runs only while a turn streams on this screen.
   useEffect(() => {
     PERF.streaming(running);
     return () => PERF.streaming(false);
   }, [running]);
-  // The thread of steps (docs/feat/mobile-tool-rows.md S2): how each row draws and
-  // the live "Thinking…" footer. Still ONE cell per row: keys, "Show in chat"
-  // indices and open-at-end's follow read `rows` unchanged.
-  const layout = useMemo(() => stepLayout(rows, running, isBlockRow), [rows, running]);
-  // Each harness line's glyph and whether it joins the block above
-  // (docs/feat/mobile-harness-notices.md S1). Over the VISIBLE rows: a cell the
-  // step layout hides (`layout.cells`) is transparent, so a hidden reasoning row
-  // never re-opens a glyph mid-block.
-  const looks = useMemo(() => noticeLooks(rows, layout.cells), [rows, layout]);
+  // The thread of steps (docs/feat/mobile-tool-rows.md S2) and each harness
+  // line's glyph (docs/feat/mobile-harness-notices.md S1), derived by the store
+  // from the FULL rows; the live "Thinking…" node is `TailPane`'s.
+  const cells = useMemo(() => new Map(rowsSlice.cells), [rowsSlice.cells]);
+  const looks = useMemo(() => new Map(rowsSlice.looks), [rowsSlice.looks]);
   // What a memoized transcript cell can ask of the screen: ONE stable handle,
   // refreshed every render, so a skipped cell's tap still sees the latest state
   // (`TranscriptCell.tsx`).
@@ -959,8 +958,8 @@ export function SessionScreen({
   // offset and draws the overlay. State changes only when the row's key / line /
   // push changes, never per frame; `follow.ts` is untouched (read-only tap-in).
   const outputSteps = useMemo(
-    () => openOutputSteps(rows, openSteps, fullSteps, layout.cells, compactShell),
-    [rows, openSteps, fullSteps, layout, compactShell],
+    () => openOutputSteps(settled, openSteps, fullSteps, cells, compactShell),
+    [settled, openSteps, fullSteps, cells, compactShell],
   );
   const cellRects = useRef(new Map<string, CellRect>());
   const MeasuredCell = useMemo(() => measuredCell(cellRects.current), []);
@@ -1000,10 +999,6 @@ export function SessionScreen({
       list.current?.scrollToOffset({ offset: top, animated: false });
     }
   }, []);
-  // What `renderItem` reads besides the row itself. A fresh array on every render
-  // would re-render every row on any state change; the Beta switches change
-  // rarely, so the identity is keyed on the two values that decide a row's look
-  // (the read-aloud state and whether the speaker is offered at all).
   // Activity (docs/feat/mobile-chrome.md S8): the sheet, which report it shows,
   // and a 1 s clock for the elapsed times while it is open. Every value is
   // `activity.ts`'s; the reports are joined from the transcript by note id.
@@ -1141,7 +1136,7 @@ export function SessionScreen({
   }, [activityOpen, activityVm, activityFocus, closeActivity]);
   // "Show in chat": the report's own row, scrolled to with the sheet closed; the
   // list stops following so the next delta does not pull it back (`shown`).
-  const showIndex = showRow(rows, shownReport);
+  const showIndex = showRow(data, shownReport);
   const showInChat = () => {
     if (showIndex === null) {
       return;
@@ -1159,36 +1154,6 @@ export function SessionScreen({
     () => DIAGRAM_SETTINGS.current().style,
   );
   useEffect(() => DIAGRAM_SETTINGS.subscribe((next) => setDiagramStyle(next.style)), []);
-  const rowExtraData = useMemo(
-    () => ({
-      diagramStyle,
-      readAloud: voiceState?.readAloud,
-      speakShown: voiceSettings.readAloudButton,
-      // An agent card's link follows the live/Finished lists.
-      activity,
-      // A step's open/show-all state, and its cell: a reasoning row turns hidden
-      // when a tool follows it, with the row itself unchanged.
-      openSteps,
-      fullSteps,
-      layout,
-      // A notice's glyph/join (docs/feat/mobile-harness-notices.md S1): a block's
-      // head changes when a neighbour arrives, with the row itself unchanged.
-      looks,
-      // Beta `Compact shell rows`: a step re-projects with no row change.
-      compactShell,
-    }),
-    [
-      diagramStyle,
-      voiceState?.readAloud,
-      voiceSettings.readAloudButton,
-      activity,
-      openSteps,
-      fullSteps,
-      layout,
-      looks,
-      compactShell,
-    ],
-  );
   const compose = sheetsSlice.compose;
   // A turn that ends (own or another device's) taps the hand once (Owner Q4);
   // news landing on the hub glows once (mobile-hub-badges Q1 C). Both are decided
@@ -1211,11 +1176,12 @@ export function SessionScreen({
   const [hubNotice, setHubNotice] = useState<string | null>(null);
   const [artifactsSeen, setArtifactsSeen] = useState(() => ARTIFACT_SEEN.current());
   useEffect(() => ARTIFACT_SEEN.subscribe(setArtifactsSeen), []);
-  // The closed menu is ONE constant: `rows` moves per delta, the pane's prop not.
+  // The closed menu is ONE constant. It reads the SETTLED rows (s4 decision 6):
+  // "Copy last answer" mid-stream copies the last complete one.
   const wakes = hubSlice.schedules?.length ?? 0;
   const menu = useMemo(
-    () => (menuOpen ? sessionMenu(rows, wakes) : NO_MENU),
-    [menuOpen, rows, wakes],
+    () => (menuOpen ? sessionMenu(settled, wakes) : NO_MENU),
+    [menuOpen, settled, wakes],
   );
   // Session info (docs/feat/mobile-session-info.md): the sheet, and which row the
   // person expanded. Every value it draws is decided in `session-info.ts`.
@@ -1267,6 +1233,75 @@ export function SessionScreen({
   const [chartSettings, setChartSettings] = useState<ChartSettings>(() => CHART_SETTINGS.current());
   useEffect(() => CHART_SETTINGS.subscribe(setChartSettings), []);
   const a11yFlags = useAccessibilityFlags();
+  // Everything a cell reads besides its row (s4 decision 5): `renderItem`'s key
+  // AND the list's `extraData`, so the two cannot disagree. No streamed delta
+  // changes a member. With `strictMode` the list re-runs its cells only then.
+  const artifactsOn = onOpenArtifacts !== undefined;
+  const cellEnv = useMemo<CellEnv>(
+    () => ({
+      palette,
+      thumbnails: rowsSlice.thumbnails,
+      diagramStyle,
+      chartLabels: chartSettings.labels,
+      reduceMotion: a11yFlags.reduceMotion,
+      compactShell,
+      voice: voice !== null,
+      readAloud: voiceState?.readAloud,
+      speakShown: voiceSettings.readAloudButton,
+      artifacts: artifactsOn,
+      activity,
+      cells,
+      looks,
+      openSteps,
+      fullSteps,
+    }),
+    [
+      palette,
+      rowsSlice.thumbnails,
+      diagramStyle,
+      chartSettings.labels,
+      a11yFlags.reduceMotion,
+      compactShell,
+      voice,
+      voiceState?.readAloud,
+      voiceSettings.readAloudButton,
+      artifactsOn,
+      activity,
+      cells,
+      looks,
+      openSteps,
+      fullSteps,
+    ],
+  );
+  const renderCell = useCallback(
+    ({ item }: { readonly item: ListItem }) => {
+      PERF.pane("cells");
+      if (item.kind === "live") {
+        return <LiveCell store={store} env={cellEnv} actions={cellActions} rowKey={item.key} />;
+      }
+      // Folded into a step or the footer: a 0 pt cell, and never swipeable
+      // (null BEFORE SwipeTime wraps it).
+      if (cellEnv.cells.get(item.key)?.kind === "hidden") {
+        return null;
+      }
+      // One row that throws while drawing is its fallback, never an app abort
+      // (docs/fix/mobile-crash-ibm-chart.md). Memoized on its data
+      // (docs/fix/mobile-fan-jank-device.md).
+      return <TranscriptCell {...cellDataOf(item, cellEnv, false)} actions={cellActions} />;
+    },
+    [cellEnv, store],
+  );
+  const tailFooter = useMemo(
+    () => (
+      <TailPane
+        store={store}
+        palette={palette}
+        reduceMotion={a11yFlags.reduceMotion}
+        controller={controller}
+      />
+    ),
+    [store, palette, a11yFlags.reduceMotion, controller],
+  );
   const [band, setBand] = useState<FloatBounds | null>(null);
   const pillShown =
     activityVm.badge && headerPill({ mode: activitySettings.mode, voiceOver: a11yFlags.voiceOver });
@@ -1779,7 +1814,7 @@ export function SessionScreen({
   };
   const unseen = hubBadgeInput.unseenArtifacts;
   const unread = hubBadgeInput.unreadReport;
-  const linkUp = rowsSlice.transcript.link === "up";
+  const linkUp = rowsSlice.link === "up";
   // The moment news arrives (mobile-hub-badges Design 4, Q1 C + Q4): one glow on
   // the button, one light haptic — unless a turn ended in this same render, whose
   // `success` is the moment's one haptic (F4). ONE effect and ONE pure step decide
@@ -1976,116 +2011,19 @@ export function SessionScreen({
               ref={list}
               CellRendererComponent={MeasuredCell}
               testID="transcript"
-              data={rows}
+              strictMode
+              data={data}
               maxToRenderPerBatch={landingBatch(settling)}
-              keyExtractor={(row: Row) => row.key}
-              renderItem={({ item }) => {
-                const cell = layout.cells.get(item.key);
-                // Folded into a step or the footer: a 0 pt cell, and never
-                // swipeable (null BEFORE SwipeTime wraps it).
-                if (cell?.kind === "hidden") {
-                  return null;
-                }
-                const speak = speakButtonOf(
-                  voiceState,
-                  item,
-                  rows,
-                  rowsSlice.view.composer.running,
-                  voiceSettings,
-                );
-                const child =
-                  item.kind === "tool"
-                    ? agentCardTarget(
-                        item.id,
-                        item.sub?.movedTo,
-                        activity.subagents,
-                        activity.memory.finished,
-                      )
-                    : null;
-                // One row that throws while drawing is its fallback, never an
-                // app abort (docs/fix/mobile-crash-ibm-chart.md). Memoized on
-                // its data (docs/fix/mobile-fan-jank-device.md): a streaming
-                // turn redraws its last row, not every visible one.
-                return (
-                  <TranscriptCell
-                    row={item}
-                    cell={cell}
-                    look={item.kind === "notice" ? looks.get(item.key) : undefined}
-                    open={isOpen(openSteps, item.key)}
-                    full={isOpen(fullSteps, item.key)}
-                    reduceMotion={a11yFlags.reduceMotion}
-                    compactShell={compactShell}
-                    speak={speak}
-                    child={child}
-                    voice={voice !== null}
-                    artifacts={onOpenArtifacts !== undefined}
-                    palette={palette}
-                    thumbnails={rowsSlice.thumbnails}
-                    diagramStyle={diagramStyle}
-                    chartLabels={chartSettings.labels}
-                    actions={cellActions}
-                  />
-                );
-              }}
-              extraData={rowExtraData}
-              // The live "Thinking…" node (Owner Q2): the thread's last node while
-              // the turn thinks, under the rows so their keys never shift. The
-              // PENDING bubbles follow it (docs/feat/mobile-queued-compose.md D1):
-              // a queued message is read at the next step, so it IS the thread's last
-              // node — and it leaves in the `queued` that drops its row.
-              ListFooterComponent={
-                layout.tail === null &&
-                rowsSlice.slot === null &&
-                rowsSlice.view.pending.length === 0 ? undefined : (
-                  <>
-                    {/* The compaction slot (mobile-hub-commands C2 item 15): in the
-                        Thinking node's place; `slotView` already yields to a turn. */}
-                    {rowsSlice.slot === null ? null : (
-                      <CompactSlotNode
-                        palette={palette}
-                        slot={rowsSlice.slot}
-                        reduceMotion={a11yFlags.reduceMotion}
-                      />
-                    )}
-                    {layout.tail === null ? null : (
-                      <ThinkingNode
-                        palette={palette}
-                        thought={layout.tail.thought}
-                        up={layout.tail.up}
-                        {...(layout.tail.since === undefined ? {} : { since: layout.tail.since })}
-                        reduceMotion={a11yFlags.reduceMotion}
-                      />
-                    )}
-                    <PendingBubbles
-                      bubbles={rowsSlice.view.pending}
-                      palette={palette}
-                      ctx={{
-                        link: rowsSlice.view.state === "Live",
-                        turn: rowsSlice.view.composer.running,
-                        sendNow: compose.sendNow,
-                        unqueue: !compose.unqueueOff,
-                      }}
-                      onAction={(id, action) => {
-                        switch (action) {
-                          case "edit":
-                            void controller.edit(id);
-                            return;
-                          case "cancel":
-                            void controller.cancel(id);
-                            return;
-                          case "send-now":
-                            void controller.sendNowRow(id);
-                            return;
-                        }
-                      }}
-                    />
-                  </>
-                )
-              }
+              keyExtractor={(item: ListItem) => item.key}
+              renderItem={renderCell}
+              extraData={cellEnv}
+              // The live "Thinking…" node, the compaction slot and the pending
+              // bubbles, under the rows so their keys never shift.
+              ListFooterComponent={tailFooter}
               onViewableItemsChanged={onViewable}
               viewabilityConfig={{ itemVisiblePercentThreshold: 10 }}
               contentContainerStyle={
-                rows.length === 0
+                data.length === 0
                   ? styles.emptyList
                   : [
                       styles.list,
@@ -2172,7 +2110,7 @@ export function SessionScreen({
               band's own edges clip it — behind the header above, behind the
               composer below — and it unmounts the moment a row arrives (owner
               decision 5). */}
-          {showsScene({ phase: rowsSlice.status.phase, rowCount: rows.length }) && !settling ? (
+          {showsScene({ phase: rowsSlice.status.phase, rowCount: data.length }) && !settling ? (
             <MascotSceneLayer
               geometry={band ?? { width: 0, height: 0 }}
               reduceMotion={a11yFlags.reduceMotion}
