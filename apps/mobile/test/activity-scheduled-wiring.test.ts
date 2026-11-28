@@ -15,10 +15,11 @@ const src = (file: string): string =>
 describe("Activity ▸ Scheduled wiring", () => {
   test("the screen feeds the daemon's wakes into the Activity view", () => {
     const screen = src("SessionScreen.tsx");
-    const at = screen.indexOf("activityView(");
+    const at = screen.indexOf("const activityInput = useMemo");
     expect(at).toBeGreaterThan(-1);
-    const call = screen.slice(at, screen.indexOf("activityNow,", at));
-    expect(call).toContain("schedules: hubSlice.schedules");
+    const input = screen.slice(at, screen.indexOf("const activityVm", at));
+    expect(input).toContain("schedules: hubSlice.schedules");
+    expect(screen).toContain("activityView(activityInput, activityStamp)");
   });
 
   test("the sheet paints no hard-coded ghost value", () => {

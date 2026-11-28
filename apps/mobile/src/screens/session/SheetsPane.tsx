@@ -5,20 +5,22 @@
  * sheet reads changed — never per streamed delta. A dumb renderer (AGENTS §7):
  * which sheet is up is the shell's reconciler; what one does is its `actions`.
  */
-import { type JSX, memo, useLayoutEffect } from "react";
+import { type ComponentProps, type JSX, memo, useLayoutEffect, useMemo } from "react";
 import type { StopArm } from "../../activity-panel.ts";
-import type { ActivityView } from "../../activity.ts";
+import { type ActivityInput, activityView } from "../../activity.ts";
 import { browserPageOf } from "../../browser-view.ts";
 import { playHaptic } from "../../haptics.ts";
 import type { HubActionId, HubItem } from "../../hub-actions.ts";
+import { ACTIVITY_CLOCK_TICK_MS } from "../../motion.ts";
 import { PERF } from "../../perf-probe.ts";
 import type { SessionMenuAction } from "../../session-menu.ts";
 import type { SessionStore } from "../../session-store.ts";
 import { SHEET_HOSTS } from "../../sheet-host.ts";
-import type { ActivityFocus, sheetDetail } from "../../subagent-detail.ts";
+import { type ActivityFocus, type SheetDetailInput, sheetDetail } from "../../subagent-detail.ts";
 import type { Palette } from "../../theme.ts";
 import { type ToolsSegmentId, toolsView } from "../../tools-view.ts";
 import { ActionSheet } from "../../ui/ActionSheet.tsx";
+import { useWallClock } from "../../use-since.ts";
 import { useSlice } from "../../use-slice.ts";
 import { ActivitySheet } from "../ActivitySheet.tsx";
 import { BrowserPage } from "../BrowserPage.tsx";
@@ -52,14 +54,43 @@ interface SheetsPaneProps {
   readonly menu: readonly SessionMenuAction[];
   readonly selectText: string | null;
   readonly activityOpen: boolean;
-  readonly activityVm: ActivityView;
-  readonly activityDetail: ReturnType<typeof sheetDetail>;
+  readonly activityInput: ActivityInput;
+  readonly detailInput: SheetDetailInput;
   readonly activityFocus: ActivityFocus;
-  readonly activityNow: number;
   readonly arm: StopArm;
   /** "Show in chat" has a row to go to. */
   readonly canShow: boolean;
   readonly reduceMotion: boolean;
+}
+
+/**
+ * The Activity sheet on its own clock (docs/feat/mobile-ui-fluidity-s7.md): the
+ * running times and the Stop arm are the only things that read the time now, so
+ * a tick re-renders THIS leaf and the sheet — never the screen or this pane.
+ */
+function ActivityClockSheet({
+  activityInput,
+  detailInput,
+  visible,
+  focus,
+  ...sheet
+}: Omit<ComponentProps<typeof ActivitySheet>, "view" | "detail" | "now"> & {
+  readonly activityInput: ActivityInput;
+  readonly detailInput: SheetDetailInput;
+}): JSX.Element {
+  const now = useWallClock(visible, ACTIVITY_CLOCK_TICK_MS);
+  const view = useMemo(() => activityView(activityInput, now), [activityInput, now]);
+  const detail = useMemo(() => sheetDetail(focus, detailInput, now), [focus, detailInput, now]);
+  return (
+    <ActivitySheet
+      {...sheet}
+      visible={visible}
+      focus={focus}
+      view={view}
+      detail={detail}
+      now={now}
+    />
+  );
 }
 
 export const SheetsPane = memo(function SheetsPane(props: SheetsPaneProps): JSX.Element {
@@ -255,13 +286,12 @@ export const SheetsPane = memo(function SheetsPane(props: SheetsPaneProps): JSX.
         }))}
         onCancel={() => actions.current.closeMenu()}
       />
-      <ActivitySheet
+      <ActivityClockSheet
         palette={palette}
         visible={props.activityOpen && !yields}
-        view={props.activityVm}
-        detail={props.activityDetail}
+        activityInput={props.activityInput}
+        detailInput={props.detailInput}
         focus={props.activityFocus}
-        now={props.activityNow}
         child={activity.child}
         job={activity.job}
         onFocus={(next) => actions.current.focusActivity(next)}

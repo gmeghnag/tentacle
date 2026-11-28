@@ -23,12 +23,14 @@ import Svg, { Rect } from "react-native-svg";
 import {
   type MascotDraw,
   type MascotGeometry,
+  type Op,
   type Pixel,
   colorsFor,
   drawOnce,
   frameAt,
   pixels,
   rectKey,
+  sameFrame,
   sceneByKey,
   sceneMemory,
   stillFrame,
@@ -58,7 +60,15 @@ export function MascotSceneLayer({
   // flip reuses all three, so a scene is never restarted mid-way.
   const [drawn] = useState<MascotDraw>(() => (pick === undefined ? drawOnce(memory) : pick()));
   const scene = sceneByKey(drawn.scene);
-  const [elapsedMs, setElapsedMs] = useState(0);
+  // The picture on screen. The clock ticks at the display rate, but most ticks
+  // draw the same picture: only a changed one is stored, so only it re-renders
+  // (docs/feat/mobile-ui-fluidity-s7.md).
+  const [frame, setFrame] = useState<readonly Op[]>(() =>
+    frameAt(scene, 0, drawn.run, { eyeFade }),
+  );
+  // Read through a ref: a theme flip lands on the next frame, the clock stays.
+  const fade = useRef(eyeFade);
+  fade.current = eyeFade;
   // The clock's origin, set by the first tick and never reset (a re-render must
   // not move it). `null` until the loop has started.
   const origin = useRef<number | null>(null);
@@ -78,26 +88,25 @@ export function MascotSceneLayer({
         origin.current = Date.now();
       }
       const elapsed = Date.now() - origin.current;
-      if (elapsed >= scene.durationMs) {
-        // The scene is over: one last state, then no more frames (owner 4).
-        setElapsedMs(scene.durationMs);
-        return;
+      const next = frameAt(scene, elapsed, drawn.run, { eyeFade: fade.current });
+      setFrame((prev) => (sameFrame(prev, next) ? prev : next));
+      // Over: that last frame is empty, and no more are asked for (owner 4).
+      if (elapsed < scene.durationMs) {
+        handle = globalThis.requestAnimationFrame(tick);
       }
-      setElapsedMs(elapsed);
-      handle = globalThis.requestAnimationFrame(tick);
     };
     handle = globalThis.requestAnimationFrame(tick);
     return () => {
       live = false;
       globalThis.cancelAnimationFrame(handle);
     };
-  }, [reduceMotion, scene.durationMs]);
+  }, [reduceMotion, scene, drawn.run]);
 
   // Nothing to draw before the band is measured (no flash at the top, no divide).
   if (geometry.width <= 0 || geometry.height <= 0) {
     return null;
   }
-  const ops = reduceMotion ? stillFrame() : frameAt(scene, elapsedMs, drawn.run, { eyeFade });
+  const ops = reduceMotion ? stillFrame() : frame;
   const rects: readonly Pixel[] = pixels(ops, geometry, colorsFor(drawn.palette));
   if (rects.length === 0) {
     return null;

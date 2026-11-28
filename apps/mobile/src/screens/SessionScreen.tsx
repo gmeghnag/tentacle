@@ -60,7 +60,7 @@ import {
 import { ACTIVITY_SETTINGS } from "../activity-settings-expo.ts";
 import type { ActivitySettings } from "../activity-settings-store.ts";
 import { listEndOn } from "../activity-settings-store.ts";
-import { activityView } from "../activity.ts";
+import { type ActivityInput, activityView } from "../activity.ts";
 import type { AppLogField } from "../app-log.ts";
 import { ARTIFACT_SEEN } from "../artifact-seen-expo.ts";
 import { seenFor } from "../artifact-seen-store.ts";
@@ -141,7 +141,6 @@ import {
   flashReleased,
   messageCopy,
 } from "../message-copy.ts";
-import { ACTIVITY_CLOCK_TICK_MS } from "../motion.ts";
 import { type StickyBlock, openOutputSteps, stickyState } from "../output-sticky.ts";
 import { PERF } from "../perf-probe.ts";
 import { type RevealTrack, reportReveal, startReveal, trackReveal } from "../reveal-report.ts";
@@ -187,7 +186,13 @@ import {
   yieldForeign,
 } from "../sheet-plan.ts";
 import { SPEECH_PORT } from "../speech-native-expo.ts";
-import { type ActivityFocus, sheetDetail, showRow, stopConfirm } from "../subagent-detail.ts";
+import {
+  type ActivityFocus,
+  type SheetDetailInput,
+  sheetDetail,
+  showRow,
+  stopConfirm,
+} from "../subagent-detail.ts";
 import { type Palette, typography } from "../theme.ts";
 import { type ListItem, isOpen, listData, toggleOpen } from "../tool-steps.ts";
 import { type ToolsSegmentId, toolsSummary } from "../tools-view.ts";
@@ -999,58 +1004,56 @@ export function SessionScreen({
       list.current?.scrollToOffset({ offset: top, animated: false });
     }
   }, []);
-  // Activity (docs/feat/mobile-chrome.md S8): the sheet, which report it shows,
-  // and a 1 s clock for the elapsed times while it is open. Every value is
-  // `activity.ts`'s; the reports are joined from the transcript by note id.
+  // Activity (docs/feat/mobile-chrome.md S8): the sheet and which report it
+  // shows. Every value is `activity.ts`'s; the reports are joined from the
+  // transcript by note id. NOTHING here ticks (mobile-ui-fluidity-s7): the
+  // screen's reads are time-free, and the running times are the sheet's own
+  // clock (`SheetsPane`). `activityStamp` is when the sheet last opened.
   const [activityOpen, setActivityOpen] = useState(false);
   const [activityFocus, setActivityFocus] = useState<ActivityFocus>(null);
-  const [activityNow, setActivityNow] = useState(() => Date.now());
+  const [activityStamp, setActivityStamp] = useState(() => Date.now());
   useEffect(() => {
-    if (!activityOpen) {
-      return;
+    if (activityOpen) {
+      setActivityStamp(Date.now());
     }
-    setActivityNow(Date.now());
-    const timer = setInterval(() => setActivityNow(Date.now()), ACTIVITY_CLOCK_TICK_MS);
-    return () => clearInterval(timer);
   }, [activityOpen]);
   // The slice carries the reports as entries, so it compares them as data.
   const reports = useMemo(() => new Map(hubSlice.reports), [hubSlice.reports]);
   const activity = hubSlice.activity;
-  // Memoized, like the detail below: both are `SheetsPane` props, and a streamed
-  // delta changes none of their inputs.
+  // Memoized, like the view and the detail below: both inputs are `SheetsPane`
+  // props, and a streamed delta changes nothing they are made of.
+  const activityInput = useMemo<ActivityInput>(
+    () => ({
+      subagents: activity.subagents,
+      jobs: activity.jobs,
+      finished: activity.memory.finished,
+      reports,
+      opened: activity.memory.opened,
+      schedules: hubSlice.schedules,
+    }),
+    [activity, reports, hubSlice.schedules],
+  );
+  const detailInput = useMemo<SheetDetailInput>(
+    () => ({
+      subagents: activity.subagents,
+      jobs: activity.jobs?.rows ?? null,
+      finished: activity.memory.finished,
+      reports,
+      sent: activity.sent,
+      job: activity.job,
+    }),
+    [activity, reports],
+  );
   const activityVm = useMemo(
-    () =>
-      activityView(
-        {
-          subagents: activity.subagents,
-          jobs: activity.jobs,
-          finished: activity.memory.finished,
-          reports,
-          opened: activity.memory.opened,
-          schedules: hubSlice.schedules,
-        },
-        activityNow,
-      ),
-    [activity, reports, hubSlice.schedules, activityNow],
+    () => activityView(activityInput, activityStamp),
+    [activityInput, activityStamp],
   );
   // S9: the open detail — a child's (live, or Finished with its report) or a
-  // shell job's — as `sheetDetail` resolves it NOW (a child that ends while open
+  // shell job's — as `sheetDetail` resolves it (a child that ends while open
   // flips to its report, F14).
   const activityDetail = useMemo(
-    () =>
-      sheetDetail(
-        activityFocus,
-        {
-          subagents: activity.subagents,
-          jobs: activity.jobs?.rows ?? null,
-          finished: activity.memory.finished,
-          reports,
-          sent: activity.sent,
-          job: activity.job,
-        },
-        activityNow,
-      ),
-    [activityFocus, activity, reports, activityNow],
+    () => sheetDetail(activityFocus, detailInput, activityStamp),
+    [activityFocus, detailInput, activityStamp],
   );
   const shownReport = activityDetail?.kind === "child" ? activityDetail.report : null;
   // A report counts as opened once it is ON SCREEN (also when a child the person
@@ -1097,19 +1100,19 @@ export function SessionScreen({
   useEffect(() => {
     setArm((prev) => pruneArm(prev, rowIds));
   }, [rowIds]);
-  // The armed pill reverts on its own: one timer, only while something is armed
-  // (it bumps the panel's clock, which is what `stopArmed` reads).
+  // The armed pill reverts on its own: one timer, only while something is armed.
+  // It DISARMS: the sheet's clock is floored to a second, so the window's end is
+  // a state change, not a time the sheet has to notice (mobile-ui-fluidity-s7).
   useEffect(() => {
     if (arm.id === null) {
       return;
     }
-    const timer = setTimeout(() => setActivityNow(Date.now()), STOP_ARM_MS + 20);
+    const timer = setTimeout(() => setArm(STOP_IDLE), STOP_ARM_MS + 20);
     return () => clearTimeout(timer);
   }, [arm]);
   const stopRow = (kind: "child" | "job", id: string) => {
     const tap = stopTap(arm, id, Date.now());
     setArm(tap.state);
-    setActivityNow(Date.now());
     if (tap.fire) {
       playHaptic("firm");
       void controller.stopRow(kind, id);
@@ -1466,7 +1469,7 @@ export function SessionScreen({
       // workflows-ux D6). Both are this screen's facts: the controller reads the
       // catalogue at the attach, `workflowsRuns` comes from the app's own hook.
       ...(workflowsFigure === undefined ? {} : { workflows: workflowsFigure }),
-      schedules: { rows: hubSlice.schedules, now: activityNow },
+      schedules: { rows: hubSlice.schedules, now: activityStamp },
       // The Tools item's own figures, from the sheet's OWN summary (one source,
       // D1/D3): unknown until the controller has pulled both lists.
       ...(info === null ? {} : { tools: toolsSummary(info.tools) }),
@@ -1485,7 +1488,7 @@ export function SessionScreen({
     workflowsRuns,
     voiceSettings.dictation,
     activityVm,
-    activityNow,
+    activityStamp,
     artifactsSeenKey,
     artifactsSeen,
   ]);
@@ -2204,10 +2207,9 @@ export function SessionScreen({
           menu={menu}
           selectText={selectText}
           activityOpen={activityOpen}
-          activityVm={activityVm}
-          activityDetail={activityDetail}
+          activityInput={activityInput}
+          detailInput={detailInput}
           activityFocus={activityFocus}
-          activityNow={activityNow}
           arm={arm}
           canShow={showIndex !== null}
           reduceMotion={a11yFlags.reduceMotion}
