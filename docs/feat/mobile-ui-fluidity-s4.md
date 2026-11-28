@@ -600,4 +600,59 @@ orchestrator's and was not run.
 
 ## Review
 
-*(empty — fresh-context Opus review)*
+*— claude-opus-5-5, 2026-11-28* (fresh context; same model as the planner,
+different from the executor — planner/reviewer blind spots may be shared).
+
+**Verdict: APPROVE-WITH-NITS** (no HIGH; one MEDIUM to track, one unverified item).
+
+**Gate (re-run here):** `bun test apps/mobile/test/` 5965 pass / 0 fail;
+`bun run typecheck` clean (all four `tsc`); `bun run lint` clean (2827 files).
+Full parallel `bun run test` not re-run (orchestrator's, at merge).
+
+**Mutations (applied, red, reverted; `git status` clean after each):**
+(a) `transcript: ["rows"]` → 5 red in `session-store.test.ts` (A1, A2, A9, the
+two table tests). (b) `keepMembers` returns `b` instead of `out` → A6 red (2).
+(c) `strictMode` removed → `list-stream-wiring` pin red. (d) `liveRow` ignores
+`running` → A8 + 2 `tool-steps` red. (e) not run (simulator).
+
+**Findings**
+
+1. **MEDIUM — the `coupling` gate passes with a 3 % margin on `cells`, and
+   `cells` is not delta-coupled.** `e2e/perf-budget.ts:160-166` limits every
+   non-tail count to `max(10, 0.1 × tail)`; Gate 0 measured `cells=118` vs a
+   limit of 121.8 with `shell=3`. `renderCell` (`SessionScreen.tsx:376-393`) is
+   keyed on `cellEnv`, which changes at every tool/text transition (`cells`
+   member), and with `strictMode` each change re-runs every MOUNTED cell; new
+   rows mount too. So `cells` scales with mounted-window size × transitions, not
+   with deltas. Failure: a flow-90 stream with a few more tool rounds, a longer
+   preloaded transcript (bigger window) or a slightly shorter stream (smaller
+   `tail`) turns flow 90 red with no real coupling — a flaky gate. Fix in a
+   follow-up: measure cells per delta (e.g. count `renderItem` calls only when
+   `cellEnv`/`data` identity did NOT change since the previous call), or budget
+   `cells` against mounted cells × env changes; until then record the margin.
+2. **Unverified (plan acceptance) — the live→settled handoff.** Decision 1's
+   no-blink claim has no screenshot/frame evidence (Execution says so). The
+   handoff remounts the subtree (`LiveCell` → `TranscriptCell` changes element
+   type at the same index); code reading finds no mount animation on assistant
+   rows, only `DiffView`'s local `open` state (reset on settle — cosmetic). To
+   verify: view `.tentacle/tmp/mobile-ui-fluidity-s4/flow07.mp4` at reply end.
+
+**Premises checked:** `liveRow` ≡ `streamingRowKey` on assistant
+(`read-aloud.ts:159-165`), so `cellDataOf(row, env, live)` with `[row]`/`[]`
+reproduces `speakButtonOf` exactly — TRUE. Only reasoning/tool rows are ever
+`HIDDEN` (`tool-steps.ts:280-320`), so the `live` branch skipping the hidden
+check is safe — TRUE. `controller.window` reads only `kind`
+(`session-screen-controller.ts:597`), so a `LiveSlot` in `data` is harmless —
+TRUE. Typecheck enforces that the shell no longer reads `view.rows`/`slot`/
+`view.pending` from `rows` — TRUE.
+
+**Attacks tried:** speaker parity list/live × streaming/speaking (holds);
+torn read at settle (both slices from one publish; `LiveCell` nulls on key
+mismatch — holds); voice turn-end reads `settled` (= all rows when
+`running` false, A8 non-vacuous — holds); `keepMembers` view recursion and
+missing-key paths (holds); non-running deltas (foreign turn with
+`turn === null`) fall back to today's per-delta list render — not worse;
+§7: mobile-only, no protocol/persistence/trust surface touched — holds.
+
+**Executor behaviour:** honest — it flagged the `cells` margin and the missing
+screenshots itself, and recorded which mutation was not run.
