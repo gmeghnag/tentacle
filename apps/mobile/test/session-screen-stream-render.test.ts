@@ -22,10 +22,10 @@ async function settle(): Promise<void> {
   }
 }
 
-function harness() {
+function harness(onFold?: (clock: { at: number }) => void) {
   let watcher: ((activity: SessionActivity) => void) | null = null;
   const clock = { at: 1000 };
-  const timers: { at: number; fn: () => void; live: boolean }[] = [];
+  const timers: { at: number; ms: number; fn: () => void; live: boolean }[] = [];
   const states: SessionScreenState[] = [];
   const handle: SendableHandle = {
     open: () => Promise.resolve(),
@@ -47,13 +47,14 @@ function harness() {
     broker: new PermissionBroker(undefined, { holdUntilSet: true }),
     now: () => clock.at,
     schedule: (fn, ms) => {
-      const timer = { at: clock.at + ms, fn, live: true };
+      const timer = { at: clock.at + ms, ms, fn, live: true };
       timers.push(timer);
       return () => {
         timer.live = false;
       };
     },
     onChange: (state) => states.push(state),
+    ...(onFold === undefined ? {} : { onStreamFold: () => onFold(clock) }),
   });
   const advance = (ms: number): void => {
     clock.at += ms;
@@ -68,6 +69,16 @@ function harness() {
     screen,
     states,
     advance,
+    /** Run the next armed 0 ms timer (the feed's yield and flush), if any. */
+    fireImmediate(): boolean {
+      const timer = timers.find((t) => t.live && t.ms === 0);
+      if (timer === undefined) {
+        return false;
+      }
+      timer.live = false;
+      timer.fn();
+      return true;
+    },
     live: () => timers.filter((t) => t.live).length,
     emit: (a: SessionActivity) => watcher?.(a),
   };
@@ -174,6 +185,38 @@ describe("streamed deltas re-render the screen at most once per window", () => {
     await settle();
     expect(h.states.length).toBe(before + 1);
     expect(h.live()).toBe(0);
+  });
+});
+
+describe("a backlog is folded in slices (docs/feat/mobile-ui-fluidity-s6.md)", () => {
+  test("5000 queued deltas: merged folds, a yield on the screen's timer, the whole text", async () => {
+    let folds = 0;
+    // Each fold costs clock time, which is what spends the slice.
+    const h = harness((clock) => {
+      folds += 1;
+      clock.at += 0.125;
+    });
+    await h.screen.open();
+    await settle();
+    const turn = pushedTurn();
+    for (let i = 0; i < 5000; i += 1) {
+      turn.push({ type: "reasoning", delta: `w${i} ` } as SessionEvent);
+    }
+    h.emit(turn.activity);
+    let yields = 0;
+    for (;;) {
+      await new Promise((resolve) => setImmediate(resolve));
+      if (!h.fireImmediate()) {
+        break;
+      }
+      yields += 1;
+    }
+    expect(folds).toBeLessThan(500);
+    expect(yields).toBeGreaterThanOrEqual(1);
+    h.advance(STREAM_RENDER_MS);
+    const row = h.states[h.states.length - 1]?.view.rows.find((r) => r.kind === "reasoning");
+    const text = row !== undefined && "text" in row ? String(row.text) : "";
+    expect(text).toBe(Array.from({ length: 5000 }, (_, i) => `w${i} `).join(""));
   });
 });
 

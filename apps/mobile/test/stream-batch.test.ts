@@ -9,7 +9,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@tentacle/client";
-import { createBatcher } from "../src/stream-batch.ts";
+import { GAP_MS, SLICE_MS, createBatcher, createSlicer } from "../src/stream-batch.ts";
 import { type State, apply, initialState } from "../src/transcript.ts";
 
 const prose = (delta: string): SessionEvent => ({ type: "text", delta });
@@ -46,6 +46,44 @@ const STREAM: readonly SessionEvent[] = [
   { type: "tool_result", id: "c1", name: "shell", result: { content: "ok" } },
   prose("All good."),
 ];
+
+describe("the slicer (a backlog's time budget)", () => {
+  /** One event: arrives at `t`, its fold ends `cost` later. */
+  const step = (slicer: ReturnType<typeof createSlicer>, t: number, cost: number): boolean => {
+    slicer.arrive(t);
+    return slicer.done(t + cost);
+  };
+
+  test("continuous folds report spent at SLICE_MS, not before", () => {
+    const slicer = createSlicer();
+    for (let t = 0; t < SLICE_MS - 1; t += 1) {
+      expect(step(slicer, t, 1)).toBe(false);
+    }
+    expect(step(slicer, SLICE_MS - 1, 1)).toBe(true);
+  });
+
+  test("a gap of GAP_MS or more starts a new slice", () => {
+    const slicer = createSlicer();
+    expect(step(slicer, 0, SLICE_MS - 1)).toBe(false);
+    // The loop waited: the old slice's time does not count against this one.
+    expect(step(slicer, SLICE_MS - 1 + GAP_MS, SLICE_MS - 1)).toBe(false);
+    expect(step(slicer, 1000, SLICE_MS - 1)).toBe(false);
+  });
+
+  test("a 1 ms tick (below GAP_MS) is not a wait", () => {
+    const slicer = createSlicer();
+    expect(step(slicer, 0, 4)).toBe(false);
+    expect(step(slicer, 5, 3)).toBe(true);
+  });
+
+  test("reset starts over", () => {
+    const slicer = createSlicer();
+    expect(step(slicer, 0, SLICE_MS - 1)).toBe(false);
+    slicer.reset();
+    expect(step(slicer, SLICE_MS - 1, 1)).toBe(false);
+    expect(step(slicer, SLICE_MS, SLICE_MS)).toBe(true);
+  });
+});
 
 describe("batched equals unbatched", () => {
   test("a fast stream (every push inside one window)", () => {

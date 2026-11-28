@@ -1,0 +1,1 @@
+- **Opening a session in the middle of a long reply no longer freezes the app while it catches up.** The replayed backlog is folded in short slices, with the text merged, so the screen keeps responding.

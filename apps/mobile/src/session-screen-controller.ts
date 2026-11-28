@@ -873,7 +873,18 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     initialThumbnails,
   );
 
+  /** The screen's one timer source: the store's render window and the feed's yields. */
+  const schedule =
+    deps.schedule ??
+    ((fn: () => void, ms: number) => {
+      const timer = setTimeout(fn, ms);
+      return () => clearTimeout(timer);
+    });
+
   const feed = createSessionFeed({
+    // A backlog (attach, reconnect, a burst) is folded in slices
+    // (docs/feat/mobile-ui-fluidity-s6.md).
+    slice: { clock: () => deps.now(), schedule },
     state: () => transcript,
     put: (next, cause) => {
       if (cause === "stream") {
@@ -1518,12 +1529,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       return state();
     },
     clock: () => deps.now(),
-    schedule:
-      deps.schedule ??
-      ((fn, ms) => {
-        const timer = setTimeout(fn, ms);
-        return () => clearTimeout(timer);
-      }),
+    schedule,
   });
   // The whole-state listeners (decision 3): the tests' and `deps.onChange`'s
   // contract. The screen follows slices instead.

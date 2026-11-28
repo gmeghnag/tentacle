@@ -26,6 +26,7 @@ import type { SessionActivity, SessionEvent } from "@tentacle/client";
 import type { AttachmentRef } from "@tentacle/protocol";
 import { type ErrorShape, errorShape } from "./app-log.ts";
 import type { QueueTrace } from "./queue-trace.ts";
+import { createBatcher, createSlicer } from "./stream-batch.ts";
 import {
   type LocalPhoto,
   type State,
@@ -122,6 +123,15 @@ export interface SessionFeedDeps {
    * time; history rows always take the daemon's.
    */
   readonly now?: () => number;
+  /**
+   * The ingestion budget's clock and timer (docs/feat/mobile-ui-fluidity-s6.md):
+   * a backlog is folded in slices, yielding between them. Absent (a unit feed):
+   * every event folds as it is read.
+   */
+  readonly slice?: {
+    readonly clock: () => number;
+    readonly schedule: (fn: () => void, ms: number) => () => void;
+  };
 }
 
 /**
@@ -180,6 +190,150 @@ export interface SessionFeed {
 }
 
 /**
+ * Arrival order across the budget's yields. A stream that yielded mid-backlog is
+ * BEHIND: events it had already received (its `turn_end` maybe among them) are
+ * still unread, and the yield lets a later input in. Whatever arrives meanwhile
+ * WAITS, and is let through in arrival order, one per task, so a stream it opens
+ * drains (or falls behind itself) before the next one is applied.
+ */
+function createGate(slice: SessionFeedDeps["slice"]) {
+  let behind = 0;
+  const waiting: (() => void)[] = [];
+  let pumping = false;
+  const pump = (): void => {
+    if (slice === undefined || pumping || behind > 0 || waiting.length === 0) {
+      return;
+    }
+    pumping = true;
+    slice.schedule(() => {
+      pumping = false;
+      if (behind === 0) {
+        waiting.shift()?.();
+      }
+      pump();
+    }, 0);
+  };
+  /** Run `input` now, or after everything that arrived before it. */
+  const run = (input: () => void): void => {
+    if (behind === 0 && waiting.length === 0) {
+      input();
+    } else {
+      waiting.push(input);
+    }
+  };
+  return {
+    run,
+    /** `run` for a stream's fold: its promise settles as the fold's does. */
+    stream: (start: () => Promise<void>): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        run(() => {
+          start().then(resolve, reject);
+        });
+      }),
+    fellBehind(): void {
+      behind += 1;
+    },
+    caughtUp(): void {
+      behind -= 1;
+      pump();
+    },
+  };
+}
+
+type Gate = ReturnType<typeof createGate>;
+
+/**
+ * One stream's ingestion budget (docs/feat/mobile-ui-fluidity-s6.md). A live
+ * stream waits between its events and each folds at once. A BACKLOG is drained
+ * with no wait: once it has folded for a slice the loop yields to the event
+ * loop, and from there prose is held and merged until the budget, a type switch,
+ * a non-prose event, the stream's end — or, once the backlog drains into
+ * silence, the next task — releases it. From its first yield until it drains or
+ * ends, the stream is behind (`createGate`).
+ */
+function createPace(
+  slice: NonNullable<SessionFeedDeps["slice"]>,
+  fold: (event: SessionEvent) => void,
+  gate: Gate,
+) {
+  const slicer = createSlicer();
+  // Never released by time: see `createBatcher`.
+  const batcher = createBatcher(Number.POSITIVE_INFINITY);
+  let backlog = false;
+  /** Cancels the armed flush of held prose; null when none is armed. */
+  let deferred: (() => void) | null = null;
+  const release = (): void => {
+    deferred?.();
+    deferred = null;
+    for (const held of batcher.flush()) {
+      fold(held);
+    }
+  };
+  let behind = false;
+  const caughtUp = (): void => {
+    if (behind) {
+      behind = false;
+      gate.caughtUp();
+    }
+  };
+  /**
+   * Arm the next task's flush. It can only run once the loop is parked on an
+   * empty queue (a yield cancels it first): what is held is folded, so a delta
+   * never waits for the NEXT event, and the stream is live again.
+   */
+  const arm = (): void => {
+    deferred ??= slice.schedule(() => {
+      deferred = null;
+      release();
+      backlog = false;
+      slicer.reset();
+      caughtUp();
+    }, 0);
+  };
+  return {
+    arrive(): void {
+      slicer.arrive(slice.clock());
+    },
+    release,
+    /** The stream ended, however it did (its bracket is closed): nothing is unread. */
+    end(): void {
+      release();
+      caughtUp();
+    },
+    /** Deal with one event. A promise back: the slice is spent, await it (a yield). */
+    take(event: SessionEvent): Promise<void> | null {
+      if (!backlog) {
+        fold(event);
+      } else {
+        for (const out of batcher.push(event, 0)) {
+          fold(out);
+        }
+        if (batcher.pending()) {
+          arm();
+        }
+      }
+      if (!slicer.done(slice.clock())) {
+        return null;
+      }
+      release();
+      backlog = true;
+      slicer.reset();
+      if (!behind) {
+        behind = true;
+        gate.fellBehind();
+      }
+      return new Promise<void>((resolve) => {
+        slice.schedule(() => {
+          // Armed even with nothing held: the drain may have nothing left.
+          arm();
+          resolve();
+        }, 0);
+      });
+    },
+  };
+}
+
+/**
  * One delta of a stream, folded in arrival order. The returned promise REJECTS
  * with the stream's own error (after the outcome is folded): a caller that owns
  * the turn has to see a refusal (`TurnInProgress` before the ack) to give the
@@ -189,6 +343,7 @@ export interface SessionFeed {
  */
 function foldStream(
   deps: SessionFeedDeps,
+  gate: Gate,
   turnId: string,
   own: boolean,
   stream: AsyncIterable<SessionEvent>,
@@ -262,37 +417,54 @@ function foldStream(
       deps.setForeign(null);
     }
   };
+  /** One event (or a backlog's merged prose) into the transcript. */
+  const fold = (event: SessionEvent): void => {
+    // The receipt clock: a row this event CREATES takes it (a delta that only
+    // extends an existing row keeps that row's own time). A `history_reset`
+    // ignores it — its rows take the daemon's `times`.
+    deps.put(
+      apply(deps.state(), event as TranscriptInput, now()),
+      event.type === "text" || event.type === "reasoning" ? "stream" : undefined,
+    );
+    if (event.type === "history_reset") {
+      // The reset REPLACED the history mid-turn: its fill is gone with it.
+      deps.onHistoryReplaced?.();
+    }
+  };
+  const pace = deps.slice === undefined ? null : createPace(deps.slice, fold, gate);
   return (async () => {
     let ended = false;
     let reason: StopReason | undefined;
     try {
       for await (const event of stream) {
+        pace?.arrive();
         drawPrompt(event);
         if (event.type === "turn_end") {
           ended = true;
           reason = event.reason;
         }
-        // The receipt clock: a row this event CREATES takes it (a delta that only
-        // extends an existing row keeps that row's own time). A `history_reset`
-        // ignores it — its rows take the daemon's `times`.
-        deps.put(
-          apply(deps.state(), event as TranscriptInput, now()),
-          event.type === "text" || event.type === "reasoning" ? "stream" : undefined,
-        );
-        if (event.type === "history_reset") {
-          // The reset REPLACED the history mid-turn: its fill is gone with it.
-          deps.onHistoryReplaced?.();
+        if (pace === null) {
+          fold(event);
+          continue;
+        }
+        const pause = pace.take(event);
+        if (pause !== null) {
+          await pause;
         }
       }
+      pace?.release();
     } catch (error) {
       // The stream threw: its outcome can never arrive (`remote-session.ts`
       // `fail`). Said as LOST, never as a silent stop (F8/F19) — and the error
       // still reaches whoever awaited this, which is how a refusal gets its
-      // text back.
+      // text back. What a backlog still held arrived BEFORE the loss.
+      pace?.release();
       finish({ ended: false, threw: true, cause: errorShape(error) });
+      pace?.end();
       throw error;
     }
     finish(ended ? { ended, ...(reason === undefined ? {} : { reason }) } : { ended: false });
+    pace?.end();
   })();
 }
 
@@ -308,50 +480,63 @@ export function createSessionFeed(deps: SessionFeedDeps): SessionFeed {
     void settled.then(() => folding.delete(settled));
     return fold;
   };
+  const gate = createGate(deps.slice);
+  /** Fold one stream, in its turn: at once unless something is ahead of it. */
+  const inOrder = (start: () => Promise<void>): Promise<void> => track(gate.stream(start));
+  const applyActivity = (activity: Exclude<SessionActivity, { kind: "turn" }>): void => {
+    switch (activity.kind) {
+      case "history":
+        deps.trace?.({
+          kind: "history",
+          reason: activity.reason,
+          messages: activity.messages.length,
+        });
+        deps.put(
+          apply(deps.state(), {
+            type: "history",
+            messages: activity.messages,
+            ...(activity.times ? { times: activity.times } : {}),
+            reason: activity.reason,
+          }),
+        );
+        // `context_reset` APPENDS (the chat those figures described is still
+        // on screen) and `compact` keeps it, saying so once. Anything else
+        // (null, `clear`) REPLACED what was shown, so the context figure is
+        // about a conversation that no longer exists.
+        if (activity.reason === null || activity.reason === "clear") {
+          deps.onHistoryReplaced?.();
+        }
+        return;
+      case "closed":
+        deps.put(apply(deps.state(), { type: "closed", reason: activity.reason }));
+        // The session is over: nothing foreign is stoppable any more.
+        deps.setForeign(null);
+        return;
+    }
+  };
   return {
     activity(activity) {
-      switch (activity.kind) {
-        case "history":
-          deps.trace?.({
-            kind: "history",
-            reason: activity.reason,
-            messages: activity.messages.length,
-          });
-          deps.put(
-            apply(deps.state(), {
-              type: "history",
-              messages: activity.messages,
-              ...(activity.times ? { times: activity.times } : {}),
-              reason: activity.reason,
-            }),
-          );
-          // `context_reset` APPENDS (the chat those figures described is still
-          // on screen) and `compact` keeps it, saying so once. Anything else
-          // (null, `clear`) REPLACED what was shown, so the context figure is
-          // about a conversation that no longer exists.
-          if (activity.reason === null || activity.reason === "clear") {
-            deps.onHistoryReplaced?.();
-          }
-          return;
-        case "closed":
-          deps.put(apply(deps.state(), { type: "closed", reason: activity.reason }));
-          // The session is over: nothing foreign is stoppable any more.
-          deps.setForeign(null);
-          return;
-        case "turn": {
-          const turn: ForeignTurn = { turnId: activity.turnId, cancel: activity.cancel };
-          deps.setForeign(turn);
-          // Its failure is folded as LOST inside `foldStream`; nothing of OURS
-          // comes back to the field, so the rejection is not for a caller here.
-          void track(foldStream(deps, activity.turnId, false, activity.events)).catch(() => {});
-          return;
-        }
+      if (activity.kind !== "turn") {
+        gate.run(() => applyActivity(activity));
+        return;
       }
+      // Its failure is folded as LOST inside `foldStream`; nothing of OURS
+      // comes back to the field, so the rejection is not for a caller here.
+      void inOrder(() => {
+        const turn: ForeignTurn = { turnId: activity.turnId, cancel: activity.cancel };
+        deps.setForeign(turn);
+        return foldStream(deps, gate, activity.turnId, false, activity.events);
+      }).catch(() => {});
     },
     ownTurn: (turnId, events, prompt, accepted) =>
-      track(foldStream(deps, turnId, true, events, prompt, accepted)),
+      inOrder(() => foldStream(deps, gate, turnId, true, events, prompt, accepted)),
     successorTurn: (turnId, events) =>
-      track(Promise.all([...folding]).then(() => foldStream(deps, turnId, true, events))),
+      track(
+        Promise.all([...folding]).then(() =>
+          gate.stream(() => foldStream(deps, gate, turnId, true, events)),
+        ),
+      ),
+    // About now, not about any place in the transcript: never waits.
     link(up) {
       deps.trace?.({ kind: "link", state: up ? "up" : "down" });
       deps.put(apply(deps.state(), { type: "link", status: up ? "up" : "down" }));
