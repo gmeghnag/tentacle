@@ -1,0 +1,1 @@
+- **Mobile: a streaming reply no longer re-renders the session's header, composer, hub and sheets.** Each part of the session screen now follows only its own state, so taps and animations keep up with long sessions while the model streams.

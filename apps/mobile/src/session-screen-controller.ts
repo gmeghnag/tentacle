@@ -79,7 +79,6 @@ import {
   createPermissionSheet,
 } from "./permission-sheet.ts";
 import type { QueueTrace } from "./queue-trace.ts";
-import { createRenderCoalescer } from "./render-coalesce.ts";
 import { type CommandRow, clearConfirm, commandRows } from "./session-commands.ts";
 import type {
   SessionController,
@@ -113,6 +112,7 @@ import {
 export type { RenameState };
 import type { ComposeBarView, OutboxRowView, SessionViewInput } from "./session-view.ts";
 
+import { type SessionStore, createSessionStore } from "./session-store.ts";
 import { type SessionStatus, type SessionView, retryOnUp, sessionView } from "./session-view.ts";
 import {
   type ThumbnailDriver,
@@ -283,6 +283,10 @@ export interface SessionScreenState {
   readonly notice: string | null;
   readonly view: SessionView;
   readonly sheet: SheetState;
+  /** How many asks wait behind the one on screen (`PermissionSheet.queued`). */
+  readonly askQueued: number;
+  /** The permission sheet's "auto-accepted · <tool>" note, or null. */
+  readonly askAutoAccepted: string | null;
   readonly thumbnails: ThumbnailState;
   /** The compose half (13d): the queue, the chips, the outbox. */
   readonly compose: ComposeBarView;
@@ -470,7 +474,9 @@ export interface SessionScreenDeps {
 
 export interface SessionScreenController {
   state(): SessionScreenState;
-  /** The screen's subscription: every state change, plus an unsubscribe. */
+  /** The state in slices: what the screen and its panes follow. */
+  sessionStore(): SessionStore;
+  /** Every state change (the whole state). The screen follows `sessionStore` instead. */
   subscribe(listener: (state: SessionScreenState) => void): () => void;
   /** Attach (and re-attach on a Retry). `reopen`: the person's Reopen button. */
   open(reopen?: boolean): Promise<void>;
@@ -898,7 +904,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       // A streamed delta re-renders at most once per window; anything else at
       // once (and that absorbs a pending delta's render: `render-coalesce.ts`).
       if (cause === "stream") {
-        render.soon();
+        store.publish("stream");
       } else {
         emit();
       }
@@ -1251,6 +1257,8 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
       notice,
       view: view(),
       sheet: sheet.view(),
+      askQueued: sheet.queued,
+      askAutoAccepted: sheet.autoAccepted,
       thumbnails,
       compose: composeView().bar,
       info: info === null ? null : info.state(),
@@ -1498,12 +1506,17 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         });
 
   /**
-   * Every state change reaches the screen through here (docs/fix/
-   * mobile-fan-jank-device.md): `emit` is immediate, a streamed delta's
-   * `render.soon()` is coalesced to one notification per `STREAM_RENDER_MS`.
+   * Every state change reaches the screen through the store
+   * (docs/feat/mobile-ui-fluidity-s3.md): `emit` is immediate, a streamed
+   * delta's publish is coalesced to one per `STREAM_RENDER_MS`
+   * (`render-coalesce.ts`, inside the store). Each part of the screen follows
+   * its own slice.
    */
-  const render = createRenderCoalescer({
-    fire: notifyListeners,
+  const store = createSessionStore({
+    read: () => {
+      followBrowserTools();
+      return state();
+    },
     clock: () => deps.now(),
     schedule:
       deps.schedule ??
@@ -1512,8 +1525,16 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
         return () => clearTimeout(timer);
       }),
   });
+  // The whole-state listeners (decision 3): the tests' and `deps.onChange`'s
+  // contract. The screen follows slices instead.
+  store.onPublish((next) => {
+    deps.onChange?.(next);
+    for (const listener of listeners) {
+      listener(next);
+    }
+  });
   function emit(): void {
-    render.now();
+    store.publish("now");
   }
   /** The rows last counted for finished browser tools, and that count. */
   let browserRows: State["rows"] | null = null;
@@ -1528,17 +1549,6 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     if (done !== browserDone) {
       browserDone = done;
       void info.refreshBrowser();
-    }
-  }
-  function notifyListeners(): void {
-    if (disposed) {
-      return;
-    }
-    followBrowserTools();
-    const next = state();
-    deps.onChange?.(next);
-    for (const listener of listeners) {
-      listener(next);
     }
   }
 
@@ -1887,6 +1897,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
 
   const controller: SessionScreenController = {
     state,
+    sessionStore: () => store,
     subscribe(listener) {
       listeners.add(listener);
       return () => {
@@ -2410,7 +2421,7 @@ export function createSessionScreen(deps: SessionScreenDeps): SessionScreenContr
     },
     dispose() {
       disposed = true;
-      render.dispose();
+      store.dispose();
       dropCompacted();
       listeners.clear();
       unwatchInfo();

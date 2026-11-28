@@ -53,7 +53,7 @@ describe("the layer is in the empty session, and clipped between header and comp
 
   test("it is drawn on an empty, open session only (owner decisions 4 and 5)", () => {
     expect(code(screen)).toMatch(
-      /showsScene\(\{ phase: state\.status\.phase, rowCount: rows\.length \}\)/,
+      /showsScene\(\{ phase: rowsSlice\.status\.phase, rowCount: rows\.length \}\)/,
     );
     // And never while the opening landing is still scrolling into place.
     expect(code(screen)).toMatch(/showsScene\([\s\S]{0,120}&& !settling/);

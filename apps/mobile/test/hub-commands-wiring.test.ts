@@ -41,18 +41,20 @@ describe("the screen wires Commands, and dims an empty Artifacts", () => {
   });
 
   test("`artifactsEmpty` comes from `hubContextOf`'s own `artifacts` input, never a second rule", () => {
-    const ctx = slice("const hubCtx = hubContextOf({", "});");
+    const ctx = slice("return hubContextOf({", "\n    });");
     // The screen hands over the LIST; `hubContextOf` is the one place that
     // decides "known and empty" (UNKNOWN never dims — the Tools D3 rule).
-    expect(ctx).toContain("list: state.artifacts.list,");
+    expect(ctx).toContain("list: hubSlice.artifacts.list,");
     expect(ctx).not.toContain("artifactsEmpty");
     expect(SCREEN).not.toContain("artifactsEmpty");
   });
 
   test("a dimmed fan tap goes to `onFlash`, never to `commitHub`'s notice path", () => {
-    const at = SCREEN.indexOf("<FloatingActivity");
-    const props = SCREEN.slice(at, SCREEN.indexOf("/>", at));
-    expect(props).toContain("onFlash={flashHub}");
+    // Through `HubPane` and the shell's actions (mobile-ui-fluidity-s3).
+    expect(code(read("src", "screens", "session", "HubPane.tsx"))).toContain(
+      "onFlash={(id) => actions.current.hubFlash(id)}",
+    );
+    expect(SCREEN).toContain("hubFlash: flashHub,");
     // The one side effect that survives: the Tools re-pull (hub-tools D4).
     const flash = slice("const flashHub = (id: HubActionId) => {", "\n  };");
     expect(flash).toContain('if (id === "tools")');

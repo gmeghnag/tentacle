@@ -209,7 +209,7 @@ describe("the hub entry", () => {
 
   test("the figure is the runs AND the catalogue, folded by ONE pure function (fix D6)", () => {
     const fold = between(SESSION, "const workflowsFigure = workflowsHub(", ");");
-    expect(fold).toContain("catalogueFigure(state.catalogue)");
+    expect(fold).toContain("catalogueFigure(hubSlice.catalogue)");
     expect(fold).toContain("workflowsRuns");
     // The catalogue is the CONTROLLER's read, not a second one on the render path.
     expect(SESSION).not.toContain("workflowCatalogue()");
@@ -220,7 +220,12 @@ describe("the hub entry", () => {
 
   test("the hub no longer offers Attach: the composer's `+` is the one chooser", () => {
     expect(SESSION).not.toContain("attach: openAttach");
-    // …and `openAttach` is still the composer's photo button.
-    expect(SESSION).toContain("onPhoto={openAttach}");
+    // …and `openAttach` is still the composer's photo button, via its pane.
+    const COMPOSER = readFileSync(
+      `${import.meta.dir}/../src/screens/session/ComposerPane.tsx`,
+      "utf8",
+    );
+    expect(COMPOSER).toContain("onPhoto={() => actions.current.openAttach()}");
+    expect(SESSION).toMatch(/^\s*openAttach,$/m);
   });
 });

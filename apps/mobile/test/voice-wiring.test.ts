@@ -114,8 +114,12 @@ describe("the composer routes through dictation (F8)", () => {
   });
 
   test("Return and Send go to dictation first", () => {
-    expect(screen).toMatch(/voice\?\.send\("return"\) !== true\) \{\s*controller\.pressReturn\(\)/);
-    expect(screen).toMatch(/voice\?\.send\("press"\) !== true\) \{\s*controller\.press\(\)/);
+    expect(screen).toMatch(
+      /voice\?\.send\(via\) !== true\) \{\s*if \(via === "return"\) \{\s*controller\.pressReturn\(\);\s*\} else \{\s*controller\.press\(\);/,
+    );
+    const pane = code(read(APP, "src", "screens", "session", "ComposerPane.tsx"));
+    expect(pane).toMatch(/onReturn=\{\(\) => \{[\s\S]{0,160}actions\.current\.send\("return"\)/);
+    expect(pane).toMatch(/onPress=\{\(\) => \{[\s\S]{0,160}actions\.current\.send\("press"\)/);
   });
 });
 
@@ -134,9 +138,13 @@ describe("the Beta switches reach this screen without a remount", () => {
 
   test("both surfaces are gated from that live copy, never from a render-time read", () => {
     // The two call sites that decide whether voice shows at all.
-    expect(screen).toMatch(
+    // The composer's view is `ComposerPane`'s, from the shell's live copy.
+    const pane = code(read(APP, "src", "screens", "session", "ComposerPane.tsx"));
+    expect(pane).toMatch(
       /voiceComposerView\(\s*voiceState,\s*dictationLocale\(voiceSettings\.language/,
     );
+    expect(screen).toContain("voiceSettings={voiceSettings}");
+    expect(pane).not.toContain("VOICE_SETTINGS.current()");
     expect(screen).toMatch(/speakButtonOf\([\s\S]{0,240}?voiceSettings,\s*\)/);
     // No render-time read survives the switch: that is the bug this task fixes.
     expect(screen).not.toContain("VOICE_SETTINGS.current().language");

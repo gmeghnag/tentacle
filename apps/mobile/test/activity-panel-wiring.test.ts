@@ -128,9 +128,15 @@ describe("every close path converges on one handler (Design 5)", () => {
     expect(body).toContain("setActivityFocus(null)");
     expect(body).toContain("controller.closeDetail()");
     // The sheet is handed THIS handler, not a second inline copy.
-    const at2 = SCREEN.indexOf("<ActivitySheet");
-    const props = SCREEN.slice(at2, SCREEN.indexOf("/>", at2));
-    expect(props).toContain("onClose={closeActivity}");
+    // `SheetsPane` draws it; its close is the shell's, through the actions.
+    const SHEETS = readFileSync(
+      join(import.meta.dir, "..", "src", "screens", "session", "SheetsPane.tsx"),
+      "utf8",
+    );
+    const at2 = SHEETS.indexOf("<ActivitySheet");
+    const props = SHEETS.slice(at2, SHEETS.indexOf("\n      />", at2));
+    expect(SCREEN).toMatch(/^\s*closeActivity,$/m);
+    expect(props).toContain("onClose={() => actions.current.closeActivity()}");
   });
 });
 

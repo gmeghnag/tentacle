@@ -4,7 +4,9 @@
  * while a turn streams — the simulator does not reproduce it, so the evidence
  * has to come from the device (`grep ptrace tentacle-logs-*.txt`).
  *
- * Two kinds of line, both numbers and short enums only (app-log D7/F16):
+ * Three kinds of line, all numbers and short enums only (app-log D7/F16):
+ * - `ev=panes` — one per stream, when it stops: the renders of the screen's
+ *   shell and of each of its panes while it ran (mobile-ui-fluidity-s3).
  * - `ev=jank` — one per 1 s window in which the JS thread missed a frame (a
  *   `requestAnimationFrame` gap > `JANK_GAP_MS`): how many gaps, the worst, the
  *   time lost, whether a turn was streaming, and what the screen did in that
@@ -31,6 +33,10 @@ export const JANK_WINDOW_MS = 1000;
 
 /** A fan that never settles (closed first, or still opening) reports at most this late. */
 export const FAN_REPORT_MAX_MS = 5000;
+
+/** The session screen's panes, as `ev=panes` names them. */
+export const PANES = ["header", "composer", "hub", "sheets"] as const;
+export type PaneName = (typeof PANES)[number];
 
 /** One line, ready for `AppLog.log`. */
 export interface PerfLine {
@@ -185,4 +191,13 @@ export function fanLine(f: FanOpenFacts): PerfLine {
       stream: f.streaming,
     },
   };
+}
+
+/**
+ * The `panes` line (docs/feat/mobile-ui-fluidity-s3.md): over ONE stream, how
+ * often the screen's shell rendered and how often each pane did. A pane near the
+ * shell's figure follows the stream.
+ */
+export function panesLine(shell: number, panes: Readonly<Record<PaneName, number>>): PerfLine {
+  return { level: "info", kind: PTRACE, fields: { ev: "panes", shell, ...panes } };
 }

@@ -170,7 +170,7 @@ describe("the ask is the banner under the header (mobile-workflows-landing-v2)",
   test("the Session screen presents a sheet by `reviewed` too", () => {
     // Mutation: drop the fourth argument → red.
     expect(SESSION).toMatch(
-      /askPresentable\([^;]*?topRunId,\s*workflowsTop,\s*state\.sheet\.reviewed,?\s*\)/,
+      /askPresentable\([^;]*?topRunId,\s*workflowsTop,\s*sheetsSlice\.sheet\.reviewed,?\s*\)/,
     );
   });
 
@@ -208,8 +208,13 @@ describe("the ask is the banner under the header (mobile-workflows-landing-v2)",
     expect(item).not.toContain("action.icon");
   });
 
-  test("the Session screen and the landing draw the SAME banner component", () => {
-    expect(SESSION).toContain("<AskBanner");
+  test("the Session screen and the landing draw the SAME banner component", async () => {
+    // The header's banner is `HeaderPane`'s (docs/feat/mobile-ui-fluidity-s3.md).
+    const HEADER = await Bun.file(
+      `${import.meta.dir}/../src/screens/session/HeaderPane.tsx`,
+    ).text();
+    expect(HEADER).toContain("<AskBanner");
+    expect(HEADER).not.toContain("<AskSlim");
     expect(SESSION).not.toContain("<AskSlim");
     expect(BANNER).toContain("<AskSlim");
     expect(BANNER).toContain('actionLabel="Review"');

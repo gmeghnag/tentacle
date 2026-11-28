@@ -287,6 +287,24 @@ interpreter at 701 rows (eval, Repro C).
    composer-only change) is counted in `ev=panes`, not in `renders`. The gate's
    `rate` therefore reads only the shell, and that is stated in the report line.
 
+### Plan corrections (executor)
+
+*— claude-sonnet-5-5, 2026-11-28.* Where the code contradicted the plan below,
+these replace it (evidence in Execution):
+
+- **`info` is `data`, not `ref`.** `info.state()` builds a new object on every
+  call (`session-info-controller.ts`, `state()`). The Repro had no info port, so
+  `info` was `null`; the app always has one. `hub` carries `info` too (the hub's
+  Tools item and its figures read it).
+- **`reports` is carried as entries**, not as `reportsOf`'s `Map`: under
+  decision 2 a fresh `Map` is never equal, so the hub would wake per delta.
+- **Two hidden reads became facts:** `askQueued` and `askAutoAccepted`
+  (`PermissionSheet.queued` / `.autoAccepted`). Without them a second queued ask
+  changes no slice and its count stays stale.
+- **The shell keeps `hubCtx` / `hub` / `activityVm`, memoized**, and hands
+  `HubPane` the items. The shell needs them anyway (commit, the pulse effect, the
+  header's pill, the hub menu).
+
 ### Design
 
 **`src/session-store.ts`** (pure, React-free):
@@ -492,7 +510,96 @@ orchestrator's script.
 
 ## Execution
 
-*(empty — the executor's)*
+*— claude-sonnet-5-5, 2026-11-28*
+
+**Load-bearing check (re-run first, on this worktree): holds.** The Repro's
+output is identical: only `transcript` and `view.rows` change content. Re-run
+with an info port wired: `info: 0/3` (never the same reference, `3/3`
+deep-equal), which is Plan correction 1. The scratch copy is
+`.tentacle/tmp/mobile-ui-fluidity-s3/fields-wt.ts` (imports pointed at the
+worktree, plus the `info:` dep). The worktree had no workspace links:
+`bun install --frozen-lockfile` (tree unchanged).
+
+**As built**, in the plan's order:
+
+1. `session-store.ts`, `use-slice.ts`; the controller publishes through the store
+   (`sessionStore()`; `subscribe` / `onChange` are an `onPublish`).
+2. `ev=panes` (`perf-trace.ts`, `perf-probe.ts`), the `coupling` rule
+   (`e2e/perf-budget.ts`; the report says `renders/s (shell only)` and prints the
+   panes figures).
+3. `screens/session/{Header,Composer,Hub,Sheets}Pane.tsx`, plus `actions.ts` (not
+   in Files: the type of the one latest-ref). The shell follows `rows`, `hub` and
+   `sheets`, never `header` or `composer`; `openAttach` reads
+   `store.get("composer")` at the tap.
+4. Changelog fragment. No schema or protocol change.
+
+**Final slice map** (`SLICE_FACTS`; the table in the code is the truth):
+
+| Slice | Facts | Derived |
+|---|---|---|
+| `rows` | `status`, `transcript`, `thumbnails`, `artifacts`, `slot`, `sends`, `refreshing`, `view.{rows,turn,state,banner,composer,pending}` | — |
+| `header` | `status`, `renaming`, `sheet`, `askQueued`, `view.{title,project,headerModel,headerFolder,headerContext,state,banner,retry,reopen}` | `link`, `closed`, `running`, `asking` |
+| `composer` | `draft`, `notice`, `sends`, `compose`, `riskStrip`, `view.{composer,editable,queued,returnedOthers,outbox,photos,notices,pending,editing,unqueueOff}` | — |
+| `hub` | `info`, `activity`, `schedules`, `catalogue`, `artifacts`, `slot`, `commands`, `view.composer` | `link`, `turn`, `closed`, `reports` |
+| `sheets` | `sheet`, `askQueued`, `askAutoAccepted`, `info`, `commands`, `activity`, `schedules`, `renaming`, `compose`, `refreshing`, `view.composer` | — |
+
+`ref` facts: `transcript`, `view.rows`, `thumbnails`, `artifacts`, `sheet`.
+
+**Drift** (besides Plan corrections): the plan expected only the `fan-jank` pin
+to break. **21 more wiring test files** pinned JSX or `state.X` names in
+`SessionScreen.tsx` (49 failing tests). Each was retargeted to the code's new
+home, with the shell→`actions` half pinned where a prop became indirect. None was
+deleted. This is the largest part of the diff for Review to attack.
+
+**Red first** (stubs): `session-store.test.ts` with `keepSlices = (_, next) =>
+next` gave 8 pass / **45 fail**. `perf-trace` + `perf-budget` with a no-op
+`pane()` and no rule gave 32 pass / **10 fail**. Tests B were written after the
+panes; their non-vacuity rests only on the inline-closure mutation below (the
+other B pins were not mutated).
+
+**Pin B3's heuristic:** no pane contains `store.get(` at all, and in the shell
+`/^ {2}\S.*store\.get\(/m` (a statement at the component's own depth) must not
+match.
+
+**Mutations** (applied, seen red, reverted):
+
+- (a) `keepSlices` returns `next`: 8 pass / **45 fail**, A1 included.
+- (b) `draft: ["sheets"]`: **2 fail** (the spelled-out table, and the
+  re-entrancy test). The per-fact loop alone cannot catch it, since it takes its
+  expectation from `SLICE_FACTS`; hence the spelled-out table.
+- (c) nested fire instead of the queue: **1 fail** (re-entrancy).
+- B2, `deviceLocales={() => deviceLocales()}` on `<ComposerPane>`: **1 fail**.
+- (d), the same closure in the app: flow 90 `PERF FAIL`,
+  `coupling: composer=1210 > 121 renders over 1210 shell renders`
+  (`panes: shell=1210 header=1 composer=1210 hub=1 sheets=1`).
+
+**Gate 0** (iPhone 17 Pro, iOS 26.5, under `sim.lock`, released). The first
+attempt hit the 590 s foreground limit during the flow (the app build took most
+of it). The re-run used the cached build:
+
+```
+PERF PASS
+jank lines: 1, fan lines: 4 (4 streaming)
+worst gap: 34 ms
+fan settle ms: 1071, 1071, 1069, 1056
+renders/s (shell only): 8.9
+panes: shell=1207 header=1 composer=1 hub=1 sheets=1
+✓ 90-perf-stream (iOS 26) pass
+```
+
+Settle holds s2's bar (1064–1084 ms). **One difference from s2:** 1 jank line
+(worst 34 ms; the threshold is 32, the budget 250) where s2 had 0. It is one run
+and was not investigated. The mutated run had 0 jank lines. The runner also says
+flow 90 can drop its `known-bug` tag; not done (not in this plan), and while the
+tag stays a `coupling` failure does not fail the e2e gate (seen in (d):
+`GATE PASS … 1 known-bug`).
+
+**Checks:** `bun test --parallel apps/mobile/test/` 5924 pass / 0 fail;
+`tsc -p apps/mobile` clean; `biome check apps/mobile` clean. Whole-repo `bun run
+check`: not run (the orchestrator's). **Not verified:** the layout animation of
+queue/outbox rows, and the sheets' live updates by hand on a device. The sheets
+now republish only when an input changes; check with the compose, ask and Tools
+flows.
 
 ## Review
 

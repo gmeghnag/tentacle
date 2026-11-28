@@ -25,6 +25,9 @@ const code = (src: string) =>
 const APP = code(read("App.tsx"));
 const ROUTE = code(read("src", "screens", "NativeSheetRoute.tsx"));
 const SCREEN = code(read("src", "screens", "SessionScreen.tsx"));
+// The panes that draw parts of the screen (docs/feat/mobile-ui-fluidity-s3.md).
+const SHEETS = code(read("src", "screens", "session", "SheetsPane.tsx"));
+const HEADER = code(read("src", "screens", "session", "HeaderPane.tsx"));
 const UI_SHEET = read("src", "ui", "Sheet.tsx");
 const TOOLS = code(read("src", "screens", "ToolsSheet.tsx"));
 const INFO = code(read("src", "screens", "SessionInfoSheet.tsx"));
@@ -234,25 +237,27 @@ describe("S3 — the reconciler is the pure module's, and the screen only dispat
 
   test("a foreign RN Modal yields while a sheet is up or coming (F6)", () => {
     expect(SCREEN).toContain("yieldForeign(wanted, actual)");
-    for (const prop of ["hubMenu !== null && !yields", "menuOpen && !yields"]) {
-      expect(SCREEN).toContain(prop);
+    for (const prop of ["props.hubMenuOpen && !yields", "props.menuOpen && !yields"]) {
+      expect(SHEETS).toContain(prop);
     }
-    expect(SCREEN).toContain("activityOpen && !yields");
+    expect(SHEETS).toContain("props.activityOpen && !yields");
+    expect(SCREEN).toContain("yields={yields}");
+    expect(SCREEN).toContain("hubMenuOpen={hubMenu !== null}");
     // Rename's text survives in the controller, so hiding it loses nothing.
-    expect(SCREEN).toContain("state={yields ? null : renaming}");
+    expect(SHEETS).toContain("state={yields ? null : slice.renaming}");
   });
 
   test("the content is PUBLISHED, and the host is forgotten on unmount (the orphan pop)", () => {
-    expect(SCREEN).toContain("SHEET_HOSTS.host(owner.computerId, owner.sessionId)");
-    expect(SCREEN).toContain('host.publish(\n      "commands"');
-    expect(SCREEN).toContain('host.publish(\n      "outbox"');
+    expect(SHEETS).toContain("SHEET_HOSTS.host(owner.computerId, owner.sessionId)");
+    expect(SHEETS).toContain('host.publish(\n      "commands"');
+    expect(SHEETS).toContain('host.publish(\n      "outbox"');
     expect(SCREEN).toContain("SHEET_HOSTS.forget(at.computerId, at.sessionId)");
   });
 
   test("the two migrated sheets are no longer mounted in the JSX", () => {
     // A `<Modal>` here would wedge the native sheet (F6) and draw a second copy.
-    expect(SCREEN.match(/<CommandsSheet/g) ?? []).toHaveLength(1);
-    expect(SCREEN.match(/<OutboxDecisionSheet/g) ?? []).toHaveLength(1);
+    expect((SCREEN + SHEETS).match(/<CommandsSheet/g) ?? []).toHaveLength(1);
+    expect((SCREEN + SHEETS).match(/<OutboxDecisionSheet/g) ?? []).toHaveLength(1);
     expect(SCREEN).not.toContain("visible={commandsOpen}");
   });
 
@@ -296,10 +301,10 @@ describe("S4 — neither migrated sheet draws a Modal any more", () => {
   test("neither is mounted in the screen's JSX any more: it is PUBLISHED", () => {
     // A mounted copy draws a second sheet under the route, and its empty route
     // (nothing published) would pop itself.
-    expect(SCREEN.match(/<ToolsSheet/g) ?? []).toHaveLength(1);
-    expect(SCREEN.match(/<SessionInfoSheet/g) ?? []).toHaveLength(1);
-    expect(SCREEN).toMatch(/host\.publish\(\s*"tools"/);
-    expect(SCREEN).toMatch(/host\.publish\(\s*"info"/);
+    expect((SCREEN + SHEETS).match(/<ToolsSheet/g) ?? []).toHaveLength(1);
+    expect((SCREEN + SHEETS).match(/<SessionInfoSheet/g) ?? []).toHaveLength(1);
+    expect(SHEETS).toMatch(/host\.publish\(\s*"tools"/);
+    expect(SHEETS).toMatch(/host\.publish\(\s*"info"/);
     expect(SCREEN).not.toContain("visible={toolsOpen}");
     expect(SCREEN).not.toContain("visible={infoOpen}");
   });
@@ -348,11 +353,13 @@ describe("S4 — `Sheet`'s `native` variant (D4)", () => {
       "void controller.openInfo();",
     );
     // Data → the sheet: the element is rebuilt from the controller's `info.tools`
-    // in the publish effect that runs on every render (no deps array).
-    const publish = sliceOf(screen, 'host.publish(\n        "tools",', "/>,");
+    // in `SheetsPane`'s publish effect, keyed on its slice (which carries `info`).
+    expect(SHEETS).toMatch(/\}, \[\s*owner,\s*palette,\s*slice,/);
+    const publish = sliceOf(SHEETS, 'host.publish(\n        "tools",', "/>,");
     expect(publish).toContain("view={toolsView(info.tools, {");
     // The explicit way stays: the sheet's Refresh link / Retry row.
-    expect(publish).toContain("onRefresh={refreshTools}");
+    expect(publish).toContain("onRefresh={() => actions.current.refreshTools()}");
+    expect(screen).toMatch(/^\s*refreshTools,$/m);
   });
 
   test("the close glyph is drawn LAST, above the title it shares a row with", () => {
@@ -526,10 +533,10 @@ describe("S5 — the ask is a route, and its dismissal is explicit (D5)", () => 
   });
 
   test("the screen publishes the ask's element with the detent, and only while there is one", () => {
-    const screen = SCREEN.slice(SCREEN.indexOf('host.publish(\n      "permission"'));
+    const screen = SHEETS.slice(SHEETS.indexOf('host.publish(\n      "permission"'));
     expect(screen).toBeTruthy();
     const block = screen.slice(0, screen.indexOf("/>"));
-    expect(block).toContain('state.sheet.kind === "idle" ? undefined :');
+    expect(block).toContain('slice.sheet.kind === "idle" ? undefined :');
     expect(block).toContain("detent={askDetent}");
     expect(SCREEN).not.toContain("SHEET_HOLDS");
   });
@@ -537,7 +544,7 @@ describe("S5 — the ask is a route, and its dismissal is explicit (D5)", () => 
   test("the ask is pushed with its id and `asking`, and never re-pushed to settle", () => {
     expect(SCREEN).toContain('step.kind === "permission" && askId !== null');
     expect(SCREEN).toContain(
-      '{ askId, ...(state.sheet.kind === "asking" ? { asking: true } : {}) }',
+      '{ askId, ...(sheetsSlice.sheet.kind === "asking" ? { asking: true } : {}) }',
     );
     // `asking:false` is a keyed in-place rewrite, decided by the pure module.
     expect(SCREEN).toContain("askingParamUpdate(navigation.getState().routes, owner, {");
@@ -546,9 +553,9 @@ describe("S5 — the ask is a route, and its dismissal is explicit (D5)", () => 
   });
 
   test("`returned` keeps the ask up (it has words to read); a parked or idle one does not", () => {
-    const at = SCREEN.indexOf("permission:\n      state.sheet.kind");
+    const at = SCREEN.indexOf("permission:\n      sheetsSlice.sheet.kind");
     const block = SCREEN.slice(at, at + 400);
-    expect(block).toContain('state.sheet.kind === "returned" ||');
+    expect(block).toContain('sheetsSlice.sheet.kind === "returned" ||');
     expect(block).toContain("askPresented({");
     expect(block).toContain("drawerOpen,");
   });
@@ -565,17 +572,18 @@ describe("S5 — the ask is a route, and its dismissal is explicit (D5)", () => 
   });
 
   test("the banner renders from askBanner, a tap unparks, and the drawer parks", () => {
-    expect(SCREEN).toContain("askBanner(state.sheet, queued,");
-    expect(SCREEN).toContain('testID="ask-banner"');
+    expect(HEADER).toContain("askBanner(slice.sheet, slice.askQueued,");
+    expect(HEADER).toContain("onPress={() => actions.current.unparkAsk()}");
+    expect(HEADER).toContain('testID="ask-banner"');
     expect(SCREEN).toContain("sheet.unpark()");
-    expect(SCREEN).toContain('if (drawerOpen && state.sheet.kind === "asking"');
+    expect(SCREEN).toContain('if (drawerOpen && sheetsSlice.sheet.kind === "asking"');
   });
 
   test("the screen never forgets a park on a withdrawal: only the sheet's settle and the banner tap do", () => {
     // Review S4–S7b, finding 1: an effect that forgot whenever the ask left the
     // screen erased the note on every detach, so the replay opened unparked.
     expect(SCREEN.match(/ASK_PARKS\.forget\(/g)).toHaveLength(1);
-    const tap = sliceOf(SCREEN, 'testID="ask-banner"', "sheet.unpark()");
+    const tap = sliceOf(SCREEN, "unparkAsk: () => {", "sheet.unpark()");
     expect(tap).toContain("ASK_PARKS.forget(parkedKey)");
     const CONTROLLER = code(read("src", "session-screen-controller.ts"));
     const settled = sliceOf(CONTROLLER, "onSettled: (requestId) =>", ")),");

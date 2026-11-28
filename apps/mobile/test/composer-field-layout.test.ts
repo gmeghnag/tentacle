@@ -163,7 +163,9 @@ describe("the round buttons (mockup B + S2)", () => {
   test("the caption (timer / …) is the view-model's, drawn beside the mic", () => {
     expect(COMPOSER).toContain('testID="composer-mic-caption"');
     expect(COMPOSER).toMatch(/\{micCaption\}/);
-    expect(read("screens", "SessionScreen.tsx")).toContain("micCaption={voiceView.caption}");
+    expect(read("screens", "session", "ComposerPane.tsx")).toContain(
+      "micCaption={voiceView.caption}",
+    );
   });
 
   test("Reduce Motion stops both animations", () => {
@@ -254,7 +256,7 @@ describe("the shape: the component only draws what `composerShape` returns", () 
   });
 
   test("the screen passes what the rule needs: the chips and the edit banner (D1)", () => {
-    const screen = read("screens", "SessionScreen.tsx");
+    const screen = read("screens", "session", "ComposerPane.tsx");
     expect(screen).toContain("attachments={compose.chips.length}");
     expect(screen).toContain("editing={compose.editing !== null}");
   });

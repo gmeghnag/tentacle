@@ -355,7 +355,12 @@ describe("App: one write path, spreading the current settings", () => {
 
   test("the session gives the button the setting and the live Reduce Transparency flag", () => {
     const SESSION = code(read("src", "screens", "SessionScreen.tsx"));
-    const at = SESSION.indexOf("<FloatingActivity");
+    // The shell hands them to `HubPane`, which spreads them onto the button
+    // (docs/feat/mobile-ui-fluidity-s3.md).
+    expect(code(read("src", "screens", "session", "HubPane.tsx"))).toMatch(
+      /<FloatingActivity\s+\{\.\.\.hub\}/,
+    );
+    const at = SESSION.indexOf("<HubPane");
     const props = SESSION.slice(at, SESSION.indexOf("/>", at));
     expect(props).toContain("opacity={activitySettings.opacity}");
     expect(props).toContain("reduceTransparency={a11yFlags.reduceTransparency}");

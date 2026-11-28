@@ -48,7 +48,6 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { reportsOf } from "../activity-memory.ts";
 import {
   STOP_ARM_MS,
   STOP_IDLE,
@@ -65,11 +64,9 @@ import { activityView, agentCardTarget } from "../activity.ts";
 import type { AppLogField } from "../app-log.ts";
 import { ARTIFACT_SEEN } from "../artifact-seen-expo.ts";
 import { seenFor } from "../artifact-seen-store.ts";
-import { ASK_DETENT, ASK_PARKS, askBanner, askPresented, parkKey } from "../ask-park.ts";
-import { browserPageOf } from "../browser-view.ts";
+import { ASK_DETENT, ASK_PARKS, askPresented, parkKey } from "../ask-park.ts";
 import { CHART_SETTINGS } from "../chart-settings-expo.ts";
 import type { ChartSettings } from "../chart-settings-store.ts";
-import { chatStatus, titleLabel } from "../chat-header.ts";
 import { composeRowsMoved } from "../compose-motion.ts";
 import { composerBottomPadding } from "../composer-layout.ts";
 import { DIAGRAM_SETTINGS } from "../diagram-settings-expo.ts";
@@ -110,11 +107,12 @@ import {
   shown,
   viewportChanged,
 } from "../follow.ts";
-import { pressHaptic, pulseHaptic, turnEndHaptic } from "../haptic-rules.ts";
+import { pulseHaptic, turnEndHaptic } from "../haptic-rules.ts";
 import { playHaptic } from "../haptics.ts";
 import {
   type HubActionId,
   type HubEntries,
+  type HubItem,
   type HubOpen,
   PULSE_START,
   type PulseState,
@@ -140,7 +138,6 @@ import {
   type CopySource,
   type CopyVia,
   copyFlashFor,
-  copyFlashShown,
   flashReleased,
   messageCopy,
 } from "../message-copy.ts";
@@ -159,8 +156,8 @@ import {
 import { rowErrorFields } from "../row-guard.ts";
 import { rowTimeLabel } from "../row-swipe.ts";
 import { type SectionId, scheduledSection } from "../session-info.ts";
-import { sessionMenu } from "../session-menu.ts";
-import type { SessionScreenController, SessionScreenState } from "../session-screen-controller.ts";
+import { type SessionMenuAction, sessionMenu } from "../session-menu.ts";
+import type { SessionScreenController } from "../session-screen-controller.ts";
 import { SHEET_HOSTS } from "../sheet-host.ts";
 import {
   type AfterDismissIntent,
@@ -190,33 +187,22 @@ import {
   userSheet,
   yieldForeign,
 } from "../sheet-plan.ts";
-import { dictationLocale } from "../speech-locale.ts";
 import { SPEECH_PORT } from "../speech-native-expo.ts";
 import { type ActivityFocus, sheetDetail, showRow, stopConfirm } from "../subagent-detail.ts";
-import { DENSE_FONT_SCALE, MONO, type Palette, typography } from "../theme.ts";
+import { type Palette, typography } from "../theme.ts";
 import { isBlockRow, isOpen, stepLayout, toggleOpen } from "../tool-steps.ts";
-import { type ToolsSegmentId, toolsSummary, toolsView } from "../tools-view.ts";
+import { type ToolsSegmentId, toolsSummary } from "../tools-view.ts";
 import type { Row } from "../transcript-rows.ts";
-import { ActionSheet } from "../ui/ActionSheet.tsx";
-import { ActivityBadge } from "../ui/ActivityBadge.tsx";
-import { AskBanner } from "../ui/AskBanner.tsx";
-import { Banner } from "../ui/Banner.tsx";
-import { Composer } from "../ui/Composer.tsx";
-import { ContextRing } from "../ui/ContextRing.tsx";
-import { CopyFlash } from "../ui/CopyFlash.tsx";
 import { EmptyState } from "../ui/EmptyState.tsx";
-import { FloatingActivity, useAccessibilityFlags } from "../ui/FloatingActivity.tsx";
-import { HeaderDot } from "../ui/HeaderDot.tsx";
-import { HeaderIcon } from "../ui/HeaderIcon.tsx";
-import { Icon, type IconName } from "../ui/Icon.tsx";
+import { useAccessibilityFlags } from "../ui/FloatingActivity.tsx";
+import { Icon } from "../ui/Icon.tsx";
 import { MascotSceneLayer } from "../ui/MascotScene.tsx";
-import { RiskStrip } from "../ui/RiskStrip.tsx";
-import { ScreenHeader } from "../ui/ScreenHeader.tsx";
 import { CompactSlotNode, ThinkingNode } from "../ui/StepNode.tsx";
 import { STICKY_HEAD_H, StickyHost, type StickyHostHandle } from "../ui/StickyStep.tsx";
 import { Text } from "../ui/Text.tsx";
 import { animateNextLayout } from "../ui/animate.ts";
 import { DiagramRenderer } from "../ui/diagram/DiagramRenderer.tsx";
+import { useSlice } from "../use-slice.ts";
 import {
   type VoiceController,
   type VoiceState,
@@ -224,19 +210,14 @@ import {
 } from "../voice-controller.ts";
 import { VOICE_SETTINGS } from "../voice-settings-expo.ts";
 import type { VoiceSettings } from "../voice-settings-store.ts";
-import { endedTurn, speakButtonOf, voiceComposerView } from "../voice-view.ts";
+import { endedTurn, speakButtonOf } from "../voice-view.ts";
 import { type RunsState, catalogueFigure, workflowsHub } from "../workflow-runs-controller.ts";
-import { ActivitySheet } from "./ActivitySheet.tsx";
-import { BrowserPage } from "./BrowserPage.tsx";
-import { CommandsSheet } from "./CommandsSheet.tsx";
-import { PermissionSheetView } from "./PermissionSheet.tsx";
-import { RenameSheet } from "./RenameSheet.tsx";
-import { SelectTextSheet } from "./SelectTextSheet.tsx";
-import { SessionInfoSheet } from "./SessionInfoSheet.tsx";
-import { ToolsSheet } from "./ToolsSheet.tsx";
-import { Chips, NoticeRow, OutboxRows, QueueRows } from "./compose/ComposeBar.tsx";
-import { OutboxDecisionSheet } from "./compose/OutboxDecisionSheet.tsx";
 import { PendingBubbles } from "./compose/PendingBubble.tsx";
+import { ComposerPane } from "./session/ComposerPane.tsx";
+import { HeaderPane } from "./session/HeaderPane.tsx";
+import { HubPane } from "./session/HubPane.tsx";
+import { SheetsPane } from "./session/SheetsPane.tsx";
+import type { PaneActions } from "./session/actions.ts";
 import { type CellActions, TranscriptCell } from "./transcript/TranscriptCell.tsx";
 import { type CellRect, measuredCell } from "./transcript/measured-cell.tsx";
 
@@ -306,27 +287,14 @@ export interface SessionScreenProps {
   readonly workflowsRuns?: RunsState;
 }
 
-/** How each banner kind LOOKS (its text and its actions are `session-view.ts`'s). */
 /** The iPhone's language, for the `auto` dictation locale (Hermes' Intl reads the device). */
 function deviceLocales(): readonly string[] {
   return [Intl.DateTimeFormat().resolvedOptions().locale];
 }
 
-const BANNER_LOOK: Readonly<
-  Record<
-    NonNullable<SessionScreenState["view"]["banner"]>["kind"],
-    { readonly tone: "warn" | "info" | "error"; readonly icon: IconName }
-  >
-> = {
-  reconnecting: { tone: "warn", icon: "wifi.slash" },
-  failed: { tone: "error", icon: "exclamationmark.triangle" },
-  timeout: { tone: "error", icon: "exclamationmark.triangle" },
-  "too-many": { tone: "error", icon: "exclamationmark.triangle" },
-  archived: { tone: "info", icon: "archivebox" },
-  deleted: { tone: "info", icon: "trash" },
-  ended: { tone: "info", icon: "checkmark.circle" },
-  "too-old": { tone: "info", icon: "clock" },
-};
+/** The closed menus: constants, so `SheetsPane`'s props stay put while they are. */
+const NO_HUB_ITEMS: readonly HubItem[] = [];
+const NO_MENU: readonly SessionMenuAction[] = [];
 
 export function SessionScreen({
   palette,
@@ -351,7 +319,15 @@ export function SessionScreen({
   useLayoutEffect(() => {
     PERF.render(PERF.now() - renderStart);
   });
-  const [state, setState] = useState<SessionScreenState>(() => controller.state());
+  // The session's state in slices (docs/feat/mobile-ui-fluidity-s3.md). The shell
+  // follows what the list, the reconciler and the hub's context read; the header,
+  // composer, hub and sheets are memoized panes on their own slices. It does NOT
+  // follow `composer` or `header`: typing and a rename never re-render it.
+  const store = controller.sessionStore();
+  const rowsSlice = useSlice(store, "rows");
+  const hubSlice = useSlice(store, "hub");
+  const sheetsSlice = useSlice(store, "sheets");
+  const paneActions = useRef<PaneActions>(null as unknown as PaneActions);
   const sheet = controller.sheet();
   //
   // This session's identity for the native sheets (D1/D2): the `Sheet` route's
@@ -391,22 +367,25 @@ export function SessionScreen({
   // (decision 4, F18) — and only then release the requester and the listeners.
   useEffect(() => {
     // A queue/outbox row arriving, leaving or changing state eases in (Slice 6);
-    // a streamed token alone never animates (`composeRowsMoved`).
-    let shown = controller.state().compose;
-    const unsubscribe = controller.subscribe((next) => {
-      if (composeRowsMoved(shown, next.compose)) {
+    // a streamed token alone never animates (`composeRowsMoved`). The listener
+    // runs inside the publish, before React commits the panes' new slices.
+    let shown = store.get("composer").compose;
+    const unsubscribeRows = store.subscribe("composer", () => {
+      const next = store.get("composer").compose;
+      if (composeRowsMoved(shown, next)) {
         animateNextLayout();
       }
-      shown = next.compose;
-      PERF.notify();
-      setState(next);
+      shown = next;
     });
+    // The trace's `notifies` counts publishes.
+    const unsubscribePublish = store.onPublish(() => PERF.notify());
     void controller.open();
     return () => {
-      unsubscribe();
+      unsubscribeRows();
+      unsubscribePublish();
       void controller.leave().then(() => controller.dispose());
     };
-  }, [controller]);
+  }, [controller, store]);
 
   // Voice (docs/feat/mobile-voice.md Design §4): one controller per mounted
   // screen, over the compose seam; disposed on unmount (F13). Created in the
@@ -494,18 +473,19 @@ export function SessionScreen({
   // approval its Approve raises is a sheet over it, and only that kind of ask.
   const workflowsTop = owner !== null && ownWorkflowsTop(rootRoutes, owner);
   const inFront = sessionInFront(focused, sheetStack, topRunId !== null || workflowsTop);
-  const lastTurn = useRef(state.view.turn);
+  const lastTurn = useRef(rowsSlice.view.turn);
   useEffect(() => {
-    const ended = endedTurn(lastTurn.current, state.view.turn);
-    lastTurn.current = state.view.turn;
+    const ended = endedTurn(lastTurn.current, rowsSlice.view.turn);
+    lastTurn.current = rowsSlice.view.turn;
     if (ended !== undefined && voice !== null) {
-      void voice.turnEnded({ ownTurn: ended.own, focused: inFront, rows: state.view.rows });
+      void voice.turnEnded({ ownTurn: ended.own, focused: inFront, rows: rowsSlice.view.rows });
     }
-  }, [state.view.turn, state.view.rows, voice, inFront]);
+  }, [rowsSlice.view.turn, rowsSlice.view.rows, voice, inFront]);
 
   // The spoken permission ask (eval Q4): the title template only, approval stays a tap.
-  const askSeq = state.sheet.kind === "asking" ? state.sheet.seq : undefined;
-  const askTitle = state.sheet.kind === "asking" ? state.sheet.request.title : undefined;
+  const askSeq = sheetsSlice.sheet.kind === "asking" ? sheetsSlice.sheet.seq : undefined;
+  const askTitle =
+    sheetsSlice.sheet.kind === "asking" ? sheetsSlice.sheet.request.title : undefined;
   useEffect(() => {
     if (askSeq !== undefined && askTitle !== undefined && voice !== null) {
       voice.permissionAsked({ title: askTitle }, askSeq, inFront);
@@ -529,7 +509,7 @@ export function SessionScreen({
   const visible = useRef({ first: 0, last: 0 });
   /**
    * The rows the LIST shows, current (fix/mobile-qa-1119 row 12): the viewable
-   * indexes are the FlatList's own (`state.view.rows`), and this callback is
+   * indexes are the FlatList's own (`rowsSlice.view.rows`), and this callback is
    * created once — reading `state` here read the FIRST render's (empty) rows,
    * so no thumbnail was ever asked for and every history photo drew its label.
    */
@@ -611,7 +591,7 @@ export function SessionScreen({
   // slow attach looked already settled and the history that then arrived went
   // through `contentGrew` ANIMATED: the visible scroll this fix exists to stop.
   const hasRows = useRef(false);
-  hasRows.current = state.view.rows.length > 0 || state.status.phase !== "opening";
+  hasRows.current = rowsSlice.view.rows.length > 0 || rowsSlice.status.phase !== "opening";
   // Item 1 (docs/fix/mobile-open-at-end.md): a session opens ALREADY at its end.
   // `landingStep` re-scrolls, never animated, until the end stops moving (a
   // FlatList renders the first cells only, so the end moves as the silent scroll
@@ -837,24 +817,23 @@ export function SessionScreen({
   }, []);
   const bottomPadding = composerBottomPadding({ insetBottom: insets.bottom, keyboard });
   // Items 5/6 (docs/fix/mobile-chat-glitches.md): a press that SENT the field
-  // (`state.sends`, counted by the controller) puts the keyboard down — the
+  // (`rowsSlice.sends`, counted by the controller) puts the keyboard down — the
   // reply gets the screen — and remounts the field (`fieldKey` below). 0 is
   // the mount: nothing was sent yet.
   useEffect(() => {
-    if (state.sends > 0) {
+    if (rowsSlice.sends > 0) {
       Keyboard.dismiss();
     }
-  }, [state.sends]);
+  }, [rowsSlice.sends]);
 
-  const banner = state.view.banner;
-  const rows = state.view.rows;
+  const rows = rowsSlice.view.rows;
   listRows.current = rows;
   // A resync REPLACES the rows without a viewability change: the window is
   // asked again for the rows now on screen (row 12).
   useEffect(() => {
     controller.window(visible.current.first, visible.current.last, rows);
   }, [controller, rows]);
-  const running = state.view.composer.running;
+  const running = rowsSlice.view.composer.running;
   // The perf trace's loop runs only while a turn streams on this screen.
   useEffect(() => {
     PERF.streaming(running);
@@ -1021,14 +1000,6 @@ export function SessionScreen({
       list.current?.scrollToOffset({ offset: top, animated: false });
     }
   }, []);
-  // `Date.now()` is the voice controller's own clock (`now` above); while it
-  // records, its 250 ms tick emits a new state, so the timer re-renders.
-  const voiceView = voiceComposerView(
-    voiceState,
-    dictationLocale(voiceSettings.language, deviceLocales()),
-    voiceSettings,
-    Date.now(),
-  );
   // What `renderItem` reads besides the row itself. A fresh array on every render
   // would re-render every row on any state change; the Beta switches change
   // rarely, so the identity is keyed on the two values that decide a row's look
@@ -1047,33 +1018,44 @@ export function SessionScreen({
     const timer = setInterval(() => setActivityNow(Date.now()), ACTIVITY_CLOCK_TICK_MS);
     return () => clearInterval(timer);
   }, [activityOpen]);
-  const reports = useMemo(() => reportsOf(state.transcript.rows), [state.transcript.rows]);
-  const activity = state.activity;
-  const activityVm = activityView(
-    {
-      subagents: activity.subagents,
-      jobs: activity.jobs,
-      finished: activity.memory.finished,
-      reports,
-      opened: activity.memory.opened,
-      schedules: state.schedules,
-    },
-    activityNow,
+  // The slice carries the reports as entries, so it compares them as data.
+  const reports = useMemo(() => new Map(hubSlice.reports), [hubSlice.reports]);
+  const activity = hubSlice.activity;
+  // Memoized, like the detail below: both are `SheetsPane` props, and a streamed
+  // delta changes none of their inputs.
+  const activityVm = useMemo(
+    () =>
+      activityView(
+        {
+          subagents: activity.subagents,
+          jobs: activity.jobs,
+          finished: activity.memory.finished,
+          reports,
+          opened: activity.memory.opened,
+          schedules: hubSlice.schedules,
+        },
+        activityNow,
+      ),
+    [activity, reports, hubSlice.schedules, activityNow],
   );
   // S9: the open detail — a child's (live, or Finished with its report) or a
   // shell job's — as `sheetDetail` resolves it NOW (a child that ends while open
   // flips to its report, F14).
-  const activityDetail = sheetDetail(
-    activityFocus,
-    {
-      subagents: activity.subagents,
-      jobs: activity.jobs?.rows ?? null,
-      finished: activity.memory.finished,
-      reports,
-      sent: activity.sent,
-      job: activity.job,
-    },
-    activityNow,
+  const activityDetail = useMemo(
+    () =>
+      sheetDetail(
+        activityFocus,
+        {
+          subagents: activity.subagents,
+          jobs: activity.jobs?.rows ?? null,
+          finished: activity.memory.finished,
+          reports,
+          sent: activity.sent,
+          job: activity.job,
+        },
+        activityNow,
+      ),
+    [activityFocus, activity, reports, activityNow],
   );
   const shownReport = activityDetail?.kind === "child" ? activityDetail.report : null;
   // A report counts as opened once it is ON SCREEN (also when a child the person
@@ -1207,19 +1189,12 @@ export function SessionScreen({
       compactShell,
     ],
   );
-  const compose = state.compose;
-  const status = chatStatus({
-    phase: state.status.phase,
-    link: state.transcript.link,
-    running: state.view.composer.running,
-    asking: state.sheet.kind === "asking",
-    closed: state.transcript.closed,
-  });
+  const compose = sheetsSlice.compose;
   // A turn that ends (own or another device's) taps the hand once (Owner Q4);
   // news landing on the hub glows once (mobile-hub-badges Q1 C). Both are decided
   // by ONE effect below, because they usually happen in the same render and the
   // moment must play one haptic, never two (F4).
-  const wasRunning = useRef(state.view.composer.running);
+  const wasRunning = useRef(rowsSlice.view.composer.running);
   /** The pulse state (baseline + the session it belongs to); `null` prev is "no baseline" (F1/F2). */
   const pulsePrev = useRef<PulseState>(PULSE_START);
   const [pulseSeq, setPulseSeq] = useState(0);
@@ -1236,7 +1211,12 @@ export function SessionScreen({
   const [hubNotice, setHubNotice] = useState<string | null>(null);
   const [artifactsSeen, setArtifactsSeen] = useState(() => ARTIFACT_SEEN.current());
   useEffect(() => ARTIFACT_SEEN.subscribe(setArtifactsSeen), []);
-  const menu = menuOpen ? sessionMenu(rows, state.schedules?.length ?? 0) : [];
+  // The closed menu is ONE constant: `rows` moves per delta, the pane's prop not.
+  const wakes = hubSlice.schedules?.length ?? 0;
+  const menu = useMemo(
+    () => (menuOpen ? sessionMenu(rows, wakes) : NO_MENU),
+    [menuOpen, rows, wakes],
+  );
   // Session info (docs/feat/mobile-session-info.md): the sheet, and which row the
   // person expanded. Every value it draws is decided in `session-info.ts`.
   const [infoOpen, setInfoOpen] = useState(false);
@@ -1249,7 +1229,7 @@ export function SessionScreen({
    */
   const [revealWanted, setRevealWanted] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const info = state.info;
+  const info = hubSlice.info;
   // The Tools sheet (docs/feat/mobile-hub-tools.md D5/D6): its own surface, its
   // own controls. Every value it draws is decided in `tools-view.ts` (from the
   // SAME controller facts Session info reads: one source, two projections).
@@ -1267,7 +1247,7 @@ export function SessionScreen({
   const revealTrack = useRef<RevealTrack>(trackReveal());
   const infoScroller = useRef<ComponentRef<typeof RNScrollView>>(null);
   // Owner decision 5: tapping the TITLE renames it (the field is the screen's).
-  const renaming = state.renaming;
+  const renaming = sheetsSlice.renaming;
   // The decision sheet's own state (which item the person tapped, and why).
   const [deciding, setDeciding] = useState<string | null>(null);
   const decision =
@@ -1303,7 +1283,7 @@ export function SessionScreen({
       hubMenu !== null ||
       renaming !== null ||
       decision !== null ||
-      state.sheet.kind !== "idle",
+      sheetsSlice.sheet.kind !== "idle",
     fits: band !== null && fits(band),
   });
   // A sheet or the drawer covering the button mid-scroll must not leave the hub
@@ -1343,7 +1323,7 @@ export function SessionScreen({
   // place the wakes live and can be deleted, so the hub reaches it rather than
   // growing a second wakes screen.
   const openScheduled = () =>
-    openInfo(scheduledSection(info?.view ?? null, state.schedules?.length ?? 0));
+    openInfo(scheduledSection(info?.view ?? null, hubSlice.schedules?.length ?? 0));
   // The risk strip's `Change ›` (browser-inspect B6b): Session info, ON its
   // Browser page — the same one opening path.
   const openBrowser = () => {
@@ -1414,49 +1394,66 @@ export function SessionScreen({
   // composer's photo button — one path, not two. The hub's fan no longer offers
   // it (docs/fix/workflows-ux.md D6: the composer `+` already does), so this is
   // the composer's handler alone now.
-  const openAttach = () =>
-    Alert.alert("Add an attachment", state.compose.attach.reason ?? undefined, [
+  // The composer's own facts are read at the TAP: the shell does not follow the
+  // `composer` slice.
+  const openAttach = () => {
+    const attach = store.get("composer").compose.attach;
+    Alert.alert("Add an attachment", attach.reason ?? undefined, [
       { text: "Cancel", style: "cancel" },
       { text: "Photo Library", onPress: () => void controller.pickPhoto("library") },
       { text: "Camera", onPress: () => void controller.pickPhoto("camera") },
       // Offered ONLY when this session can read one (D7's pure `attachSheet`): a
       // row that refuses at send is worse than no row, and on a pod session it
       // would put PDF bytes on a wire AGENTS §7 forbids.
-      ...(state.compose.attach.items.includes("pdf")
+      ...(attach.items.includes("pdf")
         ? [{ text: "File (PDF)", onPress: () => void controller.pickDocument() }]
         : []),
     ]);
+  };
   // What the hub offers is `hub-actions.ts`'s; a missing callback is a missing
   // item (P6). The context is read NOW for the items, and again at a commit.
-  const workflowsFigure = workflowsHub(
-    workflowsRuns ?? { kind: "loading", runs: [], offline: null },
-    catalogueFigure(state.catalogue),
-  );
-  const hubCtx = hubContextOf({
-    link: state.transcript.link,
-    turn: state.transcript.turn,
-    ended: state.transcript.closed,
-    dictation: voiceSettings.dictation,
-    activityEmpty: activityVm.nothingRunning,
-    // My compaction runs: the hub's Stop cancels it (mobile-hub-commands C2 14).
-    compacting: state.slot?.kind === "compacting",
-    // The runs AND the project's catalogue, folded by ONE pure function (fix/
-    // workflows-ux D6). Both are this screen's facts: the controller reads the
-    // catalogue at the attach, `workflowsRuns` comes from the app's own hook.
-    ...(workflowsFigure === undefined ? {} : { workflows: workflowsFigure }),
-    schedules: { rows: state.schedules, now: activityNow },
-    // The Tools item's own figures, from the sheet's OWN summary (one source,
-    // D1/D3): unknown until the controller has pulled both lists.
-    ...(info === null ? {} : { tools: toolsSummary(info.tools) }),
-    ...(artifactsSeenKey === undefined
-      ? {}
-      : {
-          artifacts: {
-            list: state.artifacts.list,
-            seen: seenFor(artifactsSeen, artifactsSeenKey),
-          },
-        }),
-  });
+  // Memoized: a streamed delta changes none of its inputs, and `HubPane`'s items
+  // must keep their identity then.
+  const hubCtx = useMemo(() => {
+    const workflowsFigure = workflowsHub(
+      workflowsRuns ?? { kind: "loading", runs: [], offline: null },
+      catalogueFigure(hubSlice.catalogue),
+    );
+    return hubContextOf({
+      link: hubSlice.link,
+      turn: hubSlice.turn,
+      ended: hubSlice.closed,
+      dictation: voiceSettings.dictation,
+      activityEmpty: activityVm.nothingRunning,
+      // My compaction runs: the hub's Stop cancels it (mobile-hub-commands C2 14).
+      compacting: hubSlice.slot?.kind === "compacting",
+      // The runs AND the project's catalogue, folded by ONE pure function (fix/
+      // workflows-ux D6). Both are this screen's facts: the controller reads the
+      // catalogue at the attach, `workflowsRuns` comes from the app's own hook.
+      ...(workflowsFigure === undefined ? {} : { workflows: workflowsFigure }),
+      schedules: { rows: hubSlice.schedules, now: activityNow },
+      // The Tools item's own figures, from the sheet's OWN summary (one source,
+      // D1/D3): unknown until the controller has pulled both lists.
+      ...(info === null ? {} : { tools: toolsSummary(info.tools) }),
+      ...(artifactsSeenKey === undefined
+        ? {}
+        : {
+            artifacts: {
+              list: hubSlice.artifacts.list,
+              seen: seenFor(artifactsSeen, artifactsSeenKey),
+            },
+          }),
+    });
+  }, [
+    hubSlice,
+    info,
+    workflowsRuns,
+    voiceSettings.dictation,
+    activityVm,
+    activityNow,
+    artifactsSeenKey,
+    artifactsSeen,
+  ]);
   const hubEntries: HubEntries = {
     stop: () => controller.stopTurn(),
     steer: () => setSteerFocus((n) => n + 1),
@@ -1472,7 +1469,19 @@ export function SessionScreen({
     ...(onOpenArtifacts === undefined ? {} : { artifacts: () => onOpenArtifacts("hub") }),
     ...(voice === null || voice === undefined ? {} : { dictate: () => voice.tapMic() }),
   };
-  const hub = hubActions(hubCtx, hubEntries);
+  // `hubActions` reads only WHICH entries exist (a commit runs this render's
+  // `hubEntries`), so the items change with the context or a presence only.
+  const hasTools = info !== null;
+  const hasWorkflows = onOpenWorkflows !== undefined;
+  const hasSessions = onOpenDrawer !== undefined;
+  const hasNew = onNewSession !== undefined;
+  const hasArtifacts = onOpenArtifacts !== undefined;
+  const hasDictate = voice !== null && voice !== undefined;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `hubEntries` is rebuilt every render; the presence flags are what the items read.
+  const hub = useMemo(
+    () => hubActions(hubCtx, hubEntries),
+    [hubCtx, hasTools, hasWorkflows, hasSessions, hasNew, hasArtifacts, hasDictate],
+  );
   const hubOpenAt = useRef<HubOpen>(hubOpen(hubCtx));
   // ── The native sheets (docs/feat/mobile-native-sheets.md D1–D5, slice S3) ──
   // The sheet is a stack ROUTE; this screen publishes its content, derives the
@@ -1501,18 +1510,18 @@ export function SessionScreen({
     // has words to read, and is swipe-dismissible. `idle` → nothing to show. Over
     // the Workflows landing only an ask brought up from its banner (`reviewed`).
     permission:
-      state.sheet.kind === "returned" ||
+      sheetsSlice.sheet.kind === "returned" ||
       askPresented({
-        asking: state.sheet.kind === "asking",
-        parked: state.sheet.kind === "asking" && state.sheet.parked,
+        asking: sheetsSlice.sheet.kind === "asking",
+        parked: sheetsSlice.sheet.kind === "asking" && sheetsSlice.sheet.parked,
         drawerOpen,
         presentable:
-          state.sheet.kind !== "asking" ||
+          sheetsSlice.sheet.kind !== "asking" ||
           askPresentable(
-            state.sheet.origin ?? { kind: "main" },
+            sheetsSlice.sheet.origin ?? { kind: "main" },
             topRunId,
             workflowsTop,
-            state.sheet.reviewed,
+            sheetsSlice.sheet.reviewed,
           ),
       }),
   });
@@ -1527,7 +1536,7 @@ export function SessionScreen({
   // The ask's route identity (D5): the daemon's id for it, so a re-delivery of
   // the SAME ask keeps its detent and its note; the sheet's own `seq` when the
   // requester had none. Recomputed only when the presented ask changes.
-  const askingSheet = state.sheet.kind === "asking" ? state.sheet : null;
+  const askingSheet = sheetsSlice.sheet.kind === "asking" ? sheetsSlice.sheet : null;
   const askId = askingSheet === null ? null : askRouteId(askingSheet.requestId, askingSheet.seq);
   // The detent the ask's sheet is at, fed by the route's `sheetDetentChange`
   // (App.tsx): the content draws the one-row form at the peek, the card above it.
@@ -1547,145 +1556,18 @@ export function SessionScreen({
   // The drawer opening over a presented ask parks it, so on return the banner
   // shows instead of a surprise sheet (frame A5).
   useEffect(() => {
-    if (drawerOpen && state.sheet.kind === "asking" && !state.sheet.parked) {
+    if (drawerOpen && sheetsSlice.sheet.kind === "asking" && !sheetsSlice.sheet.parked) {
       if (parkedKey !== null) {
         ASK_PARKS.note(parkedKey);
       }
       sheet.park();
     }
-  }, [drawerOpen, state.sheet, parkedKey, sheet]);
+  }, [drawerOpen, sheetsSlice.sheet, parkedKey, sheet]);
   // The note is spent by the sheet's own settle (`onSettled`, the controller),
   // never here: the key also goes null on a WITHDRAWAL (a detach), whose replay
   // must still open parked (Review S4–S7b, finding 1).
   const parkedKeyRef = useRef<string | null>(null);
   parkedKeyRef.current = parkedKey;
-  const queued = state.sheet.kind === "asking" ? sheet.queued : 0;
-  const banner_ask =
-    state.sheet.kind === "asking"
-      ? askBanner(state.sheet, queued, state.sheet.origin ?? { kind: "main" })
-      : null;
-  // Publish what the routes draw (D2). A layout effect, so the element is in the
-  // host before the reconciler below can push the route that reads it.
-  useLayoutEffect(() => {
-    if (owner === null) {
-      return;
-    }
-    const host = SHEET_HOSTS.host(owner.computerId, owner.sessionId);
-    host.publish(
-      "commands",
-      <CommandsSheet
-        palette={palette}
-        rows={state.commands}
-        onCompact={() => void controller.compact()}
-        onStopCompact={() => controller.cancelCompaction()}
-        onArmClear={() => controller.armClear()}
-        onCancelClear={() => controller.cancelClear()}
-        onClear={() => void controller.clear()}
-        onRename={renameFromCommands}
-        onRetry={() => controller.retryLast()}
-        onAutoAccept={(on) => void controller.setAutoAccept(on)}
-        onClose={closeCommands}
-      />,
-    );
-    host.publish(
-      "outbox",
-      <OutboxDecisionSheet
-        item={decision === null ? null : { text: decision.text }}
-        palette={palette}
-        why="something changed since you wrote this — your message is still here"
-        steerable={state.view.composer.running}
-        onSend={() => void controller.outbox("send", deciding ?? "")}
-        onSteer={() => void controller.outbox("steer", deciding ?? "")}
-        onDiscard={() => void controller.outbox("discard", deciding ?? "")}
-        onEdit={() => void controller.outbox("edit", deciding ?? "")}
-        onClose={() => setDeciding(null)}
-      />,
-    );
-    // Session info and Tools (S4) are routes too: their content is the same
-    // element it was inside a `<Modal>`, with no `visible` — the route exists only
-    // while the sheet is up, and the sheet's own list is `Sheet native`'s one
-    // scroller (F8).
-    if (info !== null) {
-      host.publish(
-        "info",
-        infoPage === "browser" ? (
-          <BrowserPage
-            palette={palette}
-            view={browserPageOf(info)}
-            {...(info.view.banner === undefined ? {} : { banner: info.view.banner.text })}
-            onBack={() => setInfoPage("info")}
-            onClose={closeInfoSheetOnly}
-            onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
-            onLockedTap={() => playHaptic("light")}
-          />
-        ) : (
-          <SessionInfoSheet
-            palette={palette}
-            view={info.view}
-            autoAcceptOn={controller.autoAcceptOn()}
-            autoAcceptError={info.autoAcceptError}
-            onAutoAccept={(on) => void controller.setAutoAccept(on)}
-            onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
-            onDeleteSchedule={(scheduleId) => void controller.deleteSchedule(scheduleId)}
-            onCopyApp={(url) => copyText(url, "sheet")}
-            onStopApp={(app) => void controller.stopApp(app)}
-            scrollRef={(node) => {
-              infoScroller.current = node;
-            }}
-            onSectionLayout={revealOnLayout}
-            onRefresh={() => void controller.refreshInfo()}
-            onRetry={() => void controller.refreshInfo()}
-            expanded={expanded}
-            onExpand={setExpanded}
-            onOpenArtifacts={openArtifactsFromInfo}
-            onOpenBrowser={() => setInfoPage("browser")}
-            onClose={closeInfoSheetOnly}
-          />
-        ),
-      );
-      host.publish(
-        "tools",
-        <ToolsSheet
-          palette={palette}
-          view={toolsView(info.tools, {
-            segment: toolsSegment,
-            query: toolsQuery,
-            open: toolsExpanded,
-          })}
-          onSwitch={(kind, name, enabled) => void controller.setCapability(kind, name, enabled)}
-          onSegment={setToolsSegment}
-          onQuery={setToolsQuery}
-          onToggle={(key, open) =>
-            setToolsExpanded((prev) => {
-              const next = new Set(prev);
-              if (open) {
-                next.add(key);
-              } else {
-                next.delete(key);
-              }
-              return next;
-            })
-          }
-          onRefresh={refreshTools}
-          onClose={closeTools}
-        />,
-      );
-    }
-    // The ask (S5) is a route too. Published even when `idle` → `undefined`, so a
-    // route pushed for the PREVIOUS ask can never draw a stale one: the host's
-    // orphan/wait rule keeps that honest (`sheetRouteView`).
-    host.publish(
-      "permission",
-      state.sheet.kind === "idle" ? undefined : (
-        <PermissionSheetView
-          sheet={sheet}
-          state={state.sheet}
-          palette={palette}
-          detent={askDetent}
-        />
-      ),
-    );
-  });
   // Unmount: the host is forgotten, so a route still up pops ITSELF instead of
   // drawing an empty sheet (the orphan leg, `sheetRouteView`).
   useEffect(() => {
@@ -1805,15 +1687,25 @@ export function SessionScreen({
       kind: step.kind,
       ...(step.kind === "info" && revealWanted ? { reveal: true } : {}),
       ...(step.kind === "permission" && askId !== null
-        ? { askId, ...(state.sheet.kind === "asking" ? { asking: true } : {}) }
+        ? { askId, ...(sheetsSlice.sheet.kind === "asking" ? { asking: true } : {}) }
         : {}),
     });
-  }, [hidden, wanted, actual, inFront, owner, navigation, revealWanted, askId, state.sheet.kind]);
+  }, [
+    hidden,
+    wanted,
+    actual,
+    inFront,
+    owner,
+    navigation,
+    revealWanted,
+    askId,
+    sheetsSlice.sheet.kind,
+  ]);
   // The ask SETTLED while its route is up (D5): the sheet must be swipeable again
   // — that is `returned` — so the route's params are rewritten in place, never
   // re-pushed (`navigate` would replace the stack's params, `openSheet`'s reason).
   // The decision is `askingParamUpdate`'s; this effect only dispatches it.
-  const permissionAsking = state.sheet.kind === "asking";
+  const permissionAsking = sheetsSlice.sheet.kind === "asking";
   useEffect(() => {
     if (owner === null) {
       return;
@@ -1879,7 +1771,7 @@ export function SessionScreen({
       void controller.refreshCatalogue();
     }
   };
-  const hubMenuItems = hubMenu === "more" ? hub.more : hubMenu === "all" ? hub.all : [];
+  const hubMenuItems = hubMenu === "more" ? hub.more : hubMenu === "all" ? hub.all : NO_HUB_ITEMS;
   const hubBadgeInput = {
     running: activityVm.count,
     unseenArtifacts: hubCtx.unseenArtifacts,
@@ -1887,7 +1779,7 @@ export function SessionScreen({
   };
   const unseen = hubBadgeInput.unseenArtifacts;
   const unread = hubBadgeInput.unreadReport;
-  const linkUp = state.transcript.link === "up";
+  const linkUp = rowsSlice.transcript.link === "up";
   // The moment news arrives (mobile-hub-badges Design 4, Q1 C + Q4): one glow on
   // the button, one light haptic — unless a turn ended in this same render, whose
   // `success` is the moment's one haptic (F4). ONE effect and ONE pure step decide
@@ -1898,8 +1790,8 @@ export function SessionScreen({
   // after a reconnect pulsed; the reset swallowed the next real increase), and a
   // dep list that could drift from the body is how the resets got out of sync.
   useEffect(() => {
-    const ended = turnEndHaptic(wasRunning.current, state.view.composer.running);
-    wasRunning.current = state.view.composer.running;
+    const ended = turnEndHaptic(wasRunning.current, rowsSlice.view.composer.running);
+    wasRunning.current = rowsSlice.view.composer.running;
     // F1/F2 are `pulseStep`'s; F3 is here: the verdict never sees `floatShown`, so a
     // hidden button's baseline still advances and its news is never replayed later —
     // only the glow and the light are dropped, and never deferred.
@@ -1915,7 +1807,7 @@ export function SessionScreen({
     if (step.pulse && floatShown) {
       setPulseSeq((n) => n + 1);
     }
-  }, [unseen, unread, linkUp, artifactsSeenKey, floatShown, state.view.composer.running]);
+  }, [unseen, unread, linkUp, artifactsSeenKey, floatShown, rowsSlice.view.composer.running]);
   // One band laid out in the sheet: scroll once, when the WANTED band has reported
   // (the rules — "once", "only the wanted one" — are `revealStep`'s, folded by
   // `reveal-report.ts`). The report is read and written synchronously, so the
@@ -1925,6 +1817,125 @@ export function SessionScreen({
     reportReveal(revealTrack.current, { id, y }, (y) => {
       infoScroller.current?.scrollTo({ y, animated: true });
     });
+  };
+  // What the memoized panes ask of the shell: one stable ref, refreshed here
+  // every render (`session/actions.ts`).
+  paneActions.current = {
+    controller,
+    openDrawer: () => onOpenDrawer?.(),
+    openActivity,
+    openInfo: () => openInfo(),
+    openMenu: () => setMenuOpen(true),
+    unparkAsk: () => {
+      if (parkedKey !== null) {
+        ASK_PARKS.forget(parkedKey);
+      }
+      sheet.unpark();
+    },
+    retry: () => {
+      // A Retry re-attaches: the history lands silently (item 1).
+      landing.current = reattachLanding(followRef.current.following);
+      controller.retry();
+    },
+    reopen: () => {
+      landing.current = reattachLanding(followRef.current.following);
+      controller.reopen();
+    },
+    selectCopied: () => setSelectText(flashText),
+    decide: setDeciding,
+    openBrowser,
+    openAttach,
+    userEdit: (text) => {
+      // The person typed: dictation yields first (F8), then the compose seam.
+      voice?.userEdit(text);
+      controller.setDraft(text);
+    },
+    // Acting from the composer is looking at the end: follow again (B5).
+    // While dictating, Return/Send finalizes first and dictation sends (F8).
+    send: (via) => {
+      setFollowState(jumped());
+      if (voice?.send(via) !== true) {
+        if (via === "return") {
+          controller.pressReturn();
+        } else {
+          controller.press();
+        }
+      }
+    },
+    tapMic: () => voice?.tapMic(),
+    solveHub: () => solveHub({ bounds: band, position: activitySettings.position, items: hub.fan }),
+    hubFan: onHubFan,
+    hubCommit: commitHub,
+    hubFlash: flashHub,
+    hubShowAll: () => setHubMenu("all"),
+    hubDrop: (position) => {
+      // Written on drop only; a failed write keeps the spot for this run (F22).
+      ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), position }).catch(() => undefined);
+    },
+    renameFromCommands,
+    closeCommands,
+    closeInfo: closeInfoSheetOnly,
+    closeTools,
+    refreshTools,
+    showInfoPage: setInfoPage,
+    copyText,
+    scrollRef: (node) => {
+      infoScroller.current = node;
+    },
+    sectionLayout: revealOnLayout,
+    expandInfo: setExpanded,
+    openArtifactsFromInfo,
+    toolsSegment: setToolsSegment,
+    toolsQuery: setToolsQuery,
+    toolsToggle: (key, open) =>
+      setToolsExpanded((prev) => {
+        const next = new Set(prev);
+        if (open) {
+          next.add(key);
+        } else {
+          next.delete(key);
+        }
+        return next;
+      }),
+    closeHubMenu: () => setHubMenu(null),
+    hubMenuPick: (id) => {
+      setHubMenu(null);
+      playHaptic("light");
+      commitHub(id);
+    },
+    closeSelectText: () => setSelectText(null),
+    closeMenu: () => setMenuOpen(false),
+    menuPick: (id, text) => {
+      setMenuOpen(false);
+      if (id === "info") {
+        // A READ, never a copy: it opens the sheet and starts the pulls.
+        openInfo();
+        return;
+      }
+      if (id === "scheduled") {
+        // The same sheet, landed on its wakes band (H4a).
+        openScheduled();
+        return;
+      }
+      void Clipboard.setStringAsync(text).then(
+        () => playHaptic("success"),
+        () => undefined,
+      );
+    },
+    focusActivity,
+    confirmStop,
+    stopRow,
+    activityScheduled: () => {
+      // One sheet at a time: leave Activity, then the ONE path into
+      // Session info (`openScheduled`, the hub's Scheduled item's too).
+      setActivityOpen(false);
+      setActivityFocus(null);
+      controller.closeDetail();
+      openScheduled();
+    },
+    showInChat,
+    link: onLink,
+    closeActivity,
   };
   return (
     <View
@@ -1940,153 +1951,16 @@ export function SessionScreen({
         behavior={Platform.OS === "ios" ? "padding" : undefined}
         keyboardVerticalOffset={offsetTop}
       >
-        <ScreenHeader
+        <HeaderPane
+          store={store}
           palette={palette}
-          variant="compact"
-          title={state.view.title}
-          onTitlePress={() => controller.beginRename()}
-          titleTestID="session-title"
-          titleLead={status.dot === null ? null : <HeaderDot palette={palette} dot={status.dot} />}
-          titleDim={status.dimTitle}
-          titleLabel={titleLabel(state.view.title, status)}
-          left={
-            onOpenDrawer === undefined ? undefined : (
-              <HeaderIcon
-                palette={palette}
-                testID="session-drawer"
-                icon="line.3.horizontal"
-                accessibilityLabel="Sessions"
-                onPress={onOpenDrawer}
-              />
-            )
-          }
-          right={
-            <>
-              {/* F1: the Activity pill, between the title and the ring, only
-                  while something runs or a report is unread (Design 5). With
-                  "Floating" the button carries it instead, unless VoiceOver
-                  runs (F23). */}
-              {pillShown ? (
-                <ActivityBadge
-                  palette={palette}
-                  testID="session-activity"
-                  label={activityVm.badgeLabel}
-                  running={activityVm.count > 0}
-                  accessibilityLabel={activityVm.accessibilityLabel}
-                  onPress={openActivity}
-                />
-              ) : null}
-              {/* A1: the context fraction as a small ring next to "…", tap →
-                  Session info (Design 2). Absent when nothing measured one. */}
-              {state.view.headerContext === null ? null : (
-                <ContextRing
-                  palette={palette}
-                  percent={state.view.headerContext.percent}
-                  onPress={() => openInfo()}
-                  testID="session-header-context"
-                />
-              )}
-              <HeaderIcon
-                palette={palette}
-                testID="session-menu"
-                icon="ellipsis"
-                accessibilityLabel="Session menu"
-                onPress={() => setMenuOpen(true)}
-              />
-            </>
-          }
-          subtitle={
-            state.view.headerFolder === null && state.view.headerModel === null ? undefined : (
-              // `<folder> · <model>` (docs/feat/mobile-header-status.md): no status
-              // word — the state is the dot before the title. Tap → Session info,
-              // which shows the full path.
-              <Pressable
-                testID="session-header-status"
-                style={styles.headerLines}
-                accessibilityRole="button"
-                accessibilityLabel={[state.view.headerFolder?.path, state.view.headerModel]
-                  .filter((part) => part !== undefined && part !== null)
-                  .join(", ")}
-                accessibilityHint="Opens Session info"
-                onPress={() => openInfo()}
-              >
-                <View style={styles.status}>
-                  {state.view.headerFolder === null ? null : (
-                    <Text
-                      testID="session-header-folder"
-                      maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                      numberOfLines={1}
-                      ellipsizeMode="middle"
-                      style={[styles.headerFolder, { color: palette.sec }]}
-                    >
-                      {state.view.headerFolder.label}
-                    </Text>
-                  )}
-                  {state.view.headerModel === null ? null : (
-                    <Text
-                      testID="session-header-model"
-                      maxFontSizeMultiplier={DENSE_FONT_SCALE}
-                      numberOfLines={1}
-                      style={[typography.caption, styles.headerModel, { color: palette.sec }]}
-                    >
-                      {state.view.headerFolder === null
-                        ? state.view.headerModel
-                        : `· ${state.view.headerModel}`}
-                    </Text>
-                  )}
-                </View>
-              </Pressable>
-            )
-          }
+          actions={paneActions}
+          hasDrawer={onOpenDrawer !== undefined}
+          pillShown={pillShown}
+          pillLabel={activityVm.badgeLabel}
+          pillRunning={activityVm.count > 0}
+          pillA11y={activityVm.accessibilityLabel}
         />
-        {banner_ask === null ? null : (
-          // The parked ask (docs/fix/mobile-ask-surfaces.md): the sheet is down, the
-          // ask is still pending. A tap brings it back (the person's intent).
-          <AskBanner
-            testID="ask-banner"
-            palette={palette}
-            view={banner_ask}
-            onPress={() => {
-              if (parkedKey !== null) {
-                ASK_PARKS.forget(parkedKey);
-              }
-              sheet.unpark();
-            }}
-          />
-        )}
-        {banner === null ? null : (
-          <View testID={`banner-${banner.kind}`}>
-            <Banner
-              palette={palette}
-              {...BANNER_LOOK[banner.kind]}
-              body={banner.text}
-              {...(state.view.retry
-                ? {
-                    action: {
-                      label: "Retry",
-                      onPress: () => {
-                        // A Retry re-attaches: the history lands silently (item 1).
-                        landing.current = reattachLanding(followRef.current.following);
-                        controller.retry();
-                      },
-                      testID: "banner-retry",
-                    },
-                  }
-                : state.view.reopen
-                  ? {
-                      action: {
-                        label: "Reopen",
-                        onPress: () => {
-                          landing.current = reattachLanding(followRef.current.following);
-                          controller.reopen();
-                        },
-                        testID: "reopen",
-                      },
-                    }
-                  : {})}
-            />
-          </View>
-        )}
         <View
           style={styles.screen}
           onLayout={(event) => {
@@ -2116,7 +1990,7 @@ export function SessionScreen({
                   voiceState,
                   item,
                   rows,
-                  state.view.composer.running,
+                  rowsSlice.view.composer.running,
                   voiceSettings,
                 );
                 const child =
@@ -2146,7 +2020,7 @@ export function SessionScreen({
                     voice={voice !== null}
                     artifacts={onOpenArtifacts !== undefined}
                     palette={palette}
-                    thumbnails={state.thumbnails}
+                    thumbnails={rowsSlice.thumbnails}
                     diagramStyle={diagramStyle}
                     chartLabels={chartSettings.labels}
                     actions={cellActions}
@@ -2161,15 +2035,15 @@ export function SessionScreen({
               // node — and it leaves in the `queued` that drops its row.
               ListFooterComponent={
                 layout.tail === null &&
-                state.slot === null &&
-                state.view.pending.length === 0 ? undefined : (
+                rowsSlice.slot === null &&
+                rowsSlice.view.pending.length === 0 ? undefined : (
                   <>
                     {/* The compaction slot (mobile-hub-commands C2 item 15): in the
                         Thinking node's place; `slotView` already yields to a turn. */}
-                    {state.slot === null ? null : (
+                    {rowsSlice.slot === null ? null : (
                       <CompactSlotNode
                         palette={palette}
-                        slot={state.slot}
+                        slot={rowsSlice.slot}
                         reduceMotion={a11yFlags.reduceMotion}
                       />
                     )}
@@ -2183,11 +2057,11 @@ export function SessionScreen({
                       />
                     )}
                     <PendingBubbles
-                      bubbles={state.view.pending}
+                      bubbles={rowsSlice.view.pending}
                       palette={palette}
                       ctx={{
-                        link: state.view.state === "Live",
-                        turn: state.view.composer.running,
+                        link: rowsSlice.view.state === "Live",
+                        turn: rowsSlice.view.composer.running,
                         sendNow: compose.sendNow,
                         unqueue: !compose.unqueueOff,
                       }}
@@ -2239,7 +2113,7 @@ export function SessionScreen({
               // `controller.resync()`'s (never a second session path).
               refreshControl={
                 <RefreshControl
-                  refreshing={state.refreshing}
+                  refreshing={rowsSlice.refreshing}
                   onRefresh={() => {
                     // A re-attach lands silently at the end (item 1): never a second
                     // visible scroll through the transcript.
@@ -2285,7 +2159,7 @@ export function SessionScreen({
                 // minHeight: with the mascot the empty view has no child while open, and a
                 // 0-height view is "not visible" to XCUITest (flow 34-hub-new asserts it).
                 <View testID="transcript-empty" style={{ minHeight: 1 }}>
-                  {state.status.phase === "opening" ? (
+                  {rowsSlice.status.phase === "opening" ? (
                     <EmptyState palette={palette} loading title="Opening the session…" />
                   ) : null}
                 </View>
@@ -2298,7 +2172,7 @@ export function SessionScreen({
               band's own edges clip it — behind the header above, behind the
               composer below — and it unmounts the moment a row arrives (owner
               decision 5). */}
-          {showsScene({ phase: state.status.phase, rowCount: rows.length }) && !settling ? (
+          {showsScene({ phase: rowsSlice.status.phase, rowCount: rows.length }) && !settling ? (
             <MascotSceneLayer
               geometry={band ?? { width: 0, height: 0 }}
               reduceMotion={a11yFlags.reduceMotion}
@@ -2337,15 +2211,16 @@ export function SessionScreen({
             </Pressable>
           ) : null}
           {activitySettings.mode === "floating" ? (
-            <FloatingActivity
+            <HubPane
+              store={store}
               palette={palette}
+              actions={paneActions}
               bounds={band}
               position={activitySettings.position}
               shown={floatShown}
               scroll={scrollDim}
               count={buttonBadge(hubBadgeInput)?.n ?? null}
               pulse={pulseSeq}
-              turnRunning={state.view.composer.running}
               accessibilityLabel={hubA11yLabel(hubBadgeInput)}
               voiceOver={a11yFlags.voiceOver}
               reduceMotion={a11yFlags.reduceMotion}
@@ -2353,292 +2228,48 @@ export function SessionScreen({
               opacity={activitySettings.opacity}
               fanItems={hub.fan}
               allItems={hub.all}
-              solve={() =>
-                solveHub({ bounds: band, position: activitySettings.position, items: hub.fan })
-              }
-              onFanChange={onHubFan}
-              onCommit={commitHub}
-              onFlash={flashHub}
-              onMenu={() => setHubMenu("all")}
-              onDrop={(position) => {
-                // Written on drop only; a failed write keeps the spot for this run (F22).
-                ACTIVITY_SETTINGS.set({ ...ACTIVITY_SETTINGS.current(), position }).catch(
-                  () => undefined,
-                );
-              }}
             />
           ) : null}
         </View>
-        {/* ONE element, two ids: `turn-running` while a turn streams (own or
-          another device's) and `turn-idle` otherwise. It is always on screen as
-          a zero-size observable — `display: none` would hide it from XCUITest
-          (plan P9); the visible "running" cue is the header's status line. */}
-        <Text
-          testID={state.view.composer.running ? "turn-running" : "turn-idle"}
-          style={styles.observable}
-        >
-          {" "}
-        </Text>
-        {hubNotice === null ? null : (
-          <Text
-            testID="hub-notice"
-            style={[typography.footnote, styles.notice, { color: palette.sec }]}
-          >
-            {hubNotice}
-          </Text>
-        )}
-        {state.notice === null ? null : (
-          <Text
-            testID="composer-notice"
-            style={[typography.footnote, styles.notice, { color: palette.red }]}
-          >
-            {state.notice}
-          </Text>
-        )}
-        {/* 13d: the notices the compose half owns (each with its own testID), then
-          the queue rows, another device's returned rows, the outbox's rows and
-          the chips — all values, no decisions (AGENTS §7). */}
-        {state.view.notices.map((notice) => (
-          <NoticeRow key={notice.testId} notice={notice} palette={palette} />
-        ))}
-        <QueueRows
-          view={{ returnedOthers: compose.returnedOthers }}
+        <ComposerPane
+          store={store}
           palette={palette}
-          onTake={(id) => void controller.take(id)}
-        />
-        {compose.editing === null ? null : (
-          <View style={[styles.editBanner, { backgroundColor: palette.tint }]}>
-            <Text
-              testID="composer-editing"
-              numberOfLines={1}
-              style={[typography.footnote, styles.flex, { color: palette.accent }]}
-            >
-              Editing pending message
-            </Text>
-            <Pressable
-              testID="composer-editing-cancel"
-              accessibilityRole="button"
-              accessibilityLabel="Stop editing and queue it again"
-              hitSlop={10}
-              onPress={() => void controller.editCanceled()}
-            >
-              <Icon name="xmark" color={palette.accent} size={14} />
-            </Pressable>
-          </View>
-        )}
-        {/* The copy confirmation (docs/feat/mobile-copy-text.md D3): absolutely
-            positioned, so the transcript's layout (and `follow.ts` `contentGrew`)
-            never changes because somebody copied a message. */}
-        {copyFlash === null || !copyFlashShown(copyFlash, Date.now()) ? null : (
-          <CopyFlash
-            outcome={copyFlash.outcome}
-            palette={palette}
-            {...(copyFlash.outcome.kind === "copy"
-              ? { onSelect: () => setSelectText(flashText) }
-              : {})}
-          />
-        )}
-        <OutboxRows
-          rows={compose.outbox}
-          palette={palette}
-          onDecide={setDeciding}
-          // Retry is the decision sheet's Send (S4): the SAME act, one path.
-          onRetry={(itemId) => void controller.outbox("send", itemId)}
-        />
-        <Chips
-          chips={compose.chips}
-          palette={palette}
-          onRemove={(key) => void controller.removeChip(key)}
-        />
-        {voiceView.card === undefined || voiceView.card.message === undefined ? null : (
-          <Banner
-            palette={palette}
-            testID="voice-card"
-            tone={voiceView.card.card === "unavailable" ? "info" : "warn"}
-            icon="mic"
-            body={voiceView.card.message}
-            {...(voiceView.card.settings
-              ? {
-                  action: {
-                    label: "Open Settings",
-                    onPress: () => void Linking.openSettings(),
-                    testID: "voice-card-settings",
-                  },
-                }
-              : {})}
-          />
-        )}
-        {voiceView.notice === undefined ? null : (
-          <Text
-            testID="voice-notice"
-            style={[typography.footnote, styles.notice, { color: palette.sec }]}
-          >
-            {voiceView.notice}
-          </Text>
-        )}
-        {/* The risk strip (browser-inspect B6b): by the composer, only while the
-          browser acts alone or shows secrets. */}
-        {state.riskStrip === null ? null : (
-          <RiskStrip palette={palette} items={state.riskStrip} onChange={openBrowser} />
-        )}
-        <Composer
-          palette={palette}
-          fieldKey={state.sends}
-          focus={focusComposer}
-          draft={state.draft}
-          editable={state.view.editable}
-          placeholder={
-            state.view.composer.placeholder ??
-            (state.view.editable
-              ? (voiceView.placeholder ?? "Message tentacle")
-              : "This session has ended")
-          }
-          button={state.view.composer.button}
-          slot={state.view.composer.slot}
-          sendNow={compose.sendNow}
-          // The compact shape's "holds something" (docs/feat/mobile-composer-compact.md
-          // D1): any chip on screen, and an edit banner above the field.
-          attachments={compose.chips.length}
-          editing={compose.editing !== null}
-          onSendNow={() => void controller.sendNow()}
-          onChange={(text) => {
-            // The person typed: dictation yields first (F8), then the compose seam.
-            voice?.userEdit(text);
-            controller.setDraft(text);
-          }}
-          // Acting from the composer is looking at the end: follow again (B5).
-          // While dictating, Return/Send finalizes first and dictation sends (F8).
-          onReturn={() => {
-            setFollowState(jumped());
-            playHaptic(pressHaptic(state.view.composer.action, "return"));
-            if (voice?.send("return") !== true) {
-              controller.pressReturn();
-            }
-          }}
-          onPress={() => {
-            setFollowState(jumped());
-            playHaptic(pressHaptic(state.view.composer.action, "button"));
-            if (voice?.send("press") !== true) {
-              controller.press();
-            }
-          }}
-          mic={state.view.editable ? voiceView.mic : "hidden"}
-          onMic={() => voice?.tapMic()}
-          micCaption={voiceView.caption}
-          onPhoto={openAttach}
-          focusKey={steerFocus}
+          actions={paneActions}
+          voiceState={voiceState}
+          voiceSettings={voiceSettings}
+          deviceLocales={deviceLocales}
+          copyFlash={copyFlash}
+          hubNotice={hubNotice}
+          steerFocus={steerFocus}
+          focusComposer={focusComposer}
           bottomPadding={bottomPadding}
         />
-        {state.view.composer.photosNotice === null ? null : (
-          <Text
-            testID="composer-photos-notice"
-            style={[typography.footnote, styles.notice, { color: palette.sec }]}
-          >
-            {state.view.composer.photosNotice}
-          </Text>
-        )}
-        {/* The ask is a native sheet ROUTE now (docs/feat/mobile-native-sheets.md
-            S5): this screen PUBLISHES its element on `SHEET_HOSTS` (the block
-            above) and the route draws it, so it is not mounted here — no RN
-            `Modal` over a `formSheet` (F6). */}
-        {/* Outbox's decision and Commands are native sheet ROUTES now
-            (docs/feat/mobile-native-sheets.md S3): this screen PUBLISHES their
-            elements on `SHEET_HOSTS` (the block above) and the route draws them,
-            so they are not mounted here. */}
-        {/* The hub's plain menu (Design 5/7): "More" (the overflow), no fan fits,
-          or VoiceOver's long-press / Show all (everything). */}
-        <ActionSheet
+        <SheetsPane
+          store={store}
           palette={palette}
-          visible={hubMenu !== null && !yields}
-          testID="hub-menu-sheet"
-          cancelTestID="hub-menu-cancel"
-          actions={hubMenuItems.map((item) => ({
-            label: item.label,
-            testID: `hub-menu-${item.id}`,
-            ...(item.danger ? { destructive: true } : {}),
-            onPress: () => {
-              setHubMenu(null);
-              playHaptic("light");
-              commitHub(item.id);
-            },
-          }))}
-          onCancel={() => setHubMenu(null)}
-        />
-        <SelectTextSheet
-          palette={palette}
-          text={yields ? null : selectText}
-          onClose={() => setSelectText(null)}
-          onCopyAll={(text) => copyText(text, "sheet")}
-        />
-        <ActionSheet
-          palette={palette}
-          visible={menuOpen && !yields}
-          testID="session-menu-sheet"
-          cancelTestID="session-menu-cancel"
-          message={menu.every((action) => action.text === "") ? "Nothing to copy yet" : undefined}
-          actions={menu.map((action) => ({
-            label: action.label,
-            testID: `session-menu-${action.id}`,
-            onPress: () => {
-              setMenuOpen(false);
-              if (action.id === "info") {
-                // A READ, never a copy: it opens the sheet and starts the pulls.
-                openInfo();
-                return;
-              }
-              if (action.id === "scheduled") {
-                // The same sheet, landed on its wakes band (H4a).
-                openScheduled();
-                return;
-              }
-              void Clipboard.setStringAsync(action.text).then(
-                () => playHaptic("success"),
-                () => undefined,
-              );
-            },
-          }))}
-          onCancel={() => setMenuOpen(false)}
-        />
-        {/* Session info and Tools are native sheet ROUTES now
-            (docs/feat/mobile-native-sheets.md S4), like Outbox and Commands: this
-            screen PUBLISHES their elements on `SHEET_HOSTS` (the block above) and
-            the route draws them, so they are not mounted here. */}
-        <ActivitySheet
-          palette={palette}
-          visible={activityOpen && !yields}
-          view={activityVm}
-          detail={activityDetail}
-          focus={activityFocus}
-          now={activityNow}
-          child={activity.child}
-          job={activity.job}
-          onFocus={focusActivity}
-          onDraft={(text) => controller.setChildDraft(text)}
-          onSend={() => void controller.messageChild()}
-          onStop={confirmStop}
-          onStopRow={stopRow}
+          actions={paneActions}
+          owner={owner}
+          deciding={deciding}
+          infoPage={infoPage}
+          expanded={expanded}
+          toolsSegment={toolsSegment}
+          toolsQuery={toolsQuery}
+          toolsExpanded={toolsExpanded}
+          askDetent={askDetent}
+          yields={yields}
+          hubMenuOpen={hubMenu !== null}
+          hubMenuItems={hubMenuItems}
+          menuOpen={menuOpen}
+          menu={menu}
+          selectText={selectText}
+          activityOpen={activityOpen}
+          activityVm={activityVm}
+          activityDetail={activityDetail}
+          activityFocus={activityFocus}
+          activityNow={activityNow}
           arm={arm}
-          stopNotices={activity.stopNotices}
-          onRefreshJob={() => void controller.refreshJob()}
-          onScheduled={() => {
-            // One sheet at a time: leave Activity, then the ONE path into
-            // Session info (`openScheduled`, the hub's Scheduled item's too).
-            setActivityOpen(false);
-            setActivityFocus(null);
-            controller.closeDetail();
-            openScheduled();
-          }}
-          {...(showIndex === null ? {} : { onShow: showInChat })}
-          onLink={onLink}
-          onClose={closeActivity}
+          canShow={showIndex !== null}
           reduceMotion={a11yFlags.reduceMotion}
-        />
-        <RenameSheet
-          palette={palette}
-          state={yields ? null : renaming}
-          onChange={(text) => controller.setRenameText(text)}
-          onSave={() => void controller.submitRename()}
-          onCancel={() => controller.cancelRename()}
         />
       </KeyboardAvoidingView>
     </View>
@@ -2651,12 +2282,6 @@ const styles = StyleSheet.create({
   hidden: { flex: 1, opacity: 0 },
   list: { paddingTop: 8, paddingBottom: 16 },
   emptyList: { flexGrow: 1, justifyContent: "center" },
-  status: { flexDirection: "row", alignItems: "center", gap: 5 },
-  headerLines: { alignItems: "center", gap: 4, maxWidth: "100%" },
-  // The MODEL gives way first (a far larger shrink factor); the folder then
-  // middle-ellipsizes, so its last component stays (owner addendum).
-  headerModel: { flexShrink: 100 },
-  headerFolder: { fontFamily: MONO, fontSize: 11, lineHeight: 16, flexShrink: 1 },
   jump: {
     position: "absolute",
     alignSelf: "center",
@@ -2674,30 +2299,4 @@ const styles = StyleSheet.create({
   },
   // arrow only: a 36 pt circle (hitSlop 4 → 44 pt target)
   jumpIcon: { width: 36, paddingHorizontal: 0, justifyContent: "center" },
-  notice: { paddingHorizontal: 16, paddingBottom: 6 },
-  // The editing banner above the field (D6): the label takes the row, the × keeps
-  // its own width (it was `styles.flex`, i.e. undefined).
-  editBanner: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginHorizontal: 16,
-    marginBottom: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
-  },
-  flex: { flexShrink: 1 },
-  // The turn observable: on screen (XCUITest sees it), takes no room. 1×1 and
-  // absolute, not 0×0: iOS 26 drops an empty-frame element from the
-  // accessibility tree, so `turn-idle` vanished (slice 6 walk, flows 23/24).
-  observable: {
-    position: "absolute",
-    left: 0,
-    bottom: 0,
-    width: 1,
-    height: 1,
-    fontSize: 1,
-    color: "transparent",
-  },
 });

@@ -104,7 +104,7 @@ describe("a fan item is a solid disc with a count rim (Designs 6–7–9, owners
 
 describe("the screen wires the pulse (Design 4, failure modes F1–F6)", () => {
   test("it passes a count and a pulse sequence to the button", () => {
-    const at = SCREEN.indexOf("<FloatingActivity");
+    const at = SCREEN.indexOf("<HubPane");
     const props = SCREEN.slice(at, SCREEN.indexOf("/>", at));
     expect(props).toContain("count={buttonBadge(hubBadgeInput)?.n ?? null}");
     expect(props).toContain("pulse={pulseSeq}");

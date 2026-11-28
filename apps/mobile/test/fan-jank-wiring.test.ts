@@ -48,10 +48,14 @@ describe("a streamed delta re-renders the screen at most once per window", () =>
 
   test("the controller defers a stream fold and fires everything else at once", () => {
     expect(CONTROLLER).toMatch(
-      /if \(cause === "stream"\) \{\n\s*render\.soon\(\);\n\s*\} else \{\n\s*emit\(\);/,
+      /if \(cause === "stream"\) \{\n\s*store\.publish\("stream"\);\n\s*\} else \{\n\s*emit\(\);/,
     );
-    expect(CONTROLLER).toMatch(/function emit\(\): void \{\n\s*render\.now\(\);\n\s*\}/);
-    expect(CONTROLLER).toMatch(/render\.dispose\(\);/);
+    expect(CONTROLLER).toMatch(/function emit\(\): void \{\n\s*store\.publish\("now"\);\n\s*\}/);
+    expect(CONTROLLER).toMatch(/store\.dispose\(\);/);
+    // The window lives inside the store (docs/feat/mobile-ui-fluidity-s3.md).
+    const STORE = code("src", "session-store.ts");
+    expect(STORE).toMatch(/if \(cause === "stream"\) \{\n\s*coalescer\.soon\(\);/);
+    expect(STORE).toMatch(/coalescer\.dispose\(\);/);
   });
 });
 
