@@ -5,7 +5,7 @@
  */
 import type { JSX } from "react";
 import { View, type ViewProps } from "react-native";
-import type { Row } from "../../transcript-rows.ts";
+import type { ListItem } from "../../tool-steps.ts";
 
 export interface CellRect {
   readonly top: number;
@@ -13,7 +13,7 @@ export interface CellRect {
 }
 
 type CellProps = ViewProps & {
-  readonly item?: Row;
+  readonly item?: ListItem;
   readonly cellKey?: string;
   readonly index?: number;
 };

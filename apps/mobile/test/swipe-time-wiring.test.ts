@@ -70,7 +70,7 @@ describe("SessionScreen renders one row per cell, wrapped in SwipeTime", () => {
   test("`renderItem` wraps TranscriptRow in SwipeTime with the row's own time", () => {
     // Drawn by the memoized cell (docs/fix/mobile-fan-jank-device.md).
     const cell = read("screens", "transcript", "TranscriptCell.tsx");
-    expect(src).toMatch(/<TranscriptCell\s+row=\{item\}/);
+    expect(src).toMatch(/<TranscriptCell \{\.\.\.cellDataOf\(item, cellEnv, false\)\}/);
     expect(cell).toMatch(/<SwipeTime[\s\S]{0,200}label=\{rowTimeLabel\(row\)\}/);
     expect(cell).toMatch(/<SwipeTime[\s\S]*<TranscriptRow[\s\S]*<\/SwipeTime>/);
   });

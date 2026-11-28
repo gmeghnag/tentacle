@@ -22,6 +22,8 @@ import {
 } from "./perf-trace.ts";
 
 const noPaneRenders = (): Record<PaneName, number> => ({
+  tail: 0,
+  cells: 0,
   header: 0,
   composer: 0,
   hub: 0,

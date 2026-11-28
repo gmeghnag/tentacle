@@ -102,7 +102,7 @@ describe("H4a: one opening path for Session info", () => {
     expect(pane("SheetsPane.tsx")).toContain("actions.current.menuPick(action.id, action.text)");
     // The menu is built with the wakes count, or the action could never appear.
     expect(source).toContain("const wakes = hubSlice.schedules?.length ?? 0;");
-    expect(source).toContain("sessionMenu(rows, wakes)");
+    expect(source).toContain("sessionMenu(settled, wakes)");
   });
 
   test("the sheet hands back a real `onSectionLayout`, typed by the band id", () => {

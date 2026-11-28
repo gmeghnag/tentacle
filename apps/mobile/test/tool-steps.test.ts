@@ -5,10 +5,13 @@
  * list cell per row stays the contract: the layout only says how a row draws.
  */
 import { describe, expect, test } from "bun:test";
+import { sameData } from "../src/session-store.ts";
 import {
   CONTEXT_BODY_LINES,
   contextRowView,
   isOpen,
+  listData,
+  liveRow,
   stepA11yLabel,
   stepLayout,
   toggleOpen,
@@ -489,5 +492,41 @@ describe("the live tail's `since`: the stamp of what opened the thinking period"
       expect(tail).not.toBeNull();
       expect(tail).not.toHaveProperty("since");
     }
+  });
+});
+
+describe("liveRow / listData (docs/feat/mobile-ui-fluidity-s4.md)", () => {
+  const rowsOf: [string, Row, boolean][] = [
+    ["user", user("u"), false],
+    ["assistant", text("a"), true],
+    ["reasoning", think("r"), true],
+    ["tool", tool("t1", "running"), false],
+    ["notice", notice("n"), false],
+    ["context", context("c"), false],
+  ];
+
+  for (const [kind, last, live] of rowsOf) {
+    test(`last row ${kind}: live only when it streams AND a turn runs`, () => {
+      expect(liveRow([user("u0"), last], true)).toBe(live ? last : null);
+      expect(liveRow([user("u0"), last], false)).toBeNull();
+    });
+  }
+
+  test("no rows: nothing is live", () => {
+    expect(liveRow([], true)).toBeNull();
+  });
+
+  test("the stand-in is last, carries the live key, and stays equal across calls", () => {
+    const settled = [user("u"), tool("t1")];
+    const data = listData(settled, "a1");
+    expect(data).toHaveLength(3);
+    expect(data[0]).toBe(settled[0] as Row);
+    expect(data[2]).toEqual({ kind: "live", key: "a1" });
+    expect(sameData(data, listData(settled, "a1"))).toBe(true);
+  });
+
+  test("no live key: the settled array itself", () => {
+    const settled = [user("u")];
+    expect(listData(settled, null)).toBe(settled);
   });
 });

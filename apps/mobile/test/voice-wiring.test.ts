@@ -145,7 +145,11 @@ describe("the Beta switches reach this screen without a remount", () => {
     );
     expect(screen).toContain("voiceSettings={voiceSettings}");
     expect(pane).not.toContain("VOICE_SETTINGS.current()");
-    expect(screen).toMatch(/speakButtonOf\([\s\S]{0,240}?voiceSettings,\s*\)/);
+    // The speaker's switch reaches each cell through `cellEnv`; `cellDataOf` asks.
+    expect(screen).toContain("speakShown: voiceSettings.readAloudButton,");
+    expect(code(read(APP, "src", "transcript-cell.ts"))).toMatch(
+      /speakButtonOf\([\s\S]{0,240}?\{ readAloudButton: env\.speakShown \}/,
+    );
     // No render-time read survives the switch: that is the bug this task fixes.
     expect(screen).not.toContain("VOICE_SETTINGS.current().language");
   });

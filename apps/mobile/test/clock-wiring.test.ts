@@ -34,8 +34,8 @@ describe("the step rows own no clock of their own", () => {
     expect(body).toContain('clock="thinking"');
     expect(node).toMatch(/<ClockText[\s\S]{0,300}since=\{liveFrom\}[\s\S]{0,300}format=\{clock\}/);
     expect(body).toContain('clockTestID="thinking-clock"');
-    expect(code("src/screens/SessionScreen.tsx")).toMatch(
-      /<ThinkingNode[^>]*since: layout\.tail\.since/,
+    expect(code("src/screens/session/TailPane.tsx")).toMatch(
+      /<ThinkingNode[^>]*since: thinking\.since/,
     );
   });
 

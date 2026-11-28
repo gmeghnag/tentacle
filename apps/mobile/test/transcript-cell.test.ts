@@ -6,11 +6,15 @@
 import { describe, expect, test } from "bun:test";
 import {
   type CellData,
+  type CellEnv,
+  cellDataOf,
   sameCellData,
   sameCellProps,
   sameLook,
   sameStepCell,
 } from "../src/transcript-cell.ts";
+import type { Row } from "../src/transcript-rows.ts";
+import { speakButtonOf } from "../src/voice-view.ts";
 
 const row = { kind: "assistant", key: "a1", text: "hi" };
 const palette = { page: "#fff" };
@@ -138,5 +142,110 @@ describe("sameCellData", () => {
     expect(sameStepCell({ kind: "hidden" }, { kind: "hidden" })).toBe(true);
     expect(sameStepCell(undefined, undefined)).toBe(true);
     expect(sameLook(undefined, { glyph: null, joined: false })).toBe(false);
+  });
+});
+
+describe("cellDataOf (docs/feat/mobile-ui-fluidity-s4.md)", () => {
+  const userRow: Row = { kind: "user", key: "u", text: "q", images: [] };
+  const earlier: Row = { kind: "assistant", key: "a0", text: "answer", version: 6 };
+  const toolRow: Row = {
+    kind: "tool",
+    key: "t1",
+    id: "call-1",
+    name: "agent",
+    label: "Agent",
+    args: "{}",
+    status: "ok",
+  };
+  const noticeRow: Row = { kind: "notice", key: "n", text: "note" };
+  const reply: Row = { kind: "assistant", key: "a1", text: "writing", version: 7 };
+  const env = (over: Partial<CellEnv> = {}): CellEnv => ({
+    palette: {} as CellEnv["palette"],
+    thumbnails: {} as CellEnv["thumbnails"],
+    diagramStyle: "native" as CellEnv["diagramStyle"],
+    chartLabels: "inside" as CellEnv["chartLabels"],
+    reduceMotion: true,
+    compactShell: true,
+    voice: true,
+    readAloud: { kind: "idle", nextId: 1 },
+    speakShown: true,
+    artifacts: true,
+    activity: {
+      subagents: null,
+      memory: { finished: [{ row: { id: "child-1", callId: "call-1" } as never, endedAt: 1 }] },
+    },
+    cells: new Map([["t1", { kind: "context", thread: { up: true, down: false } }]]),
+    looks: new Map([
+      ["n", { glyph: null, joined: true }],
+      ["t1", { glyph: null, joined: false }],
+    ]),
+    openSteps: ["t1"],
+    fullSteps: [],
+    ...over,
+  });
+
+  test("the props are what the shell built: cell, look (notices only), open, full, child", () => {
+    const e = env();
+    expect(cellDataOf(toolRow, e, false)).toEqual({
+      row: toolRow,
+      cell: { kind: "context", thread: { up: true, down: false } },
+      look: undefined,
+      open: true,
+      full: false,
+      reduceMotion: true,
+      compactShell: true,
+      speak: undefined,
+      child: "child-1",
+      voice: true,
+      artifacts: true,
+      palette: e.palette,
+      thumbnails: e.thumbnails,
+      diagramStyle: e.diagramStyle,
+      chartLabels: e.chartLabels,
+    });
+    expect(cellDataOf(noticeRow, e, false).look).toEqual({ glyph: null, joined: true });
+    expect(cellDataOf(userRow, e, false).child).toBeNull();
+    expect(cellDataOf(userRow, e, false).open).toBe(false);
+  });
+
+  const speaking = (rowKey: string): CellEnv["readAloud"] => ({
+    kind: "speaking",
+    nextId: 2,
+    id: 1,
+    rowKey,
+    index: 0,
+    total: 1,
+  });
+  const states: [string, CellEnv["readAloud"]][] = [
+    ["idle", { kind: "idle", nextId: 1 }],
+    ["speaking the earlier row", speaking("a0")],
+    ["speaking the live row", speaking("a1")],
+    ["no voice state", undefined],
+  ];
+  const rows = [userRow, earlier, reply];
+
+  for (const [name, readAloud] of states) {
+    for (const running of [true, false]) {
+      for (const speakShown of [true, false]) {
+        test(`speaker = speakButtonOf over the full rows: ${name}, running=${running}, shown=${speakShown}`, () => {
+          for (const row of rows) {
+            const today = speakButtonOf(
+              readAloud === undefined ? null : { readAloud },
+              row,
+              rows,
+              running,
+              { readAloudButton: speakShown },
+            );
+            const data = cellDataOf(row, env({ readAloud, speakShown }), running && row === reply);
+            expect([row.key, data.speak]).toEqual([row.key, today]);
+          }
+        });
+      }
+    }
+  }
+
+  test("non-vacuity: the live row is not offered, the same row settled is", () => {
+    expect(cellDataOf(reply, env(), true).speak).toBeUndefined();
+    expect(cellDataOf(reply, env(), false).speak).toBe("offered");
   });
 });

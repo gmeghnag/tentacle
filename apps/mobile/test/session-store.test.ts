@@ -101,12 +101,16 @@ function harness() {
 function pushedTurn() {
   const queue: SessionEvent[] = [];
   let wake: (() => void) | null = null;
+  let done = false;
   const events = (async function* () {
     for (;;) {
       const next = queue.shift();
       if (next !== undefined) {
         yield next;
         continue;
+      }
+      if (done) {
+        return;
       }
       await new Promise<void>((resolve) => {
         wake = resolve;
@@ -115,6 +119,10 @@ function pushedTurn() {
   })();
   return {
     activity: { kind: "turn", turnId: "t1", events, cancel: () => {} } as SessionActivity,
+    end: (): void => {
+      done = true;
+      wake?.();
+    },
     push: (e: SessionEvent): void => {
       queue.push(e);
       wake?.();
@@ -130,58 +138,116 @@ async function baseState(): Promise<SessionScreenState> {
   return h.screen.state();
 }
 
-const OTHERS: readonly SliceKey[] = ["header", "composer", "hub", "sheets"];
+/** Everything a delta must leave alone: the shell's own slice and the other panes'. */
+const OTHERS: readonly SliceKey[] = ["rows", "header", "composer", "hub", "sheets"];
 
-describe("a streamed delta wakes only the transcript", () => {
-  test("30 reasoning deltas: `rows` is new at every publish; the other slices are the same objects", async () => {
-    const h = harness();
-    await h.screen.open();
+const toolStart = { type: "tool_start", id: "c1", name: "fs_read", arguments: "{}" };
+const toolEnd = { type: "tool_result", id: "c1", name: "fs_read", result: { content: "x" } };
+
+/** A running turn after one finished tool round, on the real controller. */
+async function streaming() {
+  const h = harness();
+  await h.screen.open();
+  await settle();
+  const turn = pushedTurn();
+  h.emit(turn.activity);
+  await settle();
+  const push = async (e: unknown, ms = 200): Promise<void> => {
+    turn.push(e as SessionEvent);
     await settle();
-    const turn = pushedTurn();
-    h.emit(turn.activity);
+    h.time.advance(ms);
     await settle();
-    for (let i = 0; i < 2; i += 1) {
-      turn.push({ type: "reasoning", delta: "warm " } as SessionEvent);
-      await settle();
-      h.time.advance(200);
-      await settle();
-    }
-    const store = h.screen.sessionStore();
-    const kept = new Map(SLICE_KEYS.map((key) => [key, store.get(key)]));
-    const woken = new Map<SliceKey, number>();
-    for (const key of SLICE_KEYS) {
-      store.subscribe(key, () => woken.set(key, (woken.get(key) ?? 0) + 1));
-    }
-    let publishes = 0;
-    let rows = store.get("rows");
-    const stale: string[] = [];
-    store.onPublish(() => {
-      publishes += 1;
-      if (store.get("rows") === rows) {
-        stale.push(`rows kept at publish ${publishes}`);
+  };
+  await push(toolStart);
+  await push(toolEnd);
+  return { ...h, push, end: turn.end, store: h.screen.sessionStore() };
+}
+
+describe("a streamed delta wakes only the tail", () => {
+  for (const type of ["reasoning", "text"] as const) {
+    test(`30 ${type} deltas: only \`tail\` is new at each publish; every other slice is the same object`, async () => {
+      const h = await streaming();
+      for (let i = 0; i < 2; i += 1) {
+        await h.push({ type, delta: "warm " });
       }
-      rows = store.get("rows");
-      for (const key of OTHERS) {
-        if (store.get(key) !== kept.get(key)) {
-          stale.push(`${key} changed at publish ${publishes}`);
+      const { store } = h;
+      const kept = new Map(SLICE_KEYS.map((key) => [key, store.get(key)]));
+      const woken = new Map<SliceKey, number>();
+      for (const key of SLICE_KEYS) {
+        store.subscribe(key, () => woken.set(key, (woken.get(key) ?? 0) + 1));
+      }
+      let publishes = 0;
+      let tail = store.get("tail");
+      const stale: string[] = [];
+      store.onPublish(() => {
+        publishes += 1;
+        if (store.get("tail") === tail) {
+          stale.push(`tail kept at publish ${publishes}`);
         }
+        tail = store.get("tail");
+        for (const key of OTHERS) {
+          if (store.get(key) !== kept.get(key)) {
+            stale.push(`${key} changed at publish ${publishes}`);
+          }
+        }
+      });
+      for (let i = 0; i < 30; i += 1) {
+        await h.push({ type, delta: `w${i} ` }, 50);
       }
+      expect(publishes).toBeGreaterThanOrEqual(10);
+      expect(stale).toEqual([]);
+      expect(woken.get("tail") ?? 0).toBe(publishes);
+      for (const key of OTHERS) {
+        expect([key, woken.get(key) ?? 0]).toEqual([key, 0]);
+      }
+      // Non-vacuity: the real app's `info` IS rebuilt at every state read.
+      expect(h.screen.state().info).not.toBeNull();
+      expect(h.screen.state().info).not.toBe(h.screen.state().info);
+    });
+  }
+
+  test("turn end: no live row, and `settled` is every row of the view, the same objects", async () => {
+    const h = await streaming();
+    await h.push({ type: "text", delta: "done " });
+    const live = h.store.get("rows");
+    expect(live.liveKey).not.toBeNull();
+    expect(live.settled.length).toBe(h.screen.state().view.rows.length - 1);
+    await h.push({ type: "turn_end", reason: "end_turn" });
+    h.end();
+    await settle();
+    h.time.advance(200);
+    await settle();
+    const view = h.screen.state().view;
+    expect(view.composer.running).toBe(false);
+    const rows = h.store.get("rows");
+    expect(rows.liveKey).toBeNull();
+    expect(h.store.get("tail").live).toBeNull();
+    expect(rows.settled.length).toBe(view.rows.length);
+    expect(rows.settled.every((row, i) => row === view.rows[i])).toBe(true);
+    // Non-vacuity: the reply is the LAST row, the one a turn would stream.
+    expect(rows.settled.at(-1)?.kind).toBe("assistant");
+  });
+
+  test("text after a finished tool: 30 deltas change `rows` exactly once", async () => {
+    const h = await streaming();
+    let changes = 0;
+    const before = h.store.get("rows");
+    const down = (slice: typeof before): boolean | undefined => {
+      const key = slice.settled.find((r) => r.kind === "tool")?.key ?? "";
+      const cell = new Map(slice.cells).get(key);
+      return cell?.kind === "step" ? cell.thread.down : undefined;
+    };
+    expect(down(before)).toBe(true);
+    expect(before.liveKey).toBeNull();
+    h.store.subscribe("rows", () => {
+      changes += 1;
     });
     for (let i = 0; i < 30; i += 1) {
-      turn.push({ type: "reasoning", delta: `w${i} ` } as SessionEvent);
-      await settle();
-      h.time.advance(50);
-      await settle();
+      await h.push({ type: "text", delta: `w${i} ` }, 50);
     }
-    expect(publishes).toBeGreaterThanOrEqual(10);
-    expect(stale).toEqual([]);
-    expect(woken.get("rows") ?? 0).toBe(publishes);
-    for (const key of OTHERS) {
-      expect([key, woken.get(key) ?? 0]).toEqual([key, 0]);
-    }
-    // Non-vacuity: the real app's `info` IS rebuilt at every state read.
-    expect(h.screen.state().info).not.toBeNull();
-    expect(h.screen.state().info).not.toBe(h.screen.state().info);
+    expect(changes).toBe(1);
+    expect(down(h.store.get("rows"))).toBe(false);
+    expect(h.store.get("rows").liveKey).not.toBeNull();
   });
 });
 
@@ -228,6 +294,10 @@ describe("every fact wakes exactly its slices", () => {
   });
 
   for (const fact of Object.keys(SLICE_FACTS) as SliceFact[]) {
+    // `view.rows` reaches slices through derived members only: spelled out below.
+    if (fact === "view.rows") {
+      continue;
+    }
     test(fact, async () => {
       const base = await baseState();
       expect(changedSlices(base, changed(base, fact))).toEqual(
@@ -243,7 +313,10 @@ describe("every fact wakes exactly its slices", () => {
       ["draft", ["composer"]],
       ["notice", ["composer"]],
       ["riskStrip", ["composer"]],
-      ["compose", ["composer", "sheets"]],
+      ["compose", ["composer", "sheets", "tail"]],
+      ["slot", ["hub", "tail"]],
+      ["view.pending", ["composer", "tail"]],
+      ["view.state", ["header", "tail"]],
       ["view.title", ["header"]],
       ["view.headerContext", ["header"]],
       ["askQueued", ["header", "sheets"]],
@@ -263,7 +336,7 @@ describe("every fact wakes exactly its slices", () => {
     const down = { ...base, transcript: { ...base.transcript, link: "down" as const } };
     expect(changedSlices(base, down)).toEqual(["rows", "header", "hub"]);
     const turn = { ...base, transcript: { ...base.transcript, turn: { turnId: "t9" } as never } };
-    expect(changedSlices(base, turn)).toEqual(["rows", "hub"]);
+    expect(changedSlices(base, turn)).toEqual(["hub"]);
     const report = {
       kind: "notice",
       key: "n1",
@@ -271,10 +344,81 @@ describe("every fact wakes exactly its slices", () => {
       note: { kind: "subagent_report", id: "c1" },
     } as never;
     const reported = { ...base, transcript: { ...base.transcript, rows: [report] } };
-    expect(changedSlices(base, reported)).toEqual(["rows", "hub"]);
-    // The same report in a new rows array: nobody but the transcript cares.
+    expect(changedSlices(base, reported)).toEqual(["hub"]);
+    // The same report in a new rows array: nobody cares.
     const again = { ...base, transcript: { ...base.transcript, rows: [report] } };
-    expect(changedSlices(reported, again)).toEqual(["rows"]);
+    expect(changedSlices(reported, again)).toEqual([]);
+  });
+
+  test("`transcript` and `view.rows` reach a slice only through its derived members", async () => {
+    expect(SLICE_FACTS.transcript).toEqual([]);
+    expect(SLICE_FACTS["view.rows"]).toEqual([]);
+    const base = await baseState();
+    const user = { kind: "user", key: "u1", text: "hi" } as never;
+    const reply = (text: string) => ({ kind: "assistant", key: "a1", text }) as never;
+    const thought = (text: string) => ({ kind: "reasoning", key: "r1", text }) as never;
+    const withRows = (rows: never[], running: boolean): SessionScreenState => ({
+      ...base,
+      view: { ...base.view, rows, composer: { ...base.view.composer, running } },
+    });
+    // The same rows in a new array: nobody.
+    expect(changedSlices(withRows([user], false), withRows([user], false))).toEqual([]);
+    // `settled`: a settled row arrives.
+    expect(changedSlices(withRows([], false), withRows([user], false))).toEqual(["rows"]);
+    // `live`: the live row's own text.
+    const a = withRows([user, reply("a")], true);
+    expect(changedSlices(a, withRows([user, reply("ab")], true))).toEqual(["tail"]);
+    // `liveKey` (+ `live`): a live row appears.
+    expect(changedSlices(withRows([user], true), a)).toEqual(["rows", "tail"]);
+    // `thinking`: the tail's thought.
+    const t = withRows([user, thought("mm")], true);
+    const t2 = withRows([user, thought("mmm")], true);
+    expect(changedSlices(t, t2)).toEqual(["tail"]);
+    expect(deriveSlices(t2).tail.thinking?.thought).toContain("mmm");
+  });
+});
+
+describe("a changed slice keeps every member that did not change", () => {
+  const kept = (a: SessionScreenState, b: SessionScreenState) => {
+    const prev = deriveSlices(a);
+    return { prev, next: keepSlices(prev, deriveSlices(b)) };
+  };
+  /** Rebuilt at every read, equal each time: what a real state read hands out. */
+  const rebuilt = (s: SessionScreenState): SessionScreenState => ({
+    ...s,
+    activity: { ...s.activity, memory: { ...s.activity.memory } },
+    view: { ...s.view, rows: [...s.view.rows], composer: { ...s.view.composer } },
+  });
+
+  test("a catalogue-only change: `hub` is new, `hub.activity` is the previous object", async () => {
+    const base = await baseState();
+    const { prev, next } = kept(base, { ...rebuilt(base), catalogue: { changed: true } as never });
+    expect(next.hub).not.toBe(prev.hub);
+    expect(next.hub.activity).toBe(prev.hub.activity);
+    expect(next.hub.reports).toBe(prev.hub.reports);
+  });
+
+  test("a status-only change: `rows` is new, `cells` and `settled` are the previous ones", async () => {
+    const base = await baseState();
+    const tool = {
+      kind: "tool",
+      key: "t1",
+      id: "c1",
+      name: "fs_read",
+      input: {},
+      status: "ok",
+    } as never;
+    const seeded = { ...base, view: { ...base.view, rows: [tool] } };
+    const { prev, next } = kept(seeded, {
+      ...rebuilt(seeded),
+      status: { ...seeded.status, changed: true } as never,
+    });
+    expect(next.rows).not.toBe(prev.rows);
+    expect(next.rows.cells.length).toBe(1);
+    expect(next.rows.cells).toBe(prev.rows.cells);
+    expect(next.rows.looks).toBe(prev.rows.looks);
+    expect(next.rows.settled).toBe(prev.rows.settled);
+    expect(next.rows.view.composer).toBe(prev.rows.view.composer);
   });
 });
 

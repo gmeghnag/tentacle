@@ -4,6 +4,11 @@
  * while nothing it reads has changed — so a streamed token wakes only the
  * transcript. The render coalescer lives inside (`publish("stream")`).
  *
+ * The transcript itself is split in two (docs/feat/mobile-ui-fluidity-s4.md):
+ * `rows` is what the shell and its list read (the settled rows and what each
+ * cell draws besides its row), `tail` is what a streamed delta changes (the row
+ * being written, the Thinking line, the footer). A delta wakes only `tail`.
+ *
  * A publish carries no data: `read()` at fire time is the latest state, so a
  * coalesced or queued publish never loses anything.
  *
@@ -11,13 +16,23 @@
  * injected.
  */
 import { type ChildReport, reportsOf } from "./activity-memory.ts";
+import { type NoticeLook, noticeLooks } from "./notice-group.ts";
 import { createRenderCoalescer } from "./render-coalesce.ts";
 import type { SessionScreenState } from "./session-screen-controller.ts";
 import type { SessionView } from "./session-view.ts";
+import { type StepCell, type StepLayout, isBlockRow, liveRow, stepLayout } from "./tool-steps.ts";
+import type { Row } from "./transcript-rows.ts";
 
-export type SliceKey = "rows" | "header" | "composer" | "hub" | "sheets";
+export type SliceKey = "rows" | "header" | "composer" | "hub" | "sheets" | "tail";
 
-export const SLICE_KEYS: readonly SliceKey[] = ["rows", "header", "composer", "hub", "sheets"];
+export const SLICE_KEYS: readonly SliceKey[] = [
+  "rows",
+  "header",
+  "composer",
+  "hub",
+  "sheets",
+  "tail",
+];
 
 type TopFact = Exclude<keyof SessionScreenState, "view">;
 type ViewFact = `view.${keyof SessionView}`;
@@ -27,18 +42,18 @@ export type SliceFact = TopFact | ViewFact;
  * Which slices carry each fact. TOTAL over the state and its view: a new field
  * does not compile until somebody says which parts of the screen read it. A
  * slice's TYPE follows this table, so reading a fact it does not carry does not
- * compile either.
+ * compile either. `[]`: the fact reaches slices through derived members only.
  */
 export const SLICE_FACTS = {
   status: ["rows", "header"],
-  transcript: ["rows"],
+  transcript: [],
   draft: ["composer"],
   notice: ["composer"],
   sheet: ["header", "sheets"],
   askQueued: ["header", "sheets"],
   askAutoAccepted: ["sheets"],
   thumbnails: ["rows"],
-  compose: ["composer", "sheets"],
+  compose: ["composer", "sheets", "tail"],
   info: ["hub", "sheets"],
   riskStrip: ["composer"],
   renaming: ["header", "sheets"],
@@ -48,27 +63,27 @@ export const SLICE_FACTS = {
   refreshing: ["rows", "sheets"],
   catalogue: ["hub"],
   artifacts: ["rows", "hub"],
-  slot: ["rows", "hub"],
+  slot: ["hub", "tail"],
   commands: ["hub", "sheets"],
   "view.title": ["header"],
   "view.project": ["header"],
   "view.headerModel": ["header"],
   "view.headerFolder": ["header"],
   "view.headerContext": ["header"],
-  "view.state": ["rows", "header"],
+  "view.state": ["header", "tail"],
   "view.banner": ["rows", "header"],
   "view.retry": ["header"],
   "view.reopen": ["header"],
-  "view.rows": ["rows"],
+  "view.rows": [],
   "view.turn": ["rows"],
-  "view.composer": ["rows", "composer", "hub", "sheets"],
+  "view.composer": ["rows", "composer", "hub", "sheets", "tail"],
   "view.editable": ["composer"],
   "view.queued": ["composer"],
   "view.returnedOthers": ["composer"],
   "view.outbox": ["composer"],
   "view.photos": ["composer"],
   "view.notices": ["composer"],
-  "view.pending": ["rows", "composer"],
+  "view.pending": ["composer", "tail"],
   "view.editing": ["composer"],
   "view.unqueueOff": ["composer"],
 } as const satisfies { readonly [K in SliceFact]: readonly SliceKey[] };
@@ -97,6 +112,22 @@ type SliceData<K extends SliceKey> = Pick<SessionScreenState, FactsOf<K> & TopFa
  * Facts DERIVED from a bigger one that a slice must not carry whole (the
  * transcript changes on every delta; these do not).
  */
+interface RowsDerived {
+  readonly link: "up" | "down";
+  /** The rows without the live one: the same array while its rows are the same objects. */
+  readonly settled: readonly Row[];
+  /** The key of the row the stream is writing (the list's stand-in), or null. */
+  readonly liveKey: string | null;
+  /** `stepLayout`'s cells and `noticeLooks`, as ENTRIES (see `reports`). */
+  readonly cells: readonly (readonly [string, StepCell])[];
+  readonly looks: readonly (readonly [string, NoticeLook])[];
+}
+interface TailDerived {
+  /** The row the stream is writing, or null. */
+  readonly live: Row | null;
+  /** The live "Thinking…" node (`stepLayout`'s tail), or null. */
+  readonly thinking: StepLayout["tail"];
+}
 interface HeaderDerived {
   readonly link: "up" | "down";
   readonly closed: SessionScreenState["transcript"]["closed"];
@@ -114,7 +145,8 @@ interface HubDerived {
   readonly reports: readonly (readonly [string, ChildReport])[];
 }
 
-export type RowsSlice = SliceData<"rows">;
+export type RowsSlice = SliceData<"rows"> & RowsDerived;
+export type TailSlice = SliceData<"tail"> & TailDerived;
 export type HeaderSlice = SliceData<"header"> & HeaderDerived;
 export type ComposerSlice = SliceData<"composer">;
 export type HubSlice = SliceData<"hub"> & HubDerived;
@@ -126,10 +158,41 @@ export interface SessionSlices {
   readonly composer: ComposerSlice;
   readonly hub: HubSlice;
   readonly sheets: SheetsSlice;
+  readonly tail: TailSlice;
+}
+
+/** What the list draws, from the FULL rows (the Thinking state reads the live one). */
+type ListFacts = Omit<RowsDerived, "link"> & TailDerived;
+
+function listFacts(rows: readonly Row[], running: boolean): ListFacts {
+  const layout = stepLayout(rows, running, isBlockRow);
+  const live = liveRow(rows, running);
+  return {
+    settled: live === null ? rows : rows.slice(0, -1),
+    liveKey: live?.key ?? null,
+    cells: [...layout.cells],
+    looks: [...noticeLooks(rows, layout.cells)],
+    live,
+    thinking: layout.tail,
+  };
+}
+
+/** A one-entry memo on `(rows, running)`: a publish that kept the rows derives nothing. */
+export function createListMemo(): typeof listFacts {
+  let last: { rows: readonly Row[]; running: boolean; facts: ListFacts } | null = null;
+  return (rows, running) => {
+    if (last === null || last.rows !== rows || last.running !== running) {
+      last = { rows, running, facts: listFacts(rows, running) };
+    }
+    return last.facts;
+  };
 }
 
 /** The slices of a state, as FRESH objects (identity is `keepSlices`' job). */
-export function deriveSlices(s: SessionScreenState): SessionSlices {
+export function deriveSlices(
+  s: SessionScreenState,
+  list: typeof listFacts = listFacts,
+): SessionSlices {
   const out: Record<string, Record<string, unknown>> = {};
   for (const key of SLICE_KEYS) {
     out[key] = { view: {} };
@@ -148,6 +211,18 @@ export function deriveSlices(s: SessionScreenState): SessionSlices {
     }
   }
   const { link, turn, closed } = s.transcript;
+  const { settled, liveKey, cells, looks, live, thinking } = list(
+    s.view.rows,
+    s.view.composer.running,
+  );
+  Object.assign(out.rows as object, {
+    link: s.transcript.link,
+    settled,
+    liveKey,
+    cells,
+    looks,
+  });
+  Object.assign(out.tail as object, { live, thinking });
   Object.assign(out.header as object, {
     link,
     closed,
@@ -207,35 +282,42 @@ function isPlain(value: object): boolean {
   );
 }
 
-/** The previous slice object wherever nothing the slice carries changed. */
+/**
+ * The previous slice object wherever nothing the slice carries changed; in a
+ * changed slice, the previous reference of every member (and `view.` member)
+ * that did not — a memo keyed on one member survives its neighbours' changes.
+ */
 export function keepSlices(prev: SessionSlices | null, next: SessionSlices): SessionSlices {
   if (prev === null) {
     return next;
   }
   const out = {} as Record<SliceKey, unknown>;
   for (const key of SLICE_KEYS) {
-    out[key] = sameSlice(prev[key], next[key]) ? prev[key] : next[key];
+    out[key] = keepMembers(prev[key], next[key]);
   }
   return out as unknown as SessionSlices;
 }
 
-/** Whether every member of two slices is equal under its fact's policy. */
-function sameSlice(a: object, b: object, prefix = ""): boolean {
+/** `a` when every member of `b` equals it under its fact's policy, else `b` over `a`'s equal members. */
+function keepMembers(a: object, b: object, prefix = ""): object {
   const before = a as Record<string, unknown>;
   const after = b as Record<string, unknown>;
   const keys = Object.keys(after);
-  return (
-    keys.length === Object.keys(before).length &&
-    keys.every((key) => {
-      if (prefix === "" && key === "view") {
-        return sameSlice(before.view as object, after.view as object, "view.");
-      }
+  const out: Record<string, unknown> = {};
+  let same = keys.length === Object.keys(before).length;
+  for (const key of keys) {
+    if (prefix === "" && key === "view") {
+      out[key] = keepMembers(before.view as object, after.view as object, "view.");
+    } else {
       // A derived member is not in `REF_FACTS`: it is compared as data.
-      return REF_FACTS.has(`${prefix}${key}` as SliceFact)
+      const equal = REF_FACTS.has(`${prefix}${key}` as SliceFact)
         ? Object.is(before[key], after[key])
         : sameData(before[key], after[key]);
-    })
-  );
+      out[key] = equal && Object.hasOwn(before, key) ? before[key] : after[key];
+    }
+    same = same && Object.hasOwn(before, key) && out[key] === before[key];
+  }
+  return same ? a : out;
 }
 
 export interface SessionStore {
@@ -267,15 +349,17 @@ export function createSessionStore(deps: SessionStoreDeps): SessionStore {
   const whole = new Set<(state: SessionScreenState) => void>();
   const bySlice = new Map<SliceKey, Set<() => void>>(SLICE_KEYS.map((key) => [key, new Set()]));
 
+  const list = createListMemo();
+
   const current = (): SessionSlices => {
-    slices ??= deriveSlices(deps.read());
+    slices ??= deriveSlices(deps.read(), list);
     return slices;
   };
 
   const publishOnce = (): void => {
     const full = deps.read();
     const prev = slices;
-    const next = keepSlices(prev, deriveSlices(full));
+    const next = keepSlices(prev, deriveSlices(full, list));
     slices = next;
     for (const fn of whole) {
       fn(full);
