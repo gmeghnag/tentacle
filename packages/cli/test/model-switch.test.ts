@@ -50,7 +50,7 @@ function config(over: Partial<TentacleConfig> = {}): TentacleConfig {
     baseURL: "http://main/v1",
     model: "main-id",
     contextWindow: 111_000,
-    apiKey: "s3cret-main",
+    apiKey: "s3cret-main", // #notsecret
   };
   return {
     ...base,
