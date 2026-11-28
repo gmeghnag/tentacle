@@ -1,7 +1,11 @@
 /**
- * Stream batching (12b): coalesce a turn's deltas into one state commit per
- * frame window (~50 ms, injected clock), so a fast stream does not re-render the
- * transcript per chunk (plan F23).
+ * Stream batching (12b): coalesce a turn's deltas into fewer state commits. The
+ * feed wires it for a BACKLOG only (docs/feat/mobile-ui-fluidity-s6.md): once a
+ * drain has folded for `SLICE_MS` without a wait (`createSlicer`), prose is held
+ * and merged, and released by the budget, a type switch or a non-prose event —
+ * never by time (the feed's window is infinite; `WINDOW_MS`, ~50 ms on an
+ * injected clock, is the plan F23 default). A live stream folds each delta at
+ * once.
  *
  * The contract the tests pin: the BATCHED final state equals the UNBATCHED fold
  * of the same events. So this module never decides what an event means — it only
@@ -19,6 +23,44 @@ type Mergeable = Extract<SessionEvent, { type: "text" | "reasoning" }>;
 
 function isMergeable(event: SessionEvent): event is Mergeable {
   return event.type === "text" || event.type === "reasoning";
+}
+
+/** A backlog is folded in slices of at most this much fold time (eval row 6). */
+export const SLICE_MS = 8;
+/** A gap this long between two events means the loop waited: a new task. */
+export const GAP_MS = 2;
+
+/**
+ * Whether a drain has used its slice: the loop tells it when each event arrives
+ * and when it is dealt with, on an INJECTED clock.
+ */
+export interface Slicer {
+  /** An event arrived at `t`: a wait since the last `done` starts a new slice. */
+  arrive(t: number): void;
+  /** A fold finished at `t`: true when the slice has used its budget (yield now). */
+  done(t: number): boolean;
+  /** The loop yielded (or a deferred flush ran): the next event starts a slice. */
+  reset(): void;
+}
+
+export function createSlicer(sliceMs: number = SLICE_MS, gapMs: number = GAP_MS): Slicer {
+  /** When the running slice began; null before the first event of one. */
+  let start: number | null = null;
+  let lastDone = 0;
+  return {
+    arrive(t) {
+      if (start === null || t - lastDone >= gapMs) {
+        start = t;
+      }
+    },
+    done(t) {
+      lastDone = t;
+      return start !== null && t - start >= sliceMs;
+    },
+    reset() {
+      start = null;
+    },
+  };
 }
 
 export interface Batcher {

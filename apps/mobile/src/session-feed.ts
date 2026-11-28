@@ -26,6 +26,7 @@ import type { SessionActivity, SessionEvent } from "@tentacle/client";
 import type { AttachmentRef } from "@tentacle/protocol";
 import { type ErrorShape, errorShape } from "./app-log.ts";
 import type { QueueTrace } from "./queue-trace.ts";
+import { createBatcher, createSlicer } from "./stream-batch.ts";
 import {
   type LocalPhoto,
   type State,
@@ -122,6 +123,15 @@ export interface SessionFeedDeps {
    * time; history rows always take the daemon's.
    */
   readonly now?: () => number;
+  /**
+   * The ingestion budget's clock and timer (docs/feat/mobile-ui-fluidity-s6.md):
+   * a backlog is folded in slices, yielding between them. Absent (a unit feed):
+   * every event folds as it is read.
+   */
+  readonly slice?: {
+    readonly clock: () => number;
+    readonly schedule: (fn: () => void, ms: number) => () => void;
+  };
 }
 
 /**
@@ -177,6 +187,68 @@ export interface SessionFeed {
   successorTurn(turnId: string, events: AsyncIterable<SessionEvent>): Promise<void>;
   /** A stream this feed already folded ended (`link` drops flush nothing: events are immediate). */
   link(up: boolean): void;
+}
+
+/**
+ * One stream's ingestion budget (docs/feat/mobile-ui-fluidity-s6.md). A live
+ * stream waits between its events and each folds at once. A BACKLOG is drained
+ * with no wait: once it has folded for a slice the loop yields to the event
+ * loop, and from there prose is held and merged until the budget, a type switch,
+ * a non-prose event, the stream's end — or, once the backlog drains into
+ * silence, the next task — releases it.
+ */
+function createPace(
+  slice: NonNullable<SessionFeedDeps["slice"]>,
+  fold: (event: SessionEvent) => void,
+) {
+  const slicer = createSlicer();
+  // Never released by time: see `createBatcher`.
+  const batcher = createBatcher(Number.POSITIVE_INFINITY);
+  let backlog = false;
+  /** Cancels the armed flush of held prose; null when none is armed. */
+  let deferred: (() => void) | null = null;
+  const release = (): void => {
+    deferred?.();
+    deferred = null;
+    for (const held of batcher.flush()) {
+      fold(held);
+    }
+  };
+  return {
+    arrive(): void {
+      slicer.arrive(slice.clock());
+    },
+    release,
+    /** Deal with one event. A promise back: the slice is spent, await it (a yield). */
+    take(event: SessionEvent): Promise<void> | null {
+      if (!backlog) {
+        fold(event);
+      } else {
+        for (const out of batcher.push(event, 0)) {
+          fold(out);
+        }
+        if (batcher.pending() && deferred === null) {
+          // Runs once the loop is parked on an empty queue: a held delta never
+          // waits for the NEXT event, and the stream is live again.
+          deferred = slice.schedule(() => {
+            deferred = null;
+            release();
+            backlog = false;
+            slicer.reset();
+          }, 0);
+        }
+      }
+      if (!slicer.done(slice.clock())) {
+        return null;
+      }
+      release();
+      backlog = true;
+      slicer.reset();
+      return new Promise<void>((resolve) => {
+        slice.schedule(resolve, 0);
+      });
+    },
+  };
 }
 
 /**
@@ -262,33 +334,48 @@ function foldStream(
       deps.setForeign(null);
     }
   };
+  /** One event (or a backlog's merged prose) into the transcript. */
+  const fold = (event: SessionEvent): void => {
+    // The receipt clock: a row this event CREATES takes it (a delta that only
+    // extends an existing row keeps that row's own time). A `history_reset`
+    // ignores it — its rows take the daemon's `times`.
+    deps.put(
+      apply(deps.state(), event as TranscriptInput, now()),
+      event.type === "text" || event.type === "reasoning" ? "stream" : undefined,
+    );
+    if (event.type === "history_reset") {
+      // The reset REPLACED the history mid-turn: its fill is gone with it.
+      deps.onHistoryReplaced?.();
+    }
+  };
+  const pace = deps.slice === undefined ? null : createPace(deps.slice, fold);
   return (async () => {
     let ended = false;
     let reason: StopReason | undefined;
     try {
       for await (const event of stream) {
+        pace?.arrive();
         drawPrompt(event);
         if (event.type === "turn_end") {
           ended = true;
           reason = event.reason;
         }
-        // The receipt clock: a row this event CREATES takes it (a delta that only
-        // extends an existing row keeps that row's own time). A `history_reset`
-        // ignores it — its rows take the daemon's `times`.
-        deps.put(
-          apply(deps.state(), event as TranscriptInput, now()),
-          event.type === "text" || event.type === "reasoning" ? "stream" : undefined,
-        );
-        if (event.type === "history_reset") {
-          // The reset REPLACED the history mid-turn: its fill is gone with it.
-          deps.onHistoryReplaced?.();
+        if (pace === null) {
+          fold(event);
+          continue;
+        }
+        const pause = pace.take(event);
+        if (pause !== null) {
+          await pause;
         }
       }
+      pace?.release();
     } catch (error) {
       // The stream threw: its outcome can never arrive (`remote-session.ts`
       // `fail`). Said as LOST, never as a silent stop (F8/F19) — and the error
       // still reaches whoever awaited this, which is how a refusal gets its
-      // text back.
+      // text back. What a backlog still held arrived BEFORE the loss.
+      pace?.release();
       finish({ ended: false, threw: true, cause: errorShape(error) });
       throw error;
     }

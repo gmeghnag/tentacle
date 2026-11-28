@@ -1,6 +1,6 @@
 # feat/mobile-ui-fluidity-s6 — ingestion budget: a backlog is folded in ≤ 8 ms slices, prose merged
 
-> **Status:** implementation (APPROVED — owner delegated the details, see Orchestrator decisions)
+> **Status:** executed as approved — **do NOT merge yet**: an ordering bug in the design is open (Implementation → "Plan correction")
 > **Branch:** `feat/mobile-ui-fluidity-s6`
 > Type: feat · Size: S · Blast: contained · Suited: Opus plan + fresh Opus review (owner night rule), Sonnet exec
 > **Changelog:** `changelog.d/mobile-ui-fluidity-s6.fixed.md`
@@ -375,12 +375,52 @@ catch: release(); finish(lost); throw
 | Non-prose event in a backlog (tool call, `turn_end`, `history_reset`) | `batcher.push` releases the held prose first, then the event (`stream-batch.ts:53-56`); order exact (B5) |
 | Stream throws mid-backlog | `release()` before `finish(lost)`; the error still rejects `ownTurn` (B6) |
 | Stream ends mid-backlog | `release()` before `finish`; the fold promise settles after it, so `successorTurn` waits for it |
-| A new foreign `turn` activity while the old stream still holds prose | the old stream holds across a macrotask only while parked mid-prose (no `turn_end` yet, so its turn is still running); the deferred flush lands one macrotask later. Same interleaving class as today's two concurrent `for await`s (`:341-347`), not widened beyond one task |
+| A new foreign `turn` activity while the old stream still holds prose | **WRONG — see "Plan correction" below (executor, 2026-11-28). Open: not converging.** (Planned text: the old stream holds across a macrotask only while parked mid-prose, so not widened beyond one task.) |
 | One fold > 8 ms (a big `history_reset`) | not split: the budget bounds slices, not one fold. Out of scope (eval row 6) |
 | Live stream | gaps ≥ 2 ms reset the slice, the budget never trips, no timer is armed, every delta folds at once (B3; gate 0 holds) |
 | Unmount mid-backlog | the stream keeps folding into the dead controller, as today; a deferred flush is one more `put` of that kind |
 | Receipt times | a row created by a merged fold is stamped at the fold, ≤ one slice after its first delta arrived (a replay's times are replay-time anyway) |
 | `slice` absent (unit feeds) | today's loop exactly |
+
+### Plan correction (OPEN — needs approval before merge)
+
+*— claude-sonnet-5-5, 2026-11-28*
+
+**The contradiction.** The budget yield (`session-feed.ts`, `createPace.take`) also
+spans a macrotask while the stream still has **unread** events, its `turn_end`
+possibly among them. Today a buffered drain is one task, so no activity can land
+inside it. Now a frame can: `activity()` handles it at once, ahead of the older
+stream's remaining events. Reachable on attach/reconnect, when the replay holds one
+turn's end followed by the next turn's start, or a resync snapshot
+(`closeWithoutOutcome` closes the old queue but keeps its buffered items, then
+raises `history`: `client/src/remote-session.ts` `onReset`).
+
+**Evidence** (`.tentacle/tmp/mobile-ui-fluidity-s6/interleave.ts`: this branch's
+`createSessionFeed`; turn A = 3 000 deltas + `turn_end`, buffered; one activity
+arrives at A's first yield):
+
+```
+UNSLICED · next: turn
+  trace: turn-start A | turn-end A ended | turn-start B
+  open bracket: B · Stop (foreign): B
+  rows: reasoning(3000) assistant(8)
+SLICED · next: turn
+  trace: turn-start A | turn-start B | turn-end A ended
+  open bracket: null · Stop (foreign): null          <- B runs, no Stop, A closed B's bracket
+  rows: reasoning(64) assistant(8) reasoning(2936)   <- A's reply split around B's
+UNSLICED · next: history
+  rows: assistant(8)
+SLICED · next: history
+  rows: assistant(8) reasoning(2936)                 <- stale prose appended to the snapshot
+```
+
+**Proposed correction (NOT implemented: outside the approved Implementation).** A
+stream that spent a slice is *catching up* until its loop ends, or until a flush
+armed after the yield runs (it can only run once the drain is parked; so arm it
+even with nothing held). While any stream is catching up, `createSessionFeed`
+queues `activity()` and `ownTurn`'s bracket behind it, in arrival order
+(`successorTurn` already waits). A live stream never spends a slice, so it is
+unchanged. Tests: the two scenarios above, red on this branch.
 
 ### Tests
 
@@ -436,7 +476,92 @@ in `catch` (B6).
 
 ## Execution
 
-*(empty — the executor's)*
+*— claude-sonnet-5-5, 2026-11-28*
+
+**Open, blocks merge:** the Plan correction above. The approved steps are built and
+green, and wiring them exposes that ordering bug in the app. The correction is not
+coded.
+
+**Load-bearing check (re-run before editing): holds.** The worktree had no
+`node_modules`, so I ran `bun install --frozen-lockfile` in it. Repro copy
+`ingest-runs-tree.ts` = the Context script plus two arguments: argv[3] is the tree
+whose `apps/mobile` is imported (packages stay the main checkout's; `packages` and
+`apps/mobile` had no diff against `main`), argv[4] is busy µs per fold inside
+`onStreamFold`, standing in for a slower engine.
+
+```
+jit ATTACH N=4000: caught up in 61 ms | 4000 stream folds, 10 notifications | longest run of folds with NO macrotask between: 4000 folds over 2.5 ms
+```
+
+**As built, in order**
+
+1. `stream-batch.ts`: `SLICE_MS`, `GAP_MS`, `createSlicer`, header. 3 slicer tests
+   red on a never-spent stub, then green. The gap test passes on the stub (m4
+   proves it).
+2. `session-feed.ts`: `slice?` dep, `createPace` (the Design's loop body, as one
+   function), one `fold` helper, `release()` at the end and in `catch`. B1, B2, B5
+   red first (a 625.25 ms task; 5 000 and 6 000 stream puts), then green. B3, B4, B6,
+   B7 are guards, green on both.
+3. `session-screen-controller.ts`: `schedule` hoisted, `slice` passed. C red first
+   (5 000 folds), then green.
+4. `changelog.d/mobile-ui-fluidity-s6.fixed.md`.
+
+**Drift**
+
+- B driver: a fold costs 0.125 ms, not 0.1 (exact sums); B1's bound is
+  `SLICE_MS + 2 × 0.125`, because the turn bracket's `put` rides on the first slice.
+  C uses 0.125 too. B5 also asserts merged puts.
+- Gate 0 ran on the branch only (below).
+- The failure-mode row for a new foreign turn is wrong (Plan correction).
+
+**Mutations** (`mutate.ts`: apply, run the 3 touched test files, write the original
+back). All caught:
+
+| Mutation | Red |
+|---|---|
+| m1 no `await` at the budget | B1 (50 pass, 1 fail) |
+| m2 no deferred flush | B4, C (49 / 2) |
+| m3 fold prose directly in backlog mode | B2, B5, C (48 / 3) |
+| m4 no gap reset in `arrive` | slicer gap test, B3 (49 / 2) |
+| m5 controller passes no `slice` | C (50 / 1) |
+| m6 no `release()` in `catch` | B6 (50 / 1) |
+
+**Repro, before → after** (JIT; before = main checkout, after = this worktree)
+
+| N, extra µs/fold | stream folds | longest run with no macrotask |
+|---|---|---|
+| 4 000, 0 | 4 000 → 4 000 | 2.5 → 3.0 ms (under 8 ms: the budget never trips) |
+| 4 000, 25 | 4 000 → 242 | 4 000 folds / 102.1 ms → 241 folds / 7.2 ms |
+| 100 000, 0 | 100 000 → 21 705 | 100 000 folds / 28.1 ms → 21 703 folds / 6.9 ms |
+
+Not run: the interpreter (`BUN_JSC_useJIT=0`, needs an approval).
+
+**Gate 0** (`90-perf-stream`, iPhone 17 Pro iOS 26.5, under `sim.lock`, released;
+runner `gate0.ts`; app key `5931980f1904`). No same-session `main` run: the baseline
+is s5's recorded branch run. The first attempt built the app and hit my 570 s
+timeout before the flow; the second ran it.
+
+| | s5 recorded | this branch |
+|---|---|---|
+| verdict | PERF PASS | PERF PASS |
+| jank / streaming fan lines | 0 / 4 | 0 / 4 |
+| `starts` | 1,1,1,1 | 1,1,1,1 |
+| settle ms | 705, 717, 710, 712 | 716, 735, 707, 707 |
+| panes `shell` / `tail` / `cells` | 3 / 1209 / 118 | 3 / 1233 / 118 |
+| `renders/s` | n/a | n/a |
+
+Settle's worst sample is 18 ms higher and `tail` 24 higher (s5's `main` side read
+1222). One run each: whether this is spread or the change is **unverified**. The
+output carries no `folds/s`.
+
+**Checks:** 3 touched files 51 pass, 0 fail; `bun test apps/mobile/test` 5987 pass,
+0 fail (before a format-only rewrite of `session-feed.test.ts`); `tsc -p apps/mobile`
+clean; `biome check` on the 6 changed files clean. Full `bun run check` not run (the
+orchestrator's). No protocol change.
+
+**Disk:** 3.6 GiB free after the gate. My build left
+`~/Library/Developer/Xcode/DerivedData/tentacle-akcqdinhpvikysgobrlegvnkmvrm`
+(7.1 GB, `WorkspacePath` = this worktree); deleting it was not approved.
 
 ## Review
 
