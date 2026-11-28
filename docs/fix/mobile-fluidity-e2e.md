@@ -319,3 +319,50 @@ is necessary-looking but NOT sufficient; do not merge as "44 fixed".**
   line asks for one; the orchestrator decides.
 
 ## Review
+
+*— claude-opus-5-5, 2026-11-28* (fresh context; same model as the planner, a
+different model from the executor)
+
+**Verdict: REQUEST-CHANGES.**
+
+Findings (HIGH/MEDIUM):
+1. **HIGH — 44 is not fixed.** The task's decisive test (Tests §4) is still red:
+   `--only 44-workflow-editor` fails at step 96 `perm-sheet` on the branch build
+   (Execution, run `1795859027849`). The executor's own probes disprove the plan's
+   load-bearing chain ("a render with the right values presents the sheet"). The
+   render has `wanted:["permission"]`, `actual:[]`, but the dep-keyed effects do
+   not run again. So `SessionScreen.tsx:480-489` is a correct, harmless change
+   that does not fix the bug. Implementation needs a new plan (root cause of the
+   skipped effect). The s3 attribution in Context was never bisected.
+2. **MEDIUM — the 44 tests don't pin the bug.** `session-front-wiring.test.ts`
+   pins the shape of the source (a selector), not the behaviour. The
+   `sheet-plan.test.ts` 44-sequence cases are green on `main` (Execution says so),
+   so they document the bug but don't guard against it. Neither would catch 44
+   coming back, as the still-red e2e shows. Once the real cause is known, add a
+   test that is red on today's tree.
+
+34 (harness) holds: `laptop-answerer.ts` drops withdrawn asks (abort → delete +
+`DISMISSED`), answers by `turnId`, and is registered before `send`
+(`seed.ts:419-421`) and released in `finally` (`:431`). Per Execution,
+e2e `10,34` is red on main and green on the branch. No §7 invariant is touched:
+the auto-answer lives only in the harness's laptop client, and the product
+broker/requester is unchanged.
+
+Gate (this pass): touched files 104 pass / 0 fail (3 files); `bun run lint`
+clean (2831 files); `bun run typecheck` clean. Full `bun run check` was not
+run here.
+
+Mutation: my own mutation script (`.tentacle/tmp/mobile-fluidity-e2e/rmut.sh`:
+turn-registration bypass, abort leaves pending, `workflowsTop` back to
+`rootRoutes`) was **blocked by the permission prompt and did not run**. Non-vacuity
+rests on the executor's M1–M4 (Evidence) and is not independently confirmed.
+
+Attacks tried: abort before or after registration, or after `answerAll` (the
+listener is removed; no double resolve). An ask with no `turnId` is not
+auto-answered (matches the plan). A released registration answers no late ask. A
+selector on a blurred screen gets the root stack (same navigator as `stackKey`).
+None found a defect beyond 1–2.
+
+Executor behaviour: honest. It stopped per §0 when the premise failed, kept
+debugging logs out of the diff, and reported 44 FAIL and 90 FAIL plainly instead
+of claiming done.
